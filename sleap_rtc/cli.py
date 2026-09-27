@@ -50,6 +50,10 @@ click.rich_click.COMMAND_GROUPS = {
             "commands": ["worker", "train", "track"],
         },
         {
+            "name": "Protocol v1 Worker (no signaling server)",
+            "commands": ["serve", "pair"],
+        },
+        {
             "name": "Utilities",
             "commands": ["tui", "status", "doctor", "credentials", "config"],
         },
@@ -2739,6 +2743,11 @@ def status():
     else:
         click.echo("  No API tokens saved")
 
+    # Protocol v1 worker (item 1.5/1.6 — pairing/jobs, no signaling server)
+    from sleap_rtc.protocol_v1.cli import print_status_section
+
+    print_status_section()
+
     click.echo("")
 
 
@@ -2961,6 +2970,12 @@ def doctor():
         click.echo(
             "  Use 'sleap-rtc config add-mount /path \"Label\"' to add data directories"
         )
+
+    # Protocol v1 worker (item 1.5/1.6 — pairing/jobs, no signaling server)
+    from sleap_rtc.protocol_v1.cli import print_doctor_section
+
+    if not print_doctor_section():
+        all_ok = False
 
     # Summary
     click.echo("")
@@ -3901,6 +3916,17 @@ def resolve_paths_deprecated(ctx, **kwargs):
         + "'sleap-rtc resolve-paths' is deprecated. Use 'sleap-rtc test resolve-paths' instead."
     )
     ctx.invoke(test_resolve_paths, **kwargs)
+
+
+# =============================================================================
+# Protocol v1 Worker Commands (items 1.5/1.6 — pairing/jobs, no signaling)
+# =============================================================================
+
+from sleap_rtc.protocol_v1.cli import pair as protocol_v1_pair
+from sleap_rtc.protocol_v1.cli import serve as protocol_v1_serve
+
+cli.add_command(protocol_v1_serve)
+cli.add_command(protocol_v1_pair)
 
 
 if __name__ == "__main__":
