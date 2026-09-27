@@ -8,14 +8,16 @@ requiring sleap-nn to be installed.
 """
 
 import asyncio
+import hashlib
 import sys
 import time
 
 import pytest
 
 from sleap_rtc.jobs.queue import JobQueue
-from sleap_rtc.jobs.spec import TrainJobSpec
+from sleap_rtc.jobs.spec import TrackJobSpec, TrainJobSpec
 from sleap_rtc.jobs.store import JobStore
+from sleap_rtc.protocol_v1.blobs import BlobIndex
 from sleap_rtc.protocol_v1.errors import JOB_NOT_FOUND, ProtocolError
 from sleap_rtc.protocol_v1.job_methods import JobMethods
 from sleap_rtc.protocol_v1.server import Connection, ProtocolV1Server
@@ -90,7 +92,7 @@ async def store(tmp_path):
         yield store
 
 
-def _make_methods(store, tmp_path, cmd, file_manager=None):
+def _make_methods(store, tmp_path, cmd, file_manager=None, blob_index=None):
     server = ProtocolV1Server(node_id="test-node")
     queue = JobQueue(max_concurrent=1)
     return JobMethods(
@@ -100,6 +102,7 @@ def _make_methods(store, tmp_path, cmd, file_manager=None):
         log_dir=tmp_path / "logs",
         file_manager=file_manager,
         command_builder=_FakeCommandBuilder(cmd),
+        blob_index=blob_index,
     )
 
 
@@ -147,6 +150,135 @@ class TestSubmitAndRunToCompletion:
             await methods.submit({"spec": {"type": "not-a-real-type"}}, conn=None)
 
         assert exc_info.value.code == "job.spec_invalid"
+
+
+class TestResultBlobs:
+    """Tests for registering a completed track job's output as a blob."""
+
+    def _track_spec(self, data_path):
+        return TrackJobSpec(data_path=str(data_path), model_paths=["/models/centroid"])
+
+    async def test_registers_the_blob_at_spec_output_path(self, store, tmp_path):
+        content = b"predicted labels"
+        output_path = tmp_path / "out.slp"
+        index = BlobIndex(tmp_path / "blobs.sqlite")
+        spec = TrackJobSpec(
+            data_path=str(tmp_path / "video.mp4"),
+            model_paths=["/models/centroid"],
+            output_path=str(output_path),
+        )
+        # Fake command: write the output file sleap-nn would have produced.
+        cmd = [
+            sys.executable,
+            "-c",
+            f"open({str(output_path)!r}, 'wb').write({content!r})",
+        ]
+        methods = _make_methods(store, tmp_path, cmd, blob_index=index)
+
+        result = await methods.submit({"spec": spec.to_dict()}, conn=None)
+        record = await _wait_for_terminal(methods, store, result["job_id"])
+
+        expected_sha256 = hashlib.sha256(content).hexdigest()
+        assert record.result == {
+            "blobs": {"predictions": {"sha256": expected_sha256, "size": len(content)}}
+        }
+        blob = await index.get(expected_sha256)
+        assert blob is not None
+        assert blob.path == str(output_path)
+        assert blob.size == len(content)
+
+        status = await methods.status({"job_id": result["job_id"]}, conn=None)
+        assert status["result"]["blobs"]["predictions"]["sha256"] == expected_sha256
+
+        events = await store.get_events_since(result["job_id"])
+        result_events = [e for e in events if e.topic == "job.result"]
+        assert len(result_events) == 1
+        assert (
+            result_events[0].data["blobs"]["predictions"]["sha256"] == expected_sha256
+        )
+
+    async def test_falls_back_to_the_captured_stdout_path(self, store, tmp_path):
+        content = b"captured-path predictions"
+        captured_path = tmp_path / "captured.slp"
+        index = BlobIndex(tmp_path / "blobs.sqlite")
+        spec = self._track_spec(tmp_path / "video.mp4")  # no output_path set
+        cmd = [
+            sys.executable,
+            "-c",
+            f"open({str(captured_path)!r}, 'wb').write({content!r}); "
+            f"print('Predictions output path: {captured_path}')",
+        ]
+        methods = _make_methods(store, tmp_path, cmd, blob_index=index)
+
+        result = await methods.submit({"spec": spec.to_dict()}, conn=None)
+        await _wait_for_terminal(methods, store, result["job_id"])
+
+        expected_sha256 = hashlib.sha256(content).hexdigest()
+        blob = await index.get(expected_sha256)
+        assert blob is not None
+        assert blob.path == str(captured_path)
+
+    async def test_falls_back_to_the_naming_convention(self, store, tmp_path):
+        data_path = tmp_path / "video.slp"
+        content = b"convention-fallback predictions"
+        convention_path = tmp_path / "video.predictions.slp"
+        index = BlobIndex(tmp_path / "blobs.sqlite")
+        spec = self._track_spec(data_path)  # no output_path, nothing captured
+        cmd = [
+            sys.executable,
+            "-c",
+            f"open({str(convention_path)!r}, 'wb').write({content!r})",
+        ]
+        methods = _make_methods(store, tmp_path, cmd, blob_index=index)
+
+        result = await methods.submit({"spec": spec.to_dict()}, conn=None)
+        await _wait_for_terminal(methods, store, result["job_id"])
+
+        expected_sha256 = hashlib.sha256(content).hexdigest()
+        blob = await index.get(expected_sha256)
+        assert blob is not None
+        assert blob.path == str(convention_path)
+
+    async def test_no_blobs_when_the_output_file_never_materializes(
+        self, store, tmp_path
+    ):
+        index = BlobIndex(tmp_path / "blobs.sqlite")
+        spec = self._track_spec(tmp_path / "video.mp4")
+        methods = _make_methods(
+            store, tmp_path, [sys.executable, "-c", "pass"], blob_index=index
+        )
+
+        result = await methods.submit({"spec": spec.to_dict()}, conn=None)
+        record = await _wait_for_terminal(methods, store, result["job_id"])
+
+        assert record.state == "completed"
+        assert record.result == {"blobs": {}}
+
+    async def test_no_blobs_without_a_blob_index_configured(self, store, tmp_path):
+        output_path = tmp_path / "out.slp"
+        spec = TrackJobSpec(
+            data_path=str(tmp_path / "video.mp4"),
+            model_paths=["/models/centroid"],
+            output_path=str(output_path),
+        )
+        cmd = [sys.executable, "-c", f"open({str(output_path)!r}, 'wb').write(b'x')"]
+        methods = _make_methods(store, tmp_path, cmd)  # no blob_index
+
+        result = await methods.submit({"spec": spec.to_dict()}, conn=None)
+        record = await _wait_for_terminal(methods, store, result["job_id"])
+
+        assert record.result == {"blobs": {}}
+
+    async def test_train_jobs_never_register_a_result_blob(self, store, tmp_path, spec):
+        index = BlobIndex(tmp_path / "blobs.sqlite")
+        methods = _make_methods(
+            store, tmp_path, [sys.executable, "-c", "pass"], blob_index=index
+        )
+
+        result = await methods.submit({"spec": spec.to_dict()}, conn=None)
+        record = await _wait_for_terminal(methods, store, result["job_id"])
+
+        assert record.result == {"blobs": {}}
 
 
 class TestStatusAndList:

@@ -40,6 +40,29 @@ class TestHello:
         assert d["type"] == "hello"
         assert d["v"] == 1
 
+    def test_blob_port_round_trips_when_present(self):
+        hello = Hello(
+            proto={"min": 1, "max": 1}, agent={}, node_id="n", nonce="x", blob_port=9632
+        )
+
+        parsed = parse_envelope(hello.to_json())
+
+        assert parsed.blob_port == 9632
+
+    def test_blob_port_omitted_from_the_wire_shape_when_none(self):
+        hello = Hello(proto={"min": 1, "max": 1}, agent={}, node_id="n", nonce="x")
+
+        d = hello.to_dict()
+
+        assert "blob_port" not in d
+
+    def test_blob_port_defaults_to_none_when_absent_on_the_wire(self):
+        hello = Hello(proto={"min": 1, "max": 1}, agent={}, node_id="n", nonce="x")
+
+        parsed = parse_envelope(hello.to_json())
+
+        assert parsed.blob_port is None
+
 
 class TestReqRes:
     """Tests for `req`/`res` correlation."""

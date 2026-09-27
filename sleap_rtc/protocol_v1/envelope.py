@@ -33,6 +33,13 @@ class Hello:
             in an `auth.prove` request (see protocol spec §3.3) — not
             verified in this PR; see `sleap_rtc.protocol_v1.server` module
             docstring for what's deferred to item 1.5.
+        blob_port: The worker's blob-serving HTTP port (spec §6.3), on the
+            same host the client dialed for this WS connection — e.g.
+            `GET http://<that host>:<blob_port>/blobs/<sha256>`. Additive
+            per §2.4 (new optional fields don't bump `v`); `None` on a
+            worker not running the blob HTTP server, or when sent by a
+            client (only workers serve blobs today). Only meaningful in the
+            worker's own `hello`, never the client's.
         v: Envelope version.
     """
 
@@ -40,11 +47,12 @@ class Hello:
     agent: Dict[str, str]
     node_id: str
     nonce: str
+    blob_port: Optional[int] = None
     v: int = PROTOCOL_VERSION
 
     def to_dict(self) -> dict:
         """Serialize to the wire dict shape."""
-        return {
+        d = {
             "v": self.v,
             "type": "hello",
             "proto": self.proto,
@@ -52,6 +60,9 @@ class Hello:
             "node_id": self.node_id,
             "nonce": self.nonce,
         }
+        if self.blob_port is not None:
+            d["blob_port"] = self.blob_port
+        return d
 
     def to_json(self) -> str:
         """Serialize to a JSON string."""
@@ -66,6 +77,7 @@ class Hello:
             agent=d["agent"],
             node_id=d["node_id"],
             nonce=d["nonce"],
+            blob_port=d.get("blob_port"),
         )
 
 

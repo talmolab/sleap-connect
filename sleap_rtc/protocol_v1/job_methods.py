@@ -29,11 +29,18 @@ from sleap_rtc.jobs.process import (
     spawn_detached,
 )
 from sleap_rtc.jobs.queue import JobQueue
-from sleap_rtc.jobs.spec import parse_job_spec
+from sleap_rtc.jobs.spec import TrackJobSpec, parse_job_spec
 from sleap_rtc.jobs.store import TERMINAL_STATES, JobRecord, JobStore
+from sleap_rtc.protocol_v1.blobs import BlobIndex, hash_file
 from sleap_rtc.protocol_v1.envelope import Event
 from sleap_rtc.protocol_v1.errors import JOB_NOT_FOUND, JOB_SPEC_INVALID, ProtocolError
 from sleap_rtc.protocol_v1.server import Connection, ProtocolV1Server
+
+# The line sleap-nn's track CLI prints on completion, e.g.
+# "Predictions output path: /data/video.predictions.slp" — mirrors the
+# legacy worker's job_executor.py capture (grep for it there for the
+# original, since-verified-in-production wording this must keep matching).
+_OUTPUT_PATH_MARKER = "Predictions output path:"
 
 # How often to poll a job's log file for new lines. Polling (rather than an
 # OS-level file-watch) is deliberate: it's portable across platforms with no
@@ -58,6 +65,7 @@ class JobMethods:
         log_dir: Path,
         file_manager: Optional[object] = None,
         command_builder: Optional[object] = None,
+        blob_index: Optional[BlobIndex] = None,
     ):
         """Wire up and register the method handlers.
 
@@ -74,12 +82,18 @@ class JobMethods:
                 ``sleap-nn`` invocations); tests inject a fake one so they
                 can exercise the full submit → spawn → tail → complete flow
                 with a trivial command instead of requiring sleap-nn.
+            blob_index: Where to register a completed track job's output
+                file so it becomes fetchable as a `job.result` blob (item
+                1.10). Omit to leave `job.result` reporting `{blobs: {}}`
+                like before — e.g. a worker not running the blob HTTP
+                server has nowhere for a client to fetch the bytes from.
         """
         self.server = server
         self.store = store
         self.queue = queue
         self.log_dir = Path(log_dir)
         self.file_manager = file_manager
+        self.blob_index = blob_index
         self._builder = (
             command_builder if command_builder is not None else CommandBuilder()
         )
@@ -155,9 +169,12 @@ class JobMethods:
                 await tail_task  # one final read to flush lines written right before exit
 
                 if returncode == 0:
-                    await self.store.update_state(job_id, "completed", result={})
+                    blobs = await self._register_result_blobs(job_id, spec, log_path)
+                    await self.store.update_state(
+                        job_id, "completed", result={"blobs": blobs}
+                    )
                     await self._emit(job_id, "job.status", {"state": "completed"})
-                    await self._emit(job_id, "job.result", {"blobs": {}})
+                    await self._emit(job_id, "job.result", {"blobs": blobs})
                 else:
                     detail = f"exit code {returncode}"
                     await self.store.update_state(job_id, "failed", error=detail)
@@ -196,6 +213,73 @@ class JobMethods:
 
             if process.returncode is not None:
                 return
+
+    async def _register_result_blobs(self, job_id: str, spec, log_path: Path) -> dict:
+        """Register a completed track job's output file as a result blob.
+
+        Only track (inference) jobs produce a result worth fetching back —
+        a training job's "result" is a checkpoint left in its own run
+        directory, which the client doesn't need streamed to it the same
+        way (see the module's connectStore-side counterpart notes). Never
+        raises: a hashing/registration failure only means the client can't
+        fetch this job's blob, not that the job itself failed — it already
+        exited 0 by the time this runs.
+
+        Returns:
+            `{"predictions": {"sha256": ..., "size": ...}}` if a result
+            file was found and registered, else `{}` — the same shape
+            `job.result`'s `blobs` field has always had (spec §6.4).
+        """
+        if not isinstance(spec, TrackJobSpec) or self.blob_index is None:
+            return {}
+        try:
+            output_path = self._resolve_track_output_path(spec, log_path)
+            if output_path is None or not output_path.is_file():
+                return {}
+            sha256, size = await hash_file(output_path)
+            await self.blob_index.register(sha256, str(output_path), size)
+            return {"predictions": {"sha256": sha256, "size": size}}
+        except Exception:
+            logging.exception(
+                f"[jobs] Job {job_id} completed but its result blob could not "
+                "be registered — job.result will report no blobs"
+            )
+            return {}
+
+    @staticmethod
+    def _resolve_track_output_path(
+        spec: TrackJobSpec, log_path: Path
+    ) -> Optional[Path]:
+        """Find a completed track job's output file.
+
+        Priority (mirrors the legacy `job_executor.py`'s proven behavior —
+        see its own docstring for the original wording this must keep
+        matching): (1) `spec.output_path`, if the caller set one explicitly;
+        (2) the path sleap-nn itself printed on completion ("Predictions
+        output path: ..."), scraped from the job's persisted log file rather
+        than a live stdout hook, since protocol v1 already writes the whole
+        log to disk; (3) the naming convention sleap-nn falls back to when
+        neither of the above applies.
+        """
+        if spec.output_path is not None:
+            return Path(spec.output_path)
+
+        captured = JobMethods._captured_output_path_from_log(log_path)
+        if captured is not None:
+            return Path(captured)
+
+        base = Path(spec.data_path)
+        return base.with_suffix(".predictions" + base.suffix)
+
+    @staticmethod
+    def _captured_output_path_from_log(log_path: Path) -> Optional[str]:
+        if not log_path.exists():
+            return None
+        with open(log_path, "r", errors="replace") as f:
+            for line in f:
+                if _OUTPUT_PATH_MARKER in line:
+                    return line.split(_OUTPUT_PATH_MARKER, 1)[1].strip()
+        return None
 
     async def _emit(self, job_id: str, topic: str, data: dict) -> None:
         seq = await self.store.append_event(job_id, topic, data)

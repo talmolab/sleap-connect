@@ -118,6 +118,7 @@ class ProtocolV1Server:
         proto_max: int = PROTOCOL_VERSION,
         agent_version: str = "0.0.0",
         agent_platform: str = "unknown",
+        blob_port: Optional[int] = None,
     ):
         """Initialize the server (does not start listening — see `serve`).
 
@@ -129,12 +130,16 @@ class ProtocolV1Server:
             proto_max: Highest protocol version this server accepts.
             agent_version: Reported in `hello.agent.version`.
             agent_platform: Reported in `hello.agent.platform`.
+            blob_port: Reported in `hello.blob_port` (spec §6.3) if this
+                worker is also running the blob HTTP server. `None` if not
+                (`job.result` blobs won't be fetchable either way).
         """
         self.node_id = node_id
         self.proto_min = proto_min
         self.proto_max = proto_max
         self.agent_version = agent_version
         self.agent_platform = agent_platform
+        self.blob_port = blob_port
         self.events = EventBus()
         self._methods: Dict[str, MethodHandler] = {}
 
@@ -221,6 +226,7 @@ class ProtocolV1Server:
             },
             node_id=self.node_id,
             nonce=conn.own_nonce,
+            blob_port=self.blob_port,
         )
         await ws.send(our_hello.to_json())
         return True
