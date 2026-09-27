@@ -397,6 +397,34 @@ class TestCancel:
         assert record.state == "failed"
         assert "not running" in record.error
 
+    async def test_cancel_handles_a_pid_recorded_without_a_process_started_at(
+        self, store, tmp_path, spec
+    ):
+        """`set_process_info` always writes `pid` and `process_started_at`
+        together, so this combination shouldn't occur via any real code
+        path — but `cancel`'s liveness guard must not assume that. Without
+        also checking `process_started_at is not None`, `is_alive` would be
+        called with `None` and raise `TypeError` from
+        `abs(actual_started_at - started_at)`, unlike `reattach_all`'s
+        equivalent guard, which already checks both.
+        """
+        import os
+
+        methods = _make_methods(store, tmp_path, [sys.executable, "-c", "pass"])
+        job = await store.create_job("job-partial", spec)
+        await store.update_state(job.job_id, "running")
+        # Simulate the otherwise-unreachable inconsistency directly,
+        # bypassing set_process_info's atomic pid+process_started_at write.
+        await store._conn.execute(
+            "UPDATE jobs SET pid = ? WHERE job_id = ?", (os.getpid(), job.job_id)
+        )
+        await store._conn.commit()
+
+        await methods.cancel({"job_id": job.job_id, "mode": "cancel"}, conn=None)
+
+        record = await store.get_job(job.job_id)
+        assert record.state == "failed"
+
 
 class TestSubscribe:
     """Tests for jobs.subscribe — backlog replay plus live delivery."""

@@ -313,7 +313,11 @@ class JobMethods:
         if record.state in TERMINAL_STATES:
             return {}
 
-        if record.pid is not None and is_alive(record.pid, record.process_started_at):
+        if (
+            record.pid is not None
+            and record.process_started_at is not None
+            and is_alive(record.pid, record.process_started_at)
+        ):
             if mode == "stop":
                 send_stop_signal(record.pid)
             else:

@@ -80,6 +80,13 @@ def _make_handler(blob_index: BlobIndex) -> type:
                     # "bytes=-N" — the last N bytes.
                     start = max(0, file_size - int(end_str))
                     end = file_size - 1
+                else:
+                    # "bytes=-" — neither side given, invalid per RFC 7233.
+                    self.send_error(
+                        HTTPStatus.REQUESTED_RANGE_NOT_SATISFIABLE,
+                        "malformed Range header",
+                    )
+                    return
                 status = HTTPStatus.PARTIAL_CONTENT
 
             if file_size == 0:

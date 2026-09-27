@@ -236,3 +236,69 @@ class TestReattachAll:
         outcomes = await reattach_all(store)
 
         assert outcomes == {"job-1": "marked_failed"}
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX-only process groups/signals")
+class TestSendCancelSignalTaskTracking:
+    """`send_cancel_signal`'s SIGKILL-escalation task must be kept alive by a
+    strong reference. asyncio only holds a *weak* reference to a task once
+    nothing else does — an untracked fire-and-forget task can be garbage
+    collected mid-`sleep()`, silently dropping the SIGKILL escalation.
+    """
+
+    async def test_escalation_survives_gc_and_still_kills_the_process(
+        self, monkeypatch
+    ):
+        import gc
+
+        import sleap_rtc.jobs.process as process_module
+
+        monkeypatch.setattr(process_module, "_CANCEL_GRACE_SECS", 0.05)
+
+        # Ignores SIGTERM (so send_cancel_signal's initial signal doesn't
+        # end it) and sleeps far longer than this test's timeout, so the
+        # only thing that can end it is the SIGKILL escalation actually
+        # firing. Prints once the handler is installed so the test can wait
+        # for that instead of racing send_cancel_signal's SIGTERM against
+        # the child's own startup (which would otherwise nondeterministically
+        # kill it via the default SIGTERM handler before the ignore handler
+        # is even in place).
+        proc = await asyncio.create_subprocess_exec(
+            sys.executable,
+            "-c",
+            "import signal, time, sys; "
+            "signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+            "print('ready', flush=True); "
+            "time.sleep(30)",
+            start_new_session=True,
+            stdout=asyncio.subprocess.PIPE,
+        )
+        try:
+            await asyncio.wait_for(proc.stdout.readline(), timeout=3.0)
+
+            assert len(process_module._background_tasks) == 0
+
+            process_module.send_cancel_signal(proc.pid)
+
+            assert len(process_module._background_tasks) == 1
+
+            # The exact failure mode this test guards against: forcing a GC
+            # pass right after scheduling the escalation task, before it's
+            # had a chance to run. Without a strong reference, this can
+            # collect the task outright.
+            gc.collect()
+
+            await asyncio.wait_for(proc.wait(), timeout=3.0)
+            assert proc.returncode is not None
+        finally:
+            if proc.returncode is None:
+                proc.kill()
+                await proc.wait()
+
+        # The done-callback that discards the task runs on the loop's next
+        # iteration, not synchronously the instant the coroutine returns —
+        # give it a moment.
+        await asyncio.sleep(0.05)
+
+        # Cleaned up once it completes — not a permanent leak either.
+        assert len(process_module._background_tasks) == 0
