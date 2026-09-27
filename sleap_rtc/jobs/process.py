@@ -15,12 +15,23 @@ crash mid-run shouldn't kill the run too). This module provides:
 - `reattach_all`: called once at worker startup, before accepting new jobs.
   Reconciles the job store's belief ("this job is running") against reality
   (is its subprocess actually still alive?).
+- `send_stop_signal` / `send_cancel_signal`: graceful vs. hard job
+  termination, matching the exact signal/process-group convention already
+  established in `job_executor.py` (SIGINT for graceful stop, SIGTERM
+  escalating to SIGKILL for hard cancel, `os.killpg` so distributed-worker
+  child processes exit too, Windows fallback to `terminate()`/`kill()`) —
+  reimplemented here with `asyncio` escalation instead of a thread, to match
+  the rest of this module.
 
 Does not touch `job_coordinator.py` / `job_executor.py` — wiring this into
 actual job submission is a follow-up change.
 """
 
+import asyncio
 import logging
+import os
+import signal
+import sys
 from pathlib import Path
 from typing import Dict, Optional, Sequence, Union
 
@@ -29,6 +40,10 @@ from asyncio import create_subprocess_exec
 from asyncio.subprocess import STDOUT, Process
 
 from sleap_rtc.jobs.store import JobStore
+
+# Grace period after SIGTERM before escalating to SIGKILL — matches
+# job_executor.py's `_CANCEL_GRACE_SECS`.
+_CANCEL_GRACE_SECS = 5
 
 # How much clock skew to tolerate when comparing a process's recorded start
 # time against its live-queried one. `psutil.Process.create_time()` has
@@ -193,3 +208,65 @@ async def reattach_all(store: JobStore) -> Dict[str, str]:
         outcomes[record.job_id] = "marked_failed"
 
     return outcomes
+
+
+def send_stop_signal(pid: int) -> None:
+    """Ask a job's process group to stop gracefully (SIGINT; terminate() on Windows).
+
+    Mirrors `job_executor.py`'s `stop_running_job` exactly — same signal
+    choice, same `os.killpg` (so distributed-worker child processes exit
+    alongside the main one, allowing sleap-nn to save a checkpoint), same
+    Windows fallback.
+
+    Args:
+        pid: PID of the job's subprocess (the process group leader, since
+            it was spawned with `start_new_session=True`).
+    """
+    try:
+        if sys.platform == "win32":
+            psutil.Process(pid).terminate()
+        else:
+            pgid = os.getpgid(pid)
+            logging.info(f"Sending SIGINT to process group {pgid} (graceful stop)")
+            os.killpg(pgid, signal.SIGINT)
+    except (ProcessLookupError, psutil.NoSuchProcess):
+        pass
+
+
+def send_cancel_signal(pid: int) -> None:
+    """Hard-cancel a job's process group (SIGTERM, escalating to SIGKILL).
+
+    Mirrors `job_executor.py`'s `cancel_running_job`, with the escalation
+    delay implemented as an `asyncio` task instead of a `threading.Thread`,
+    to match the rest of this module. Must be called from a running event
+    loop.
+
+    Args:
+        pid: PID of the job's subprocess (the process group leader).
+    """
+    try:
+        if sys.platform == "win32":
+            psutil.Process(pid).kill()
+            return
+
+        pgid = os.getpgid(pid)
+        logging.info(f"Sending SIGTERM to process group {pgid} (hard cancel)")
+        os.killpg(pgid, signal.SIGTERM)
+        asyncio.create_task(_escalate_to_sigkill(pid))
+    except (ProcessLookupError, psutil.NoSuchProcess):
+        pass
+
+
+async def _escalate_to_sigkill(pid: int) -> None:
+    await asyncio.sleep(_CANCEL_GRACE_SECS)
+    try:
+        if not psutil.pid_exists(pid):
+            return
+        pgid = os.getpgid(pid)
+        logging.warning(
+            f"Process group {pgid} did not exit after SIGTERM "
+            f"({_CANCEL_GRACE_SECS}s), escalating to SIGKILL"
+        )
+        os.killpg(pgid, signal.SIGKILL)
+    except (ProcessLookupError, psutil.NoSuchProcess):
+        pass
