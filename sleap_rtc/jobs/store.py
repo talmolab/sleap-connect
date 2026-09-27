@@ -44,7 +44,10 @@ CREATE TABLE IF NOT EXISTS jobs (
     created_at REAL NOT NULL,
     updated_at REAL NOT NULL,
     result_json TEXT,
-    error TEXT
+    error TEXT,
+    pid INTEGER,
+    process_started_at REAL,
+    log_path TEXT
 );
 
 CREATE TABLE IF NOT EXISTS job_events (
@@ -75,6 +78,17 @@ class JobRecord:
         updated_at: Unix timestamp of the last state change.
         result: Terminal result payload (e.g. blob refs), if any.
         error: Terminal error message, if any.
+        pid: PID of the job's detached subprocess, if it has been spawned.
+        process_started_at: The subprocess's own start time (from the OS,
+            not this record's created_at) — recorded alongside `pid` so a
+            later liveness check can guard against PID reuse: a PID match
+            with a different start time means it's a different process that
+            happens to have recycled the same PID, not the one we spawned.
+        log_path: Path to the subprocess's redirected stdout/stderr log file.
+            Logging to a file (rather than an in-process pipe) is what makes
+            reattachment possible — a pipe's read end dies with whichever
+            process originally spawned the child, but a file on disk can be
+            tailed by a totally different (e.g. post-restart) process.
     """
 
     job_id: str
@@ -84,6 +98,9 @@ class JobRecord:
     updated_at: float
     result: Optional[dict] = None
     error: Optional[str] = None
+    pid: Optional[int] = None
+    process_started_at: Optional[float] = None
+    log_path: Optional[str] = None
 
 
 @dataclass
@@ -267,6 +284,46 @@ class JobStore:
         assert record is not None
         return record
 
+    async def set_process_info(
+        self, job_id: str, pid: int, process_started_at: float, log_path: str
+    ) -> JobRecord:
+        """Record the detached subprocess spawned for a job.
+
+        Call this immediately after spawning, before awaiting the process —
+        if the worker crashes before this lands, `reattach_all` has nothing
+        to find and the job is correctly treated as lost, matching reality.
+
+        Args:
+            job_id: The job identifier. Must already exist.
+            pid: PID of the spawned subprocess.
+            process_started_at: The subprocess's own start time, as reported
+                by the OS (not `time.time()` at spawn) — see `JobRecord.
+                process_started_at` for why this matters.
+            log_path: Path to the subprocess's redirected stdout/stderr log.
+
+        Returns:
+            The updated JobRecord.
+
+        Raises:
+            JobStoreError: If the job doesn't exist.
+        """
+        conn = self._require_conn()
+        cursor = await conn.execute(
+            """
+            UPDATE jobs
+            SET pid = ?, process_started_at = ?, log_path = ?, updated_at = ?
+            WHERE job_id = ?
+            """,
+            (pid, process_started_at, log_path, time.time(), job_id),
+        )
+        await conn.commit()
+        if cursor.rowcount == 0:
+            raise JobStoreError(f"No such job: {job_id!r}")
+
+        record = await self.get_job(job_id)
+        assert record is not None
+        return record
+
     async def append_event(self, job_id: str, topic: str, data: dict) -> int:
         """Append an event to a job's durable event log.
 
@@ -362,4 +419,7 @@ class JobStore:
             updated_at=row["updated_at"],
             result=json.loads(row["result_json"]) if row["result_json"] else None,
             error=row["error"],
+            pid=row["pid"],
+            process_started_at=row["process_started_at"],
+            log_path=row["log_path"],
         )
