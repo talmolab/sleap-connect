@@ -280,6 +280,38 @@ class TestResultBlobs:
 
         assert record.result == {"blobs": {}}
 
+    async def test_job_result_is_emitted_before_job_status_completed(
+        self, store, tmp_path
+    ):
+        # A client that resolves its "wait for this job" promise as soon as
+        # it sees the terminal job.status (the natural, simplest thing for
+        # it to do — see sleap-app's connectStore) must already have seen
+        # job.result by then, or it has no further chance to: the instant a
+        # client considers a job over it typically unsubscribes, so a
+        # job.result arriving a message later would silently go nowhere.
+        output_path = tmp_path / "out.slp"
+        index = BlobIndex(tmp_path / "blobs.sqlite")
+        spec = TrackJobSpec(
+            data_path=str(tmp_path / "video.mp4"),
+            model_paths=["/models/centroid"],
+            output_path=str(output_path),
+        )
+        cmd = [sys.executable, "-c", f"open({str(output_path)!r}, 'wb').write(b'x')"]
+        methods = _make_methods(store, tmp_path, cmd, blob_index=index)
+
+        result = await methods.submit({"spec": spec.to_dict()}, conn=None)
+        await _wait_for_terminal(methods, store, result["job_id"])
+
+        events = await store.get_events_since(result["job_id"])
+        topics_in_order = [e.topic for e in events]
+        result_idx = topics_in_order.index("job.result")
+        completed_idx = next(
+            i
+            for i, e in enumerate(events)
+            if e.topic == "job.status" and e.data.get("state") == "completed"
+        )
+        assert result_idx < completed_idx
+
 
 class TestStatusAndList:
     """Tests for jobs.status / jobs.list."""

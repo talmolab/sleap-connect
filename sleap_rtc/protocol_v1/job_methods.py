@@ -173,8 +173,16 @@ class JobMethods:
                     await self.store.update_state(
                         job_id, "completed", result={"blobs": blobs}
                     )
-                    await self._emit(job_id, "job.status", {"state": "completed"})
+                    # job.result BEFORE job.status: completed — a client that
+                    # resolves its "wait for this job" promise as soon as it
+                    # sees the terminal status (the natural, simplest thing
+                    # for it to do) must already have the result in hand at
+                    # that point, or it has no further chance to see it: the
+                    # instant a client considers a job over, it typically
+                    # unsubscribes, so a job.result arriving a message later
+                    # would silently go nowhere.
                     await self._emit(job_id, "job.result", {"blobs": blobs})
+                    await self._emit(job_id, "job.status", {"state": "completed"})
                 else:
                     detail = f"exit code {returncode}"
                     await self.store.update_state(job_id, "failed", error=detail)
