@@ -5,13 +5,14 @@ directly (no signaling server, no rooms) and a client dials it over
 localhost/LAN/Tailscale, per the architecture conclusion in the sleap-app
 planning docs.
 
-**Auth is intentionally NOT implemented here.** Every `hello` currently
-succeeds as long as protocol versions overlap, and every connection is
-implicitly trusted — there is no `auth.prove` challenge and no trusted-
-client allowlist yet. That's item 1.5 (pairing/trust) per the Stage 1 plan;
-this PR wires the envelope and method-dispatch mechanics only, so 1.5 can
-bolt the security layer onto the same connection lifecycle without
-reworking it. Do not point this at an untrusted network yet.
+**Auth gating lives here; the actual pair.claim/auth.prove logic lives in
+`sleap_rtc.protocol_v1.auth`** (item 1.5). This module only enforces that no
+method other than `pair.claim`/`auth.prove` runs on an unauthenticated
+connection, and records what a `hello` handshake needs for `auth.prove` to
+later verify a signature (the nonce *we* sent, and the node_id *the client*
+claimed). Only the client-proves-to-worker direction is implemented — see
+`auth.py`'s module docstring for why the reverse direction is deferred. Do
+not point this at an untrusted network without pairing configured.
 """
 
 import logging
@@ -29,13 +30,22 @@ from sleap_rtc.protocol_v1.envelope import (
     Res,
     parse_envelope,
 )
-from sleap_rtc.protocol_v1.errors import INTERNAL, PROTO_UNKNOWN_METHOD, ProtocolError
+from sleap_rtc.protocol_v1.errors import (
+    AUTH_REQUIRED,
+    INTERNAL,
+    PROTO_UNKNOWN_METHOD,
+    ProtocolError,
+)
 
 AGENT_NAME = "sleap-connect-worker"
 
+# The only methods an unauthenticated connection may call — everything else
+# gets AUTH_REQUIRED. See protocol spec §3.3.
+_UNAUTHENTICATED_METHODS = frozenset({"pair.claim", "auth.prove"})
+
 
 class Connection:
-    """Per-connection state: the websocket, and its live event subscriptions."""
+    """Per-connection state: the websocket, auth status, and event subscriptions."""
 
     def __init__(self, ws: ServerConnection):
         """Wrap a websocket connection.
@@ -45,6 +55,16 @@ class Connection:
         """
         self.ws = ws
         self.subscribed_job_ids: Set[str] = set()
+        # Populated by _do_hello; used by auth.py's auth_prove to verify a
+        # signature against the nonce *we* sent and the node_id *the peer*
+        # claimed in *its* hello.
+        self.own_nonce: Optional[str] = None
+        self.peer_node_id: Optional[str] = None
+        self.peer_agent: Optional[dict] = None
+        # Set True by pair.claim or auth.prove (sleap_rtc.protocol_v1.auth).
+        # Until then, only those two methods may be dispatched — see
+        # ProtocolV1Server._dispatch.
+        self.authenticated: bool = False
 
     async def send_event(self, event: Event) -> None:
         """Push an `event` frame to this connection."""
@@ -143,20 +163,29 @@ class ProtocolV1Server:
     async def _handle_connection(self, ws: ServerConnection) -> None:
         conn = Connection(ws)
         try:
-            if not await self._do_hello(ws):
+            if not await self._do_hello(conn):
                 return
             async for raw in ws:
                 await self._handle_frame(conn, raw)
         finally:
             self.events.unsubscribe_all(conn)
 
-    async def _do_hello(self, ws: ServerConnection) -> bool:
+    async def _do_hello(self, conn: Connection) -> bool:
         """Exchange `hello` frames and check protocol-version compatibility.
+
+        Also records, on `conn`, what `auth.prove` will later need: the
+        node_id the peer claimed (`conn.peer_node_id`) and the nonce *we*
+        sent (`conn.own_nonce`) — `auth.prove` verifies the peer's signature
+        of that nonce against that node_id.
+
+        Args:
+            conn: The connection being established.
 
         Returns:
             True if the handshake succeeded and the connection should
             proceed to normal message handling; False if it was closed.
         """
+        ws = conn.ws
         raw = await ws.recv()
         try:
             frame = parse_envelope(raw)
@@ -179,6 +208,10 @@ class ProtocolV1Server:
             await ws.close(code=1002, reason="proto.mismatch")
             return False
 
+        conn.peer_node_id = frame.node_id
+        conn.peer_agent = frame.agent
+
+        conn.own_nonce = secrets.token_urlsafe(16)
         our_hello = Hello(
             proto={"min": self.proto_min, "max": self.proto_max},
             agent={
@@ -187,7 +220,7 @@ class ProtocolV1Server:
                 "platform": self.agent_platform,
             },
             node_id=self.node_id,
-            nonce=secrets.token_urlsafe(16),
+            nonce=conn.own_nonce,
         )
         await ws.send(our_hello.to_json())
         return True
@@ -213,6 +246,9 @@ class ProtocolV1Server:
         await conn.ws.send(res.to_json())
 
     async def _dispatch(self, req: Req, conn: Connection) -> Res:
+        if req.method not in _UNAUTHENTICATED_METHODS and not conn.authenticated:
+            return Res.err(req.id, AUTH_REQUIRED, "Connection is not authenticated")
+
         handler = self._methods.get(req.method)
         if handler is None:
             return Res.err(
