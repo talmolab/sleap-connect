@@ -11,6 +11,7 @@ classifiers = [
 ]
 dependencies = [
     "aiortc",
+    "aiosqlite>=0.20.0",
     "loguru",
     "websockets",
     "requests",
