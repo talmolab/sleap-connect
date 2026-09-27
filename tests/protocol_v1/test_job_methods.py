@@ -214,6 +214,25 @@ class TestCancel:
         # terminates the job.
         await _wait_for_terminal(methods, store, job_id, timeout=5)
 
+    async def test_cancel_corrects_a_stuck_running_job_with_no_live_process(
+        self, store, tmp_path, spec
+    ):
+        """If the store shows "running" but no process is actually alive for
+        it (e.g. the worker restarted without a reattach_all pass), cancel
+        must correct the store to "failed" instead of silently doing
+        nothing — there's no process to signal, but the job shouldn't be
+        stuck "running" forever with no way to resolve it.
+        """
+        methods = _make_methods(store, tmp_path, [sys.executable, "-c", "pass"])
+        job = await store.create_job("job-stuck", spec)
+        await store.update_state(job.job_id, "running")  # no pid ever recorded
+
+        await methods.cancel({"job_id": job.job_id, "mode": "cancel"}, conn=None)
+
+        record = await store.get_job(job.job_id)
+        assert record.state == "failed"
+        assert "not running" in record.error
+
 
 class TestSubscribe:
     """Tests for jobs.subscribe — backlog replay plus live delivery."""

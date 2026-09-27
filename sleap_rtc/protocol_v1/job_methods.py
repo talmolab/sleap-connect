@@ -30,7 +30,7 @@ from sleap_rtc.jobs.process import (
 )
 from sleap_rtc.jobs.queue import JobQueue
 from sleap_rtc.jobs.spec import parse_job_spec
-from sleap_rtc.jobs.store import JobRecord, JobStore
+from sleap_rtc.jobs.store import TERMINAL_STATES, JobRecord, JobStore
 from sleap_rtc.protocol_v1.envelope import Event
 from sleap_rtc.protocol_v1.errors import JOB_NOT_FOUND, JOB_SPEC_INVALID, ProtocolError
 from sleap_rtc.protocol_v1.server import Connection, ProtocolV1Server
@@ -204,16 +204,34 @@ class JobMethods:
         )
 
     async def cancel(self, params: dict, conn: Connection) -> dict:
-        """Handle `jobs.cancel` — graceful stop or hard cancel of a running job."""
+        """Handle `jobs.cancel` — graceful stop or hard cancel of a running job.
+
+        If the job is already in a terminal state, this is a no-op. If the
+        store still shows it as active but its recorded process isn't
+        actually alive (or was never recorded) — the worker restarted
+        without a `reattach_all` pass, or some other inconsistency — this
+        corrects the store to "failed" instead of silently doing nothing
+        and leaving the job stuck "running" forever with no way to cancel
+        it (there's nothing left to send a signal to).
+        """
         job_id = params["job_id"]
         mode = params.get("mode", "cancel")
         record = await self._get_job_or_raise(job_id)
+
+        if record.state in TERMINAL_STATES:
+            return {}
 
         if record.pid is not None and is_alive(record.pid, record.process_started_at):
             if mode == "stop":
                 send_stop_signal(record.pid)
             else:
                 send_cancel_signal(record.pid)
+        else:
+            detail = "job's subprocess was not running when cancel was requested"
+            await self.store.update_state(job_id, "failed", error=detail)
+            await self._emit(
+                job_id, "job.status", {"state": "failed", "detail": detail}
+            )
 
         return {}
 
