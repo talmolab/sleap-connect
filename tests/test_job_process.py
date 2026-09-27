@@ -76,6 +76,45 @@ class TestSpawnDetached:
 
         assert log_path.exists()
 
+    async def test_kills_the_process_if_recording_it_fails(self, store, spec, tmp_path):
+        """If store.set_process_info raises after the subprocess is already
+        running, we have no other way to find it later — spawn_detached
+        must kill it rather than leave an orphan.
+
+        The failure happens *inside* spawn_detached, after the process
+        already exists, so the caller never gets a `process` handle back —
+        this test captures the PID from the fake store's call instead, and
+        checks liveness via that.
+        """
+        import psutil
+
+        await store.create_job("job-1", spec)
+        captured = {}
+
+        class _FailingStore:
+            async def set_process_info(self, job_id, pid, started_at, log_path):
+                captured["pid"] = pid
+                raise RuntimeError("simulated store failure")
+
+        with pytest.raises(RuntimeError, match="simulated store failure"):
+            await spawn_detached(
+                [sys.executable, "-c", "import time; time.sleep(5)"],
+                job_id="job-1",
+                store=_FailingStore(),
+                log_path=tmp_path / "job-1.log",
+            )
+
+        assert "pid" in captured
+        pid = captured["pid"]
+        for _ in range(20):  # give the kill a moment to land
+            if not psutil.pid_exists(pid):
+                break
+            await asyncio.sleep(0.1)
+        assert not psutil.pid_exists(pid), (
+            "spawn_detached should have killed the process after "
+            "set_process_info failed, but it's still running"
+        )
+
 
 class TestIsAlive:
     """Tests for is_alive."""
@@ -113,6 +152,27 @@ class TestIsAlive:
         finally:
             process.kill()
             await process.wait()
+
+    async def test_false_on_access_denied_instead_of_raising(self, monkeypatch):
+        """A PID that exists but we can't inspect (e.g. reused by another
+        user on a shared machine) must be treated as "not alive", not
+        propagate an exception — reattach_all calls this in a loop over
+        every "running" job, and one permission error shouldn't abort
+        reconciling the rest.
+        """
+        import os
+
+        import psutil
+
+        def _raise_access_denied(self):
+            raise psutil.AccessDenied(pid=self.pid)
+
+        monkeypatch.setattr(psutil.Process, "create_time", _raise_access_denied)
+
+        # Use this test process's own (genuinely alive) PID so the failure
+        # comes from the patched create_time(), not from the PID simply not
+        # existing.
+        assert is_alive(os.getpid(), started_at=100.0) is False
 
 
 class TestReattachAll:

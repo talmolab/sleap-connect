@@ -20,6 +20,7 @@ Does not touch `job_coordinator.py` / `job_executor.py` — wiring this into
 actual job submission is a follow-up change.
 """
 
+import logging
 from pathlib import Path
 from typing import Dict, Optional, Sequence, Union
 
@@ -57,9 +58,14 @@ async def spawn_detached(
 
     Records `pid` / the subprocess's own start time / `log_path` on the job
     via `store.set_process_info` immediately after spawning, before the
-    caller awaits it — if the worker dies between spawn and that call
+    caller awaits it — if the *worker* dies between spawn and that call
     landing, `reattach_all` has nothing to find, and the job is correctly
     treated as lost rather than silently orphaned with no record at all.
+    But if the *worker survives* and `set_process_info` itself fails (e.g. a
+    transient SQLite error), the subprocess is already running and we have
+    no other way to find it later — so that case kills the just-spawned
+    process before re-raising, rather than leaving an orphan that
+    `reattach_all` can never discover.
 
     Args:
         cmd: Full command to execute (e.g. ``["sleap-nn", "train", ...]``).
@@ -89,8 +95,20 @@ async def spawn_detached(
     # dup'd file descriptor at spawn time (standard POSIX/Windows subprocess
     # semantics) and keeps writing to it independently.
 
-    started_at = psutil.Process(process.pid).create_time()
-    await store.set_process_info(job_id, process.pid, started_at, str(log_path))
+    try:
+        started_at = psutil.Process(process.pid).create_time()
+        await store.set_process_info(job_id, process.pid, started_at, str(log_path))
+    except Exception:
+        logging.warning(
+            f"[jobs] Failed to record process info for job {job_id} "
+            f"(pid {process.pid}) — killing the just-spawned process to "
+            f"avoid an untracked orphan"
+        )
+        try:
+            process.kill()
+        except ProcessLookupError:
+            pass
+        raise
 
     return process
 
@@ -109,13 +127,20 @@ def is_alive(pid: int, started_at: float) -> bool:
             create_time()` at spawn time).
 
     Returns:
-        True if a process with this PID exists and its start time matches
-        (within `_START_TIME_TOLERANCE_SECS`); False otherwise.
+        True if a process with this PID exists, we can read its start time,
+        and that start time matches (within `_START_TIME_TOLERANCE_SECS`);
+        False otherwise — including when the PID exists but now belongs to
+        a different user's process we don't have permission to inspect
+        (`psutil.AccessDenied`), plausible on a shared multi-user machine
+        after PID reuse. We can't confirm it's ours, so treat it the same as
+        "not alive" rather than letting the exception propagate — this is
+        called in a loop by `reattach_all` over every "running" job, and one
+        permission error shouldn't abort reconciling the rest.
     """
     try:
         proc = psutil.Process(pid)
         actual_started_at = proc.create_time()
-    except psutil.NoSuchProcess:
+    except (psutil.NoSuchProcess, psutil.AccessDenied):
         return False
 
     return abs(actual_started_at - started_at) <= _START_TIME_TOLERANCE_SECS
