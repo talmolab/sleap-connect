@@ -1,5 +1,7 @@
 """Tests for the durable SQLite job store."""
 
+import asyncio
+
 import pytest
 
 from sleap_rtc.jobs.spec import TrainJobSpec
@@ -116,6 +118,25 @@ class TestEvents:
     async def test_append_event_rejects_unknown_job(self, store):
         with pytest.raises(JobStoreError):
             await store.append_event("does-not-exist", "job.log", {"line": "x"})
+
+    async def test_concurrent_appends_to_the_same_job_get_distinct_seqs(
+        self, store, spec
+    ):
+        # Regression test: seq assignment is a read-then-write
+        # (SELECT MAX then INSERT), which isn't atomic at the SQL level.
+        # Fire many concurrent appends for the same job and confirm every
+        # one lands with a unique, gapless seq — no IntegrityError, no lost
+        # writes from two calls computing the same next_seq.
+        await store.create_job("job-1", spec)
+
+        seqs = await asyncio.gather(
+            *[
+                store.append_event("job-1", "job.log", {"line": f"line-{i}"})
+                for i in range(20)
+            ]
+        )
+
+        assert sorted(seqs) == list(range(1, 21))
 
     async def test_get_events_since_zero_returns_full_history(self, store, spec):
         await store.create_job("job-1", spec)

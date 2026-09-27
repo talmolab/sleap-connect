@@ -19,11 +19,12 @@ yet. It mirrors the job/event model from the sleap-connect protocol v1 spec
 topics, per-job monotonic ``seq`` for events-since-N replay).
 """
 
+import asyncio
 import json
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Optional, Union
+from typing import Dict, List, Optional, Union
 
 import aiosqlite
 
@@ -131,6 +132,10 @@ class JobStore:
         """
         self._db_path = str(db_path)
         self._conn: Optional[aiosqlite.Connection] = None
+        # Serializes append_event's read-then-write seq assignment per job —
+        # see append_event's docstring for why this is needed even though
+        # today's only caller happens not to trigger the race in practice.
+        self._event_locks: Dict[str, asyncio.Lock] = {}
 
     async def connect(self) -> None:
         """Open the database connection and ensure the schema exists."""
@@ -277,6 +282,16 @@ class JobStore:
 
         Raises:
             JobStoreError: If the job doesn't exist.
+
+        Note:
+            Assigning `next_seq` is a read (``SELECT MAX(seq)``) followed by
+            a separate write (``INSERT``), which is not atomic at the SQL
+            level — two genuinely concurrent calls for the *same* `job_id`
+            could otherwise both read the same max and either collide on
+            the ``(job_id, seq)`` primary key or silently assign a
+            duplicate. Guarded here with a per-job `asyncio.Lock` so the
+            store is correct regardless of caller concurrency, rather than
+            relying on callers to serialize their own emits.
         """
         conn = self._require_conn()
 
@@ -284,22 +299,24 @@ class JobStore:
         if job is None:
             raise JobStoreError(f"No such job: {job_id!r}")
 
-        cursor = await conn.execute(
-            "SELECT COALESCE(MAX(seq), 0) + 1 FROM job_events WHERE job_id = ?",
-            (job_id,),
-        )
-        row = await cursor.fetchone()
-        next_seq = row[0]
+        lock = self._event_locks.setdefault(job_id, asyncio.Lock())
+        async with lock:
+            cursor = await conn.execute(
+                "SELECT COALESCE(MAX(seq), 0) + 1 FROM job_events WHERE job_id = ?",
+                (job_id,),
+            )
+            row = await cursor.fetchone()
+            next_seq = row[0]
 
-        await conn.execute(
-            """
-            INSERT INTO job_events (job_id, seq, topic, data_json, created_at)
-            VALUES (?, ?, ?, ?, ?)
-            """,
-            (job_id, next_seq, topic, json.dumps(data), time.time()),
-        )
-        await conn.commit()
-        return next_seq
+            await conn.execute(
+                """
+                INSERT INTO job_events (job_id, seq, topic, data_json, created_at)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (job_id, next_seq, topic, json.dumps(data), time.time()),
+            )
+            await conn.commit()
+            return next_seq
 
     async def get_events_since(self, job_id: str, since_seq: int = 0) -> List[JobEvent]:
         """Fetch all events for a job with seq > since_seq, in order.
