@@ -17,7 +17,9 @@ metrics is a natural follow-up once this lands.
 import asyncio
 import json
 import logging
+import os
 import secrets
+import tempfile
 from pathlib import Path
 from typing import Dict, Optional
 
@@ -29,7 +31,7 @@ from sleap_rtc.jobs.process import (
     spawn_detached,
 )
 from sleap_rtc.jobs.queue import JobQueue
-from sleap_rtc.jobs.spec import TrackJobSpec, parse_job_spec
+from sleap_rtc.jobs.spec import TrackJobSpec, TrainJobSpec, parse_job_spec
 from sleap_rtc.jobs.store import TERMINAL_STATES, JobRecord, JobStore
 from sleap_rtc.protocol_v1.blobs import BlobIndex, hash_file
 from sleap_rtc.protocol_v1.envelope import Event
@@ -156,6 +158,7 @@ class JobMethods:
                 await self.store.update_state(job_id, "running")
                 await self._emit(job_id, "job.status", {"state": "running"})
 
+                self._materialize_config_contents(spec)
                 cmd = self._builder.build_command(spec)
                 log_path = self.log_dir / f"{job_id}.log"
                 process = await spawn_detached(
@@ -197,6 +200,40 @@ class JobMethods:
                 await self._emit(
                     job_id, "job.status", {"state": "failed", "detail": str(e)}
                 )
+
+    @staticmethod
+    def _materialize_config_contents(spec) -> None:
+        """Write `spec.config_contents` to temp files and populate
+        `spec.config_paths`, since `CommandBuilder` only ever reads
+        `config_paths` (it has no notion of inline config text).
+
+        The client sends training config as inline YAML strings
+        (`config_contents`) specifically so it doesn't need a separate
+        "upload the config file first" round trip — but nothing on this
+        (protocol v1) worker path ever materialized those into real files
+        for `CommandBuilder` to point sleap-nn at, an integration gap only
+        surfaced once a real training job was actually run end-to-end.
+        Mirrors the legacy `worker_class.py`'s already-proven behavior
+        (same temp-file-per-config + `path_mappings` text substitution),
+        which was never ported to this newer path.
+
+        A no-op for `TrackJobSpec` (no `config_contents` concept) and for
+        a `TrainJobSpec` that came with `config_paths` already set instead.
+        """
+        if not isinstance(spec, TrainJobSpec) or not spec.config_contents:
+            return
+
+        temp_paths: list[str] = []
+        for idx, content in enumerate(spec.config_contents):
+            for old_path, new_path in (spec.path_mappings or {}).items():
+                content = content.replace(old_path, new_path)
+            fd, temp_path = tempfile.mkstemp(
+                suffix=".yaml", prefix=f"job_config_{idx}_"
+            )
+            with os.fdopen(fd, "w") as f:
+                f.write(content)
+            temp_paths.append(temp_path)
+        spec.config_paths = temp_paths
 
     async def _tail_log(self, job_id: str, log_path: Path, process) -> None:
         """Poll a job's log file and emit each new line as a `job.log` event.

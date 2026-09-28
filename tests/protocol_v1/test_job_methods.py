@@ -11,6 +11,7 @@ import asyncio
 import hashlib
 import sys
 import time
+from pathlib import Path
 
 import pytest
 
@@ -424,6 +425,70 @@ class TestCancel:
 
         record = await store.get_job(job.job_id)
         assert record.state == "failed"
+
+
+class TestMaterializeConfigContents:
+    """Tests for `_materialize_config_contents`.
+
+    The client only ever sends training config as inline YAML strings
+    (`config_contents`), never as worker-local file paths — but
+    `CommandBuilder` only ever reads `config_paths`, an integration gap
+    that surfaced as `IndexError: list index out of range` (indexing an
+    empty `config_paths`) the first time a real training job ran end to
+    end. `_materialize_config_contents` writes each content string to a
+    temp file and populates `config_paths` from that, mirroring the
+    legacy `worker_class.py`'s already-proven behavior for this same
+    problem.
+    """
+
+    def test_writes_each_content_to_its_own_temp_file(self):
+        spec = TrainJobSpec(
+            config_contents=["centroid: yaml", "centered_instance: yaml"],
+        )
+
+        JobMethods._materialize_config_contents(spec)
+
+        assert len(spec.config_paths) == 2
+        assert Path(spec.config_paths[0]).read_text() == "centroid: yaml"
+        assert Path(spec.config_paths[1]).read_text() == "centered_instance: yaml"
+
+    def test_applies_path_mappings_to_the_content(self):
+        spec = TrainJobSpec(
+            config_contents=["data_config.train_labels_path=/local/labels.slp"],
+            path_mappings={"/local/labels.slp": "/worker/labels.slp"},
+        )
+
+        JobMethods._materialize_config_contents(spec)
+
+        written = Path(spec.config_paths[0]).read_text()
+        assert written == "data_config.train_labels_path=/worker/labels.slp"
+
+    def test_is_a_noop_when_config_paths_already_given(self):
+        spec = TrainJobSpec(config_paths=["/already/there.yaml"])
+
+        JobMethods._materialize_config_contents(spec)
+
+        assert spec.config_paths == ["/already/there.yaml"]
+
+    def test_is_a_noop_for_a_track_spec(self):
+        spec = TrackJobSpec(data_path="/x.slp", model_paths=["/m"])
+
+        JobMethods._materialize_config_contents(spec)  # must not raise
+
+        assert spec.data_path == "/x.slp"
+
+    def test_materialized_spec_builds_a_real_command_without_crashing(self):
+        # The actual bug this closes: build_train_command only ever read
+        # config_paths[config_index], and the client only ever sends
+        # config_contents — so this raised IndexError before the fix.
+        from sleap_rtc.jobs.builder import CommandBuilder
+
+        spec = TrainJobSpec(config_contents=["centroid: yaml"])
+
+        JobMethods._materialize_config_contents(spec)
+        cmd = CommandBuilder().build_command(spec)
+
+        assert cmd[:2] == ["sleap-nn", "train"]
 
 
 class TestSubscribe:
