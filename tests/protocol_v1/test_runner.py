@@ -1,5 +1,9 @@
 """Integration tests for start_worker_server — the full assembly."""
 
+import urllib.error
+import urllib.request
+
+import pytest
 import websockets
 
 from sleap_rtc.auth.keypair import generate_keypair, public_key_to_b64
@@ -84,3 +88,122 @@ class TestStartWorkerServer:
             assert record.state == "failed"
         finally:
             await worker.close()
+
+
+class TestFileManagerWiring:
+    """fs.mounts/fs.list must be reachable once a FileManager is passed
+    through — this is what `sleap-rtc serve` does today (always, even with
+    zero configured mounts), after previously never passing one at all,
+    which left every real client's unconditional fsMounts() call during
+    pairing hitting `proto.unknown_method`.
+    """
+
+    async def test_fs_mounts_responds_instead_of_unknown_method(self, tmp_path):
+        from sleap_rtc.worker.file_manager import FileManager
+
+        worker = await start_worker_server(
+            host="127.0.0.1", port=0, data_dir=tmp_path, file_manager=FileManager()
+        )
+        try:
+            port = worker.ws_server.sockets[0].getsockname()[1]
+            _priv, public_key = generate_keypair()
+            client_node_id = public_key_to_b64(public_key)
+            ticket = worker.pending_pairings.create(worker.identity.node_id, [])
+
+            reply = await _pair_and_call(
+                port, ticket.secret, client_node_id, "fs.mounts"
+            )
+
+            assert reply.error is None
+            assert reply.result == {"mounts": []}
+        finally:
+            await worker.close()
+
+    async def test_fs_mounts_reports_a_configured_mount(self, tmp_path):
+        from sleap_rtc.config import MountConfig
+        from sleap_rtc.worker.file_manager import FileManager
+
+        mount_dir = tmp_path / "data"
+        mount_dir.mkdir()
+        file_manager = FileManager(
+            mounts=[MountConfig(path=str(mount_dir), label="data")]
+        )
+        worker = await start_worker_server(
+            host="127.0.0.1", port=0, data_dir=tmp_path, file_manager=file_manager
+        )
+        try:
+            port = worker.ws_server.sockets[0].getsockname()[1]
+            _priv, public_key = generate_keypair()
+            client_node_id = public_key_to_b64(public_key)
+            ticket = worker.pending_pairings.create(worker.identity.node_id, [])
+
+            reply = await _pair_and_call(
+                port, ticket.secret, client_node_id, "fs.mounts"
+            )
+
+            assert reply.result == {
+                "mounts": [{"path": str(mount_dir), "label": "data"}]
+            }
+        finally:
+            await worker.close()
+
+
+class TestBlobServing:
+    """Tests that start_worker_server also wires up real blob serving."""
+
+    async def test_blob_port_is_a_real_bound_port_not_a_placeholder(self, tmp_path):
+        # port=0 (OS picks the WS port) must not leave blob_port resolved to
+        # the nonsensical "0 + 1" default — see runner.py's own note on why.
+        worker = await start_worker_server(host="127.0.0.1", port=0, data_dir=tmp_path)
+        try:
+            assert worker.blob_port not in (0, 1)
+            assert worker.blob_port == worker._blob_http_server.server_address[1]
+        finally:
+            await worker.close()
+
+    async def test_hello_announces_the_real_blob_port(self, tmp_path):
+        worker = await start_worker_server(host="127.0.0.1", port=0, data_dir=tmp_path)
+        try:
+            ws_port = worker.ws_server.sockets[0].getsockname()[1]
+            ws = await websockets.connect(f"ws://127.0.0.1:{ws_port}")
+            await ws.send(
+                Hello(
+                    proto={"min": 1, "max": 1},
+                    agent={},
+                    node_id="client-node",
+                    nonce="client-nonce",
+                ).to_json()
+            )
+            reply = parse_envelope(await ws.recv())
+            assert reply.blob_port == worker.blob_port
+            await ws.close()
+        finally:
+            await worker.close()
+
+    async def test_a_registered_blob_is_fetchable_over_real_http(self, tmp_path):
+        worker = await start_worker_server(host="127.0.0.1", port=0, data_dir=tmp_path)
+        try:
+            content = b"real end-to-end predictions bytes"
+            f = tmp_path / "predictions.slp"
+            f.write_bytes(content)
+            from sleap_rtc.protocol_v1.blobs import hash_file
+
+            sha256, size = await hash_file(f)
+            await worker.blob_index.register(sha256, str(f), size)
+
+            url = f"http://127.0.0.1:{worker.blob_port}/blobs/{sha256}"
+            with urllib.request.urlopen(url, timeout=5) as resp:
+                assert resp.status == 200
+                assert resp.read() == content
+        finally:
+            await worker.close()
+
+    async def test_blob_server_stops_accepting_connections_after_close(self, tmp_path):
+        worker = await start_worker_server(host="127.0.0.1", port=0, data_dir=tmp_path)
+        blob_port = worker.blob_port
+        await worker.close()
+
+        with pytest.raises(urllib.error.URLError):
+            urllib.request.urlopen(
+                f"http://127.0.0.1:{blob_port}/blobs/" + "a" * 64, timeout=2
+            )

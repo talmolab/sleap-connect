@@ -18,9 +18,11 @@ import asyncio
 import json
 import textwrap
 from pathlib import Path
+from typing import Optional
 
 import click
 
+from sleap_rtc.config import MountConfig
 from sleap_rtc.protocol_v1.runner import (
     DEFAULT_DATA_DIR,
     DEFAULT_PORT,
@@ -29,18 +31,41 @@ from sleap_rtc.protocol_v1.runner import (
     start_worker_server,
     trust_store_path,
 )
+from sleap_rtc.worker.file_manager import FileManager
+
+
+def _parse_mount(raw: str) -> MountConfig:
+    """Parse a `--mount` value: "PATH" or "PATH:LABEL"."""
+    path, sep, label = raw.partition(":")
+    return MountConfig(path=path, label=label if sep else Path(path).name or path)
 
 
 @click.command(name="serve")
 @click.option("--host", default="0.0.0.0", show_default=True, help="Bind address.")
 @click.option("--port", default=DEFAULT_PORT, show_default=True, help="Bind port.")
 @click.option(
+    "--blob-port",
+    default=None,
+    type=int,
+    help="Bind port for the blob-serving HTTP endpoint (spec §6.3) — a "
+    "completed track job's predictions are fetched from here. Defaults "
+    "to --port + 1.",
+)
+@click.option(
     "--data-dir",
     default=str(DEFAULT_DATA_DIR),
     show_default=True,
     help="Where to persist identity, trust store, pairing tickets, and jobs.",
 )
-def serve(host: str, port: int, data_dir: str):
+@click.option(
+    "--mount",
+    "mounts",
+    multiple=True,
+    help="A directory clients may browse (fs.mounts/fs.list), as PATH or "
+    "PATH:LABEL. Repeatable. fs.mounts/fs.list are always available even "
+    "with none given — they just report an empty mount list.",
+)
+def serve(host: str, port: int, blob_port: Optional[int], data_dir: str, mounts: tuple):
     """Run this machine as a sleap-connect worker (protocol v1).
 
     Starts the worker's own server directly — no signaling server, no
@@ -53,18 +78,28 @@ def serve(host: str, port: int, data_dir: str):
     install` support is a planned follow-up.
 
     Example:
-        sleap-rtc serve --port 9631
+        sleap-rtc serve --port 9631 --mount /data/videos:lab-data
     """
-    asyncio.run(_serve_async(host, port, Path(data_dir)))
+    asyncio.run(_serve_async(host, port, blob_port, Path(data_dir), mounts))
 
 
-async def _serve_async(host: str, port: int, data_dir: Path) -> None:
-    worker = await start_worker_server(host=host, port=port, data_dir=data_dir)
+async def _serve_async(
+    host: str, port: int, blob_port: Optional[int], data_dir: Path, mounts: tuple = ()
+) -> None:
+    file_manager = FileManager(mounts=[_parse_mount(m) for m in mounts])
+    worker = await start_worker_server(
+        host=host,
+        port=port,
+        data_dir=data_dir,
+        blob_port=blob_port,
+        file_manager=file_manager,
+    )
     try:
         click.echo(click.style("sleap-connect worker", bold=True))
-        click.echo(f"  node_id:  {worker.identity.node_id}")
-        click.echo(f"  address:  ws://{host}:{port}")
-        click.echo(f"  data dir: {worker.data_dir}")
+        click.echo(f"  node_id:   {worker.identity.node_id}")
+        click.echo(f"  address:   ws://{host}:{port}")
+        click.echo(f"  blob port: {worker.blob_port}")
+        click.echo(f"  data dir:  {worker.data_dir}")
 
         if worker.reattach_outcomes:
             click.echo("")

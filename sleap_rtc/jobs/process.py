@@ -45,6 +45,12 @@ from sleap_rtc.jobs.store import JobStore
 # job_executor.py's `_CANCEL_GRACE_SECS`.
 _CANCEL_GRACE_SECS = 5
 
+# asyncio only holds a *weak* reference to a task once nothing else does —
+# a fire-and-forget task like the SIGKILL escalation below can be garbage
+# collected mid-`sleep()` with no warning. Keep a strong reference here for
+# its lifetime; the done-callback discards it once it finishes.
+_background_tasks: set = set()
+
 # How much clock skew to tolerate when comparing a process's recorded start
 # time against its live-queried one. `psutil.Process.create_time()` has
 # sub-second precision that can vary slightly by measurement method; this is
@@ -252,7 +258,9 @@ def send_cancel_signal(pid: int) -> None:
         pgid = os.getpgid(pid)
         logging.info(f"Sending SIGTERM to process group {pgid} (hard cancel)")
         os.killpg(pgid, signal.SIGTERM)
-        asyncio.create_task(_escalate_to_sigkill(pid))
+        task = asyncio.create_task(_escalate_to_sigkill(pid))
+        _background_tasks.add(task)
+        task.add_done_callback(_background_tasks.discard)
     except (ProcessLookupError, psutil.NoSuchProcess):
         pass
 

@@ -84,6 +84,44 @@ class TestHelloHandshake:
         ws = await _connect_and_hello(port, pending_pairings, identity)
         await ws.close()
 
+    async def test_announces_blob_port_in_its_own_hello_when_configured(self, tmp_path):
+        identity = WorkerIdentity(tmp_path / "identity.json")
+        server_obj = ProtocolV1Server(node_id=identity.node_id, blob_port=9632)
+        ws_server = await server_obj.serve("127.0.0.1", 0)
+        port = ws_server.sockets[0].getsockname()[1]
+        try:
+            ws = await websockets.connect(f"ws://127.0.0.1:{port}")
+            await ws.send(
+                Hello(
+                    proto={"min": 1, "max": 1},
+                    agent={},
+                    node_id="client-node",
+                    nonce="client-nonce",
+                ).to_json()
+            )
+            reply = parse_envelope(await ws.recv())
+            assert reply.blob_port == 9632
+            await ws.close()
+        finally:
+            ws_server.close()
+            await ws_server.wait_closed()
+
+    async def test_omits_blob_port_when_not_configured(self, running_server):
+        _server, port, _pending_pairings, _identity = running_server
+
+        ws = await websockets.connect(f"ws://127.0.0.1:{port}")
+        await ws.send(
+            Hello(
+                proto={"min": 1, "max": 1},
+                agent={},
+                node_id="client-node",
+                nonce="client-nonce",
+            ).to_json()
+        )
+        reply = parse_envelope(await ws.recv())
+        assert reply.blob_port is None
+        await ws.close()
+
     async def test_closes_connection_on_protocol_mismatch(self, running_server):
         _server, port, _pending_pairings, _identity = running_server
 
