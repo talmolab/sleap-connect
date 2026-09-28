@@ -65,12 +65,29 @@ def _parse_mount(raw: str) -> MountConfig:
     "PATH:LABEL. Repeatable. fs.mounts/fs.list are always available even "
     "with none given — they just report an empty mount list.",
 )
-def serve(host: str, port: int, blob_port: Optional[int], data_dir: str, mounts: tuple):
+@click.option(
+    "--iroh/--no-iroh",
+    default=True,
+    show_default=True,
+    help="Also accept connections over iroh (item 2.2) — works even "
+    "without a shared network/VPN/Tailscale, via iroh's own "
+    "direct-then-relay dialing. Additive: the plain WS binding above is "
+    "always available regardless of this flag.",
+)
+def serve(
+    host: str,
+    port: int,
+    blob_port: Optional[int],
+    data_dir: str,
+    mounts: tuple,
+    iroh: bool,
+):
     """Run this machine as a sleap-connect worker (protocol v1).
 
     Starts the worker's own server directly — no signaling server, no
     rooms. A client pairs with this worker (see `sleap-rtc pair`) and
-    connects straight to it over localhost/LAN/Tailscale.
+    connects straight to it over localhost/LAN/Tailscale, or via iroh if
+    it can't reach this machine directly (see --iroh).
 
     Runs in the foreground; press Ctrl-C to stop. To keep it running
     persistently, use your OS's own service manager for now (systemd
@@ -80,11 +97,16 @@ def serve(host: str, port: int, blob_port: Optional[int], data_dir: str, mounts:
     Example:
         sleap-rtc serve --port 9631 --mount /data/videos:lab-data
     """
-    asyncio.run(_serve_async(host, port, blob_port, Path(data_dir), mounts))
+    asyncio.run(_serve_async(host, port, blob_port, Path(data_dir), mounts, iroh))
 
 
 async def _serve_async(
-    host: str, port: int, blob_port: Optional[int], data_dir: Path, mounts: tuple = ()
+    host: str,
+    port: int,
+    blob_port: Optional[int],
+    data_dir: Path,
+    mounts: tuple = (),
+    enable_iroh: bool = True,
 ) -> None:
     file_manager = FileManager(mounts=[_parse_mount(m) for m in mounts])
     worker = await start_worker_server(
@@ -93,6 +115,7 @@ async def _serve_async(
         data_dir=data_dir,
         blob_port=blob_port,
         file_manager=file_manager,
+        enable_iroh=enable_iroh,
     )
     try:
         click.echo(click.style("sleap-connect worker", bold=True))
@@ -100,6 +123,11 @@ async def _serve_async(
         click.echo(f"  address:   ws://{host}:{port}")
         click.echo(f"  blob port: {worker.blob_port}")
         click.echo(f"  data dir:  {worker.data_dir}")
+        if worker.iroh_endpoint is not None:
+            click.echo(
+                "  iroh:      enabled (same node_id as above; a client "
+                "reachable only via relay/hole-punch can still connect)"
+            )
 
         if worker.reattach_outcomes:
             click.echo("")

@@ -15,6 +15,12 @@ import stat
 from pathlib import Path
 from typing import Union
 
+from cryptography.hazmat.primitives.serialization import (
+    Encoding,
+    NoEncryption,
+    PrivateFormat,
+)
+
 from sleap_rtc.auth.keypair import (
     Ed25519PrivateKey,
     generate_keypair,
@@ -60,6 +66,20 @@ class WorkerIdentity:
             URL-safe base64-encoded signature.
         """
         return sign_nonce(self._private_key, nonce)
+
+    @property
+    def iroh_secret_key_bytes(self) -> bytes:
+        """This identity's raw 32-byte Ed25519 seed, for `iroh.SecretKey.from_bytes`
+        / `EndpointOptions(secret_key=...)` (item 2.2).
+
+        Feeding the *same* keypair to iroh's endpoint makes its `EndpointId`
+        numerically identical to `node_id` — one identity for the worker
+        across both transports, instead of the client needing to track a
+        separate "how do I dial you" id alongside "who are you" for trust.
+        """
+        return self._private_key.private_bytes(
+            Encoding.Raw, PrivateFormat.Raw, NoEncryption()
+        )
 
     def _load_or_generate(self) -> Ed25519PrivateKey:
         if self._path.exists():

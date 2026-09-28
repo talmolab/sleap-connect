@@ -1,0 +1,89 @@
+"""iroh QUIC transport binding for the sleap-connect protocol v1 (item 2.2).
+
+Runs alongside the existing WebSocket transport (`server.py`), not instead
+of it: a worker accepts both, so a plain WS-only client keeps working
+unchanged, and a client that can't reach the worker directly (no shared
+network/VPN/Tailscale) falls back to iroh's own direct-then-relay dialing
+instead. See `ProtocolV1Server.serve_iroh`, which drives connections
+accepted here through the exact same handshake/dispatch logic as the WS
+path — nothing above the transport layer needed to change to support this.
+
+Deferred import throughout sleap_rtc (see `server.py`'s `_handle_iroh_incoming`):
+`iroh` is only imported by code paths that actually use it, so a `sleap-rtc`
+install that never touches iroh doesn't need the dependency installed.
+
+Wire framing: an iroh `BiStream` is just two raw byte pipes with no
+built-in message boundaries — unlike a WebSocket connection, where each
+`.send()`/`.recv()` call already carries one discrete message. Each
+envelope JSON frame here is therefore length-prefixed: a 4-byte big-endian
+length, then that many bytes of UTF-8-encoded JSON.
+
+End-of-stream detection (verified by hand, not just from the docs): a
+clean `SendStream.finish()` with nothing left to read shows up on the
+receiving side as an `iroh.IrohError` from `RecvStream.read_exact` —
+`kind() == IrohErrorKind.STREAM`, message `"FinishedEarly(0)"` — the same
+generic error type and kind an abrupt disconnect mid-read also raises.
+There's no reliable way (and, for this protocol, no need) to tell those
+apart: either way the connection is over, exactly like a WebSocket's
+`ConnectionClosed` already covers both a clean and an abrupt close with
+one exception type.
+"""
+
+import struct
+from typing import TYPE_CHECKING
+
+from sleap_rtc.protocol_v1.server import TransportClosed
+
+if TYPE_CHECKING:
+    import iroh
+
+_LENGTH_PREFIX = struct.Struct(">I")  # 4-byte big-endian length prefix
+
+# The ALPN identifying this protocol on the wire — an iroh connection with
+# any other ALPN is a different application entirely, not a malformed
+# request, so the worker's Endpoint is configured to only ever accept this
+# one.
+ALPN = b"sleap-connect/protocol-v1"
+
+
+class IrohStreamTransport:
+    """Adapts one iroh `BiStream` to the `server.Transport` shape.
+
+    One `BiStream` carries every envelope frame for the connection's
+    lifetime — protocol v1's hello/req/res/event frames all multiplex over
+    this single stream, the same as one WebSocket connection carries every
+    frame for that connection.
+    """
+
+    def __init__(self, connection: "iroh.Connection", bi: "iroh.BiStream"):
+        """Wrap an already-open bidirectional stream.
+
+        Args:
+            connection: The iroh `Connection` this stream belongs to —
+                kept only so `close()` can end the whole connection, not
+                just this one stream.
+            bi: The `BiStream` to frame envelope traffic over.
+        """
+        self._connection = connection
+        self._send = bi.send()
+        self._recv = bi.recv()
+
+    async def send(self, data: str) -> None:
+        payload = data.encode("utf-8")
+        await self._send.write_all(_LENGTH_PREFIX.pack(len(payload)) + payload)
+
+    async def recv(self) -> str:
+        import iroh
+
+        try:
+            header = await self._recv.read_exact(_LENGTH_PREFIX.size)
+            (length,) = _LENGTH_PREFIX.unpack(header)
+            payload = await self._recv.read_exact(length)
+        except iroh.IrohError as e:
+            if e.kind() in (iroh.IrohErrorKind.STREAM, iroh.IrohErrorKind.CONNECTION):
+                raise TransportClosed() from e
+            raise
+        return payload.decode("utf-8")
+
+    async def close(self, code: int = 1000, reason: str = "") -> None:
+        self._connection.close(code, reason.encode("utf-8"))
