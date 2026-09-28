@@ -90,6 +90,64 @@ class TestStartWorkerServer:
             await worker.close()
 
 
+class TestFileManagerWiring:
+    """fs.mounts/fs.list must be reachable once a FileManager is passed
+    through — this is what `sleap-rtc serve` does today (always, even with
+    zero configured mounts), after previously never passing one at all,
+    which left every real client's unconditional fsMounts() call during
+    pairing hitting `proto.unknown_method`.
+    """
+
+    async def test_fs_mounts_responds_instead_of_unknown_method(self, tmp_path):
+        from sleap_rtc.worker.file_manager import FileManager
+
+        worker = await start_worker_server(
+            host="127.0.0.1", port=0, data_dir=tmp_path, file_manager=FileManager()
+        )
+        try:
+            port = worker.ws_server.sockets[0].getsockname()[1]
+            _priv, public_key = generate_keypair()
+            client_node_id = public_key_to_b64(public_key)
+            ticket = worker.pending_pairings.create(worker.identity.node_id, [])
+
+            reply = await _pair_and_call(
+                port, ticket.secret, client_node_id, "fs.mounts"
+            )
+
+            assert reply.error is None
+            assert reply.result == {"mounts": []}
+        finally:
+            await worker.close()
+
+    async def test_fs_mounts_reports_a_configured_mount(self, tmp_path):
+        from sleap_rtc.config import MountConfig
+        from sleap_rtc.worker.file_manager import FileManager
+
+        mount_dir = tmp_path / "data"
+        mount_dir.mkdir()
+        file_manager = FileManager(
+            mounts=[MountConfig(path=str(mount_dir), label="data")]
+        )
+        worker = await start_worker_server(
+            host="127.0.0.1", port=0, data_dir=tmp_path, file_manager=file_manager
+        )
+        try:
+            port = worker.ws_server.sockets[0].getsockname()[1]
+            _priv, public_key = generate_keypair()
+            client_node_id = public_key_to_b64(public_key)
+            ticket = worker.pending_pairings.create(worker.identity.node_id, [])
+
+            reply = await _pair_and_call(
+                port, ticket.secret, client_node_id, "fs.mounts"
+            )
+
+            assert reply.result == {
+                "mounts": [{"path": str(mount_dir), "label": "data"}]
+            }
+        finally:
+            await worker.close()
+
+
 class TestBlobServing:
     """Tests that start_worker_server also wires up real blob serving."""
 
