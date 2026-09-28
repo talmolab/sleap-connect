@@ -7,12 +7,13 @@ pair.claim, auth.prove), reconciles the job store against reality
 (`reattach_all`) before accepting new connections, then starts listening.
 """
 
+import asyncio
 import logging
 import threading
 from dataclasses import dataclass
 from http.server import ThreadingHTTPServer
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Any, Dict, Optional
 
 from websockets.asyncio.server import Server
 
@@ -86,6 +87,11 @@ class WorkerServer:
     blob_port: int
     _blob_http_server: ThreadingHTTPServer
     _blob_http_thread: threading.Thread
+    # `None` unless `enable_iroh=True` (item 2.2) — a plain-WS-only worker
+    # (still the default for `start_worker_server` itself; `sleap-rtc serve`
+    # opts in) has no iroh endpoint to close.
+    iroh_endpoint: Optional[Any] = None
+    _iroh_serve_task: Optional[asyncio.Task] = None
 
     async def close(self) -> None:
         """Stop listening and close the job store."""
@@ -96,6 +102,9 @@ class WorkerServer:
         self._blob_http_server.server_close()
         self._blob_http_thread.join(timeout=5)
         self.blob_index.close()
+        if self.iroh_endpoint is not None:
+            await self.iroh_endpoint.close()
+            self._iroh_serve_task.cancel()
 
 
 async def start_worker_server(
@@ -104,6 +113,8 @@ async def start_worker_server(
     data_dir: Path = DEFAULT_DATA_DIR,
     file_manager: Optional[object] = None,
     blob_port: Optional[int] = None,
+    enable_iroh: bool = False,
+    iroh_preset: Optional[Any] = None,
 ) -> WorkerServer:
     """Assemble every protocol v1 piece and start listening.
 
@@ -118,6 +129,17 @@ async def start_worker_server(
             §6.3), which is what makes a completed track job's `job.result`
             actually carry a fetchable blob ref instead of `{}` (item
             1.10). Defaults to `port + 1`.
+        enable_iroh: Also accept connections over iroh (item 2.2), so a
+            client that can't reach this worker directly (no shared
+            network/VPN/Tailscale) can still pair and connect via iroh's
+            own direct-then-relay dialing, instead of only the plain-WS
+            binding above. Defaults `False` here so every existing caller
+            of this function (tests especially) is unaffected; `sleap-rtc
+            serve` (the real CLI) opts in.
+        iroh_preset: Overrides iroh's own default `Preset` (which includes
+            a real relay and reaches out to the real internet) — tests
+            pass `iroh.preset_minimal()` so they have no external network
+            dependency. Ignored unless `enable_iroh=True`.
 
     Returns:
         The running `WorkerServer` — `reattach_all` has already run by the
@@ -162,6 +184,26 @@ async def start_worker_server(
 
     ws_server = await server.serve(host, port)
 
+    iroh_endpoint = None
+    iroh_serve_task = None
+    if enable_iroh:
+        # Deferred import: only a worker that actually enables iroh needs
+        # the dependency importable at all.
+        import iroh
+
+        from sleap_rtc.protocol_v1.iroh_transport import ALPN
+
+        endpoint_kwargs: Dict[str, Any] = {
+            "secret_key": identity.iroh_secret_key_bytes,
+            "alpns": [ALPN],
+        }
+        if iroh_preset is not None:
+            endpoint_kwargs["preset"] = iroh_preset
+        iroh_endpoint = await iroh.Endpoint.bind(
+            iroh.EndpointOptions(**endpoint_kwargs)
+        )
+        iroh_serve_task = asyncio.create_task(server.serve_iroh(iroh_endpoint))
+
     return WorkerServer(
         server=server,
         identity=identity,
@@ -176,4 +218,6 @@ async def start_worker_server(
         ws_server=ws_server,
         data_dir=data_dir,
         reattach_outcomes=reattach_outcomes,
+        iroh_endpoint=iroh_endpoint,
+        _iroh_serve_task=iroh_serve_task,
     )
