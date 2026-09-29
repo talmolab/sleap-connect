@@ -182,6 +182,10 @@ def pair(addrs: tuple, ttl: int, data_dir: str):
     with this worker on first contact — via 'pair.claim' in the protocol.
     The ticket's secret is single-use and expires after --ttl seconds.
 
+    If a 'sleap-rtc serve --iroh' worker is running against the same
+    --data-dir, the ticket also carries an 'iroh' section (node_id,
+    relay_url, direct_addrs) so a client with no direct route can dial it.
+
     Works whether or not 'sleap-rtc serve' is currently running: pending
     tickets are shared via a small file under --data-dir, so a running
     serve process picks up tickets minted here without needing to be
@@ -197,11 +201,20 @@ def pair(addrs: tuple, ttl: int, data_dir: str):
     identity = WorkerIdentity(identity_path(data_dir_path))
     pending_pairings = PendingPairings(ttl_secs=ttl, path=pairing_path(data_dir_path))
 
-    ticket = pending_pairings.create(identity.node_id, list(addrs))
+    from sleap_rtc.protocol_v1.iroh_live import iroh_live_path, read_iroh_live
+
+    iroh_section = read_iroh_live(iroh_live_path(data_dir_path), identity.node_id)
+    ticket = pending_pairings.create(identity.node_id, list(addrs), iroh=iroh_section)
 
     click.echo(click.style("Pairing ticket", bold=True))
     click.echo(json.dumps(ticket.to_dict(), indent=2))
     click.echo("")
+    if iroh_section is not None:
+        click.echo(
+            "This ticket includes iroh dial info from the running worker, so "
+            "the client can connect even without a shared network."
+        )
+        click.echo("")
     click.echo(textwrap.dedent(f"""\
             Give this to the new client — it's single-use and expires in
             {ttl} seconds. The client sends a 'pair.claim' request with this
