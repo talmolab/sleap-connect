@@ -27,6 +27,13 @@ from sleap_rtc.protocol_v1.blob_http import (
 )
 from sleap_rtc.protocol_v1.blobs import BlobIndex
 from sleap_rtc.protocol_v1.identity import WorkerIdentity
+from sleap_rtc.protocol_v1.iroh_live import (
+    iroh_live_path,
+    keep_iroh_live_updated,
+    remove_iroh_live,
+    snapshot_iroh_section,
+    write_iroh_live,
+)
 from sleap_rtc.protocol_v1.job_methods import JobMethods
 from sleap_rtc.protocol_v1.pairing import PendingPairings
 from sleap_rtc.protocol_v1.server import ProtocolV1Server
@@ -92,6 +99,7 @@ class WorkerServer:
     # opts in) has no iroh endpoint to close.
     iroh_endpoint: Optional[Any] = None
     _iroh_serve_task: Optional[asyncio.Task] = None
+    _iroh_live_task: Optional[asyncio.Task] = None
 
     async def close(self) -> None:
         """Stop listening and close the job store."""
@@ -103,6 +111,8 @@ class WorkerServer:
         self._blob_http_thread.join(timeout=5)
         self.blob_index.close()
         if self.iroh_endpoint is not None:
+            self._iroh_live_task.cancel()
+            remove_iroh_live(iroh_live_path(self.data_dir))
             await self.iroh_endpoint.close()
             self._iroh_serve_task.cancel()
 
@@ -186,6 +196,7 @@ async def start_worker_server(
 
     iroh_endpoint = None
     iroh_serve_task = None
+    iroh_live_task = None
     if enable_iroh:
         # Deferred import: only a worker that actually enables iroh needs
         # the dependency importable at all.
@@ -203,6 +214,17 @@ async def start_worker_server(
             iroh.EndpointOptions(**endpoint_kwargs)
         )
         iroh_serve_task = asyncio.create_task(server.serve_iroh(iroh_endpoint))
+        # Publish this endpoint's reachability for `sleap-rtc pair` (a
+        # separate process) to embed in tickets (item 2.1).
+        write_iroh_live(
+            iroh_live_path(data_dir),
+            snapshot_iroh_section(iroh_endpoint, identity.node_id),
+        )
+        iroh_live_task = asyncio.create_task(
+            keep_iroh_live_updated(
+                iroh_endpoint, iroh_live_path(data_dir), identity.node_id
+            )
+        )
 
     return WorkerServer(
         server=server,
@@ -220,4 +242,5 @@ async def start_worker_server(
         reattach_outcomes=reattach_outcomes,
         iroh_endpoint=iroh_endpoint,
         _iroh_serve_task=iroh_serve_task,
+        _iroh_live_task=iroh_live_task,
     )
