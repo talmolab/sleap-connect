@@ -33,7 +33,7 @@ from sleap_rtc.jobs.process import (
 from sleap_rtc.jobs.queue import JobQueue
 from sleap_rtc.jobs.spec import TrackJobSpec, TrainJobSpec, parse_job_spec
 from sleap_rtc.jobs.store import TERMINAL_STATES, JobRecord, JobStore
-from sleap_rtc.protocol_v1.blobs import BlobIndex, hash_file
+from sleap_rtc.protocol_v1.blobs import BlobIndex, compute_chunk_hashes, hash_file
 from sleap_rtc.protocol_v1.envelope import Event
 from sleap_rtc.protocol_v1.errors import JOB_NOT_FOUND, JOB_SPEC_INVALID, ProtocolError
 from sleap_rtc.protocol_v1.server import Connection, ProtocolV1Server
@@ -282,7 +282,8 @@ class JobMethods:
             if output_path is None or not output_path.is_file():
                 return {}
             sha256, size = await hash_file(output_path)
-            await self.blob_index.register(sha256, str(output_path), size)
+            chunk_hashes = await compute_chunk_hashes(output_path)
+            await self.blob_index.register(sha256, str(output_path), size, chunk_hashes)
             return {"predictions": {"sha256": sha256, "size": size}}
         except Exception:
             logging.exception(
