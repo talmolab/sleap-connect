@@ -16,13 +16,16 @@ not point this at an untrusted network without pairing configured.
 """
 
 import asyncio
+import json
 import logging
 import secrets
+from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, Optional, Protocol, Set
 
 import websockets.exceptions
 from websockets.asyncio.server import Server, ServerConnection, serve
 
+from sleap_rtc.protocol_v1.blobs import BlobIndex, VERIFY_CHUNK_SIZE
 from sleap_rtc.protocol_v1.envelope import (
     Event,
     EnvelopeError,
@@ -173,6 +176,7 @@ class ProtocolV1Server:
         agent_version: str = "0.0.0",
         agent_platform: str = "unknown",
         blob_port: Optional[int] = None,
+        blob_index: Optional[BlobIndex] = None,
     ):
         """Initialize the server (does not start listening — see `serve`).
 
@@ -187,6 +191,12 @@ class ProtocolV1Server:
             blob_port: Reported in `hello.blob_port` (spec §6.3) if this
                 worker is also running the blob HTTP server. `None` if not
                 (`job.result` blobs won't be fetchable either way).
+            blob_index: Same `BlobIndex` the blob HTTP server serves from —
+                item 2.4's iroh blob-range-read stream looks blobs up here
+                too, over a second BiStream per iroh connection (see
+                `_accept_iroh_blob_streams`). `None` disables that stream
+                (any open attempt gets `not_found`), independent of
+                `blob_port`/the HTTP path.
         """
         self.node_id = node_id
         self.proto_min = proto_min
@@ -194,6 +204,7 @@ class ProtocolV1Server:
         self.agent_version = agent_version
         self.agent_platform = agent_platform
         self.blob_port = blob_port
+        self.blob_index = blob_index
         self.events = EventBus()
         self._methods: Dict[str, MethodHandler] = {}
 
@@ -259,7 +270,85 @@ class ProtocolV1Server:
             logging.exception("[protocol_v1] iroh failed to accept its control stream")
             return
 
+        # Item 2.4: a second, independent accept loop on the SAME connection
+        # for blob-range-read streams — additional BiStreams the client may
+        # open later, separate from the control stream above. Backgrounded
+        # so it runs for the connection's whole lifetime without blocking
+        # (or being blocked by) the control-frame dispatch loop below.
+        asyncio.create_task(self._accept_iroh_blob_streams(iroh_conn))
+
         await self._run_connection(IrohStreamTransport(iroh_conn, bi))
+
+    async def _accept_iroh_blob_streams(self, iroh_conn) -> None:
+        """Loop accepting additional BiStreams a client opens for blob range
+        reads (item 2.4) — separate from the one control stream
+        `_handle_iroh_incoming` already accepted for this same connection.
+        Ends (returns) once the connection itself is closed.
+        """
+        while True:
+            try:
+                bi = await iroh_conn.accept_bi()
+            except Exception:
+                return
+            asyncio.create_task(self._serve_iroh_blob_stream(bi))
+
+    async def _serve_iroh_blob_stream(self, bi) -> None:
+        """Serve one blob-range-read session: an open phase (`{sha256}` ->
+        blob metadata + chunk hashes), then a read loop (`{offset, length}`
+        -> bytes), until the client's `send.finish()` ends the loop.
+
+        Does zero chunk-alignment or verification itself — it serves
+        whatever literal `offset`/`length` it's asked for. That logic is
+        entirely the client's job (design doc §9); this only needs to agree
+        on the wire shape (design doc §6/§6.1).
+        """
+        # Deferred import for the same reason _handle_iroh_incoming's is:
+        # only iroh-using installs need this, and it avoids a module-level
+        # circular import (iroh_transport.py imports TransportClosed from
+        # this module).
+        from sleap_rtc.protocol_v1.iroh_transport import read_frame, write_frame
+
+        send, recv = bi.send(), bi.recv()
+        try:
+            open_req = await read_frame(recv)
+            if open_req is None:
+                return
+
+            record = (
+                self.blob_index.get_sync(json.loads(open_req)["sha256"])
+                if self.blob_index is not None
+                else None
+            )
+            if record is None or not Path(record.path).is_file():
+                await write_frame(send, json.dumps({"ok": False, "error": "not_found"}))
+                return
+
+            await write_frame(
+                send,
+                json.dumps(
+                    {
+                        "ok": True,
+                        "size": record.size,
+                        "chunkSize": VERIFY_CHUNK_SIZE,
+                        "chunkHashes": record.chunk_hashes,
+                    }
+                ),
+            )
+
+            with open(record.path, "rb") as f:
+                while True:
+                    req = await read_frame(recv)
+                    if req is None:
+                        return  # client is done reading (send.finish())
+                    r = json.loads(req)
+                    f.seek(r["offset"])
+                    chunk = f.read(r["length"])
+                    await write_frame(
+                        send, json.dumps({"ok": True, "size": len(chunk)})
+                    )
+                    await send.write_all(chunk)
+        finally:
+            await send.finish()
 
     async def _handle_ws_connection(self, ws: ServerConnection) -> None:
         await self._run_connection(WsStreamTransport(ws))

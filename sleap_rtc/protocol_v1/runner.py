@@ -181,7 +181,9 @@ async def start_worker_server(
     blob_port = blob_http_server.server_address[1]  # the real bound port
     blob_http_thread = run_blob_http_server_in_thread(blob_http_server)
 
-    server = ProtocolV1Server(node_id=identity.node_id, blob_port=blob_port)
+    server = ProtocolV1Server(
+        node_id=identity.node_id, blob_port=blob_port, blob_index=blob_index
+    )
     AuthMethods(server, identity, trust_store, pending_pairings)
     job_methods = JobMethods(
         server,

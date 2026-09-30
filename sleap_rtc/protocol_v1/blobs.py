@@ -18,18 +18,27 @@ contend for the same file's locks.
 
 import asyncio
 import hashlib
+import json
 import sqlite3
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional, Tuple, Union
+from typing import List, Optional, Tuple, Union
+
+# Verification-chunk size for item 2.4's iroh range-read path (design doc
+# §7) — independent of hash_file's own 1 MiB read-buffer size below, and of
+# blob_http.py's wire-transfer chunking. Tunable, not load-bearing: bigger
+# means a smaller chunk_hashes list per blob but more re-verified padding
+# on a misaligned range read; smaller is the reverse.
+VERIFY_CHUNK_SIZE = 256 * 1024
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS blobs (
     sha256 TEXT PRIMARY KEY,
     path TEXT NOT NULL,
     size INTEGER NOT NULL,
-    created_at REAL NOT NULL
+    created_at REAL NOT NULL,
+    chunk_hashes TEXT NOT NULL DEFAULT '[]'
 );
 """
 
@@ -42,11 +51,17 @@ class BlobRecord:
         sha256: Content hash, hex-encoded (matches the wire blob ref).
         path: Absolute path to the file on the worker's filesystem.
         size: File size in bytes, at the time it was registered.
+        chunk_hashes: One sha256 hex digest per `VERIFY_CHUNK_SIZE`-aligned
+            chunk of the file (last chunk may be shorter), computed once at
+            registration — item 2.4's per-chunk integrity check for range
+            reads over iroh. Empty if the blob was registered without them
+            (e.g. an older caller that only passed sha256/path/size).
     """
 
     sha256: str
     path: str
     size: int
+    chunk_hashes: List[str] = field(default_factory=list)
 
 
 def _connect(db_path: str) -> sqlite3.Connection:
@@ -63,7 +78,7 @@ class BlobIndex:
 
     Usage:
         index = BlobIndex(db_path)
-        await index.register(sha256, path, size)
+        await index.register(sha256, path, size, chunk_hashes)
         record = await index.get(sha256)   # from asyncio code
         record = index.get_sync(sha256)    # from a plain thread (blob_http.py)
     """
@@ -81,21 +96,37 @@ class BlobIndex:
         self._db_path = str(db_path)
         self._conn = _connect(self._db_path)
 
-    async def register(self, sha256: str, path: str, size: int) -> None:
+    async def register(
+        self,
+        sha256: str,
+        path: str,
+        size: int,
+        chunk_hashes: Optional[List[str]] = None,
+    ) -> None:
         """Record (or update) a blob's sha256 -> file mapping.
 
         Args:
             sha256: Content hash, hex-encoded.
             path: Absolute path to the file this hash resolves to.
             size: The file's size in bytes.
+            chunk_hashes: One sha256 hex digest per `VERIFY_CHUNK_SIZE`
+                chunk (see `compute_chunk_hashes`) — item 2.4. Optional and
+                defaults to empty so existing callers that only ever
+                register `(sha256, path, size)` keep working unchanged;
+                a blob registered without them just can't be verified
+                per-chunk over an iroh range-read stream.
         """
-        await asyncio.to_thread(self._register_sync, sha256, path, size)
+        await asyncio.to_thread(
+            self._register_sync, sha256, path, size, chunk_hashes or []
+        )
 
-    def _register_sync(self, sha256: str, path: str, size: int) -> None:
+    def _register_sync(
+        self, sha256: str, path: str, size: int, chunk_hashes: List[str]
+    ) -> None:
         self._conn.execute(
-            "INSERT OR REPLACE INTO blobs (sha256, path, size, created_at) "
-            "VALUES (?, ?, ?, ?)",
-            (sha256, path, size, time.time()),
+            "INSERT OR REPLACE INTO blobs "
+            "(sha256, path, size, created_at, chunk_hashes) VALUES (?, ?, ?, ?, ?)",
+            (sha256, path, size, time.time(), json.dumps(chunk_hashes)),
         )
         self._conn.commit()
 
@@ -106,11 +137,14 @@ class BlobIndex:
     def get_sync(self, sha256: str) -> Optional[BlobRecord]:
         """Look up a blob's file location — safe to call from any thread."""
         row = self._conn.execute(
-            "SELECT sha256, path, size FROM blobs WHERE sha256 = ?", (sha256,)
+            "SELECT sha256, path, size, chunk_hashes FROM blobs WHERE sha256 = ?",
+            (sha256,),
         ).fetchone()
         if row is None:
             return None
-        return BlobRecord(sha256=row[0], path=row[1], size=row[2])
+        return BlobRecord(
+            sha256=row[0], path=row[1], size=row[2], chunk_hashes=json.loads(row[3])
+        )
 
     def close(self) -> None:
         """Close the underlying connection."""
@@ -140,3 +174,38 @@ def _hash_file_sync(path: Path) -> Tuple[str, int]:
             h.update(chunk)
             size += len(chunk)
     return h.hexdigest(), size
+
+
+async def compute_chunk_hashes(
+    path: Union[str, Path], chunk_size: int = VERIFY_CHUNK_SIZE
+) -> List[str]:
+    """Compute one sha256 hex digest per `chunk_size`-aligned chunk of a file.
+
+    A separate pass from `hash_file` (not fused into it) — this hashing only
+    ever runs once, after a job completes, not on any interactive path
+    (`_register_result_blobs`'s own docstring: never raises, only affects
+    whether the result is fetchable), so a second read of a job-result file
+    (realistically low tens of MB — no embedded video) is a fine trade for
+    not touching `hash_file`'s existing, already-tested 2-tuple contract.
+
+    Args:
+        path: Path to the file to hash.
+        chunk_size: Boundary size for each chunk's own hash. The last chunk
+            covers whatever remains and may be shorter.
+
+    Returns:
+        Ordered list of sha256 hex digests, one per chunk. Empty for an
+        empty file.
+    """
+    return await asyncio.to_thread(_compute_chunk_hashes_sync, Path(path), chunk_size)
+
+
+def _compute_chunk_hashes_sync(path: Path, chunk_size: int) -> List[str]:
+    hashes: List[str] = []
+    with open(path, "rb") as f:
+        while True:
+            chunk = f.read(chunk_size)
+            if not chunk:
+                break
+            hashes.append(hashlib.sha256(chunk).hexdigest())
+    return hashes

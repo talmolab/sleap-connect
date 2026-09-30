@@ -30,7 +30,7 @@ one exception type.
 """
 
 import struct
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional
 
 from sleap_rtc.protocol_v1.server import TransportClosed
 
@@ -44,6 +44,35 @@ _LENGTH_PREFIX = struct.Struct(">I")  # 4-byte big-endian length prefix
 # request, so the worker's Endpoint is configured to only ever accept this
 # one.
 ALPN = b"sleap-connect/protocol-v1"
+
+
+async def write_frame(send: "iroh.SendStream", data: str) -> None:
+    """Write one length-prefixed frame: a 4-byte big-endian length, then
+    that many UTF-8 bytes. Shared by the control-stream transport below and
+    item 2.4's blob-range-read stream (`server.py`'s `_serve_iroh_blob_stream`)
+    — the same framing convention, reused rather than duplicated.
+    """
+    payload = data.encode("utf-8")
+    await send.write_all(_LENGTH_PREFIX.pack(len(payload)) + payload)
+
+
+async def read_frame(recv: "iroh.RecvStream") -> Optional[str]:
+    """Read one length-prefixed frame (the read-side counterpart of
+    `write_frame`). Returns `None` once the stream ends, clean or abrupt —
+    per the module-level docstring above, iroh doesn't reliably distinguish
+    those and this protocol doesn't need to.
+    """
+    import iroh
+
+    try:
+        header = await recv.read_exact(_LENGTH_PREFIX.size)
+        (length,) = _LENGTH_PREFIX.unpack(header)
+        payload = await recv.read_exact(length)
+    except iroh.IrohError as e:
+        if e.kind() in (iroh.IrohErrorKind.STREAM, iroh.IrohErrorKind.CONNECTION):
+            return None
+        raise
+    return payload.decode("utf-8")
 
 
 class IrohStreamTransport:
@@ -69,21 +98,18 @@ class IrohStreamTransport:
         self._recv = bi.recv()
 
     async def send(self, data: str) -> None:
-        payload = data.encode("utf-8")
-        await self._send.write_all(_LENGTH_PREFIX.pack(len(payload)) + payload)
+        await write_frame(self._send, data)
 
     async def recv(self) -> str:
-        import iroh
-
-        try:
-            header = await self._recv.read_exact(_LENGTH_PREFIX.size)
-            (length,) = _LENGTH_PREFIX.unpack(header)
-            payload = await self._recv.read_exact(length)
-        except iroh.IrohError as e:
-            if e.kind() in (iroh.IrohErrorKind.STREAM, iroh.IrohErrorKind.CONNECTION):
-                raise TransportClosed() from e
-            raise
-        return payload.decode("utf-8")
+        # The `Transport` protocol requires raising TransportClosed once
+        # there won't be another frame — read_frame's `None` sentinel (a
+        # simpler primitive, reused as-is by the blob stream's read loop,
+        # which prefers a plain `if x is None: return` over an exception)
+        # gets translated to that exception right here, at the boundary.
+        text = await read_frame(self._recv)
+        if text is None:
+            raise TransportClosed()
+        return text
 
     async def close(self, code: int = 1000, reason: str = "") -> None:
         self._connection.close(code, reason.encode("utf-8"))
