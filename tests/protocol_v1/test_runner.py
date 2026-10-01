@@ -9,6 +9,7 @@ import pytest
 import websockets
 
 from sleap_rtc.auth.keypair import generate_keypair, public_key_to_b64
+from sleap_rtc.jobs.builder import DEFAULT_ZMQ_PORTS
 from sleap_rtc.protocol_v1.envelope import Hello, Req, parse_envelope
 from sleap_rtc.protocol_v1.iroh_transport import ALPN, IrohStreamTransport
 from sleap_rtc.protocol_v1.runner import start_worker_server
@@ -330,3 +331,30 @@ class TestBlobServing:
             urllib.request.urlopen(
                 f"http://127.0.0.1:{blob_port}/blobs/" + "a" * 64, timeout=2
             )
+
+
+class TestMetricsWiring:
+    """Tests that `enable_metrics` threads through to `JobMethods` (item 3.1).
+
+    The actual ZMQ-forwarding behavior is exercised in test_job_methods.py
+    (`TestMetricsWiring`) and test_metrics.py (`TestJobMetricsConsumer`) —
+    this only checks that `start_worker_server` itself wires the flag
+    correctly, per this repo's thin-integration-test convention for a pure
+    assembly/wiring concern.
+    """
+
+    async def test_metrics_disabled_by_default(self, tmp_path):
+        worker = await start_worker_server(host="127.0.0.1", port=0, data_dir=tmp_path)
+        try:
+            assert worker.job_methods.metrics_ports is None
+        finally:
+            await worker.close()
+
+    async def test_enable_metrics_passes_the_default_zmq_ports(self, tmp_path):
+        worker = await start_worker_server(
+            host="127.0.0.1", port=0, data_dir=tmp_path, enable_metrics=True
+        )
+        try:
+            assert worker.job_methods.metrics_ports == DEFAULT_ZMQ_PORTS
+        finally:
+            await worker.close()

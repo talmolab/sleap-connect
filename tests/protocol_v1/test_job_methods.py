@@ -14,6 +14,7 @@ import time
 from pathlib import Path
 
 import pytest
+import zmq
 
 from sleap_rtc.jobs.queue import JobQueue
 from sleap_rtc.jobs.spec import TrackJobSpec, TrainJobSpec
@@ -47,15 +48,23 @@ class _FakeWs:
 
 
 class _FakeFileManager:
-    def __init__(self, mounts, listing):
+    def __init__(self, mounts, listing, stat=None, read=None):
         self._mounts = mounts
         self._listing = listing
+        self._stat = stat
+        self._read = read
 
     def get_mounts(self):
         return self._mounts
 
     def list_directory(self, path, offset=0):
         return self._listing
+
+    def stat_path(self, path):
+        return self._stat
+
+    def read_file(self, path, offset=0, length=None):
+        return self._read
 
 
 async def _wait_for_terminal(methods, store, job_id, timeout=10):
@@ -93,7 +102,9 @@ async def store(tmp_path):
         yield store
 
 
-def _make_methods(store, tmp_path, cmd, file_manager=None, blob_index=None):
+def _make_methods(
+    store, tmp_path, cmd, file_manager=None, blob_index=None, metrics_ports=None
+):
     server = ProtocolV1Server(node_id="test-node")
     queue = JobQueue(max_concurrent=1)
     return JobMethods(
@@ -104,6 +115,7 @@ def _make_methods(store, tmp_path, cmd, file_manager=None, blob_index=None):
         file_manager=file_manager,
         command_builder=_FakeCommandBuilder(cmd),
         blob_index=blob_index,
+        metrics_ports=metrics_ports,
     )
 
 
@@ -491,6 +503,54 @@ class TestMaterializeConfigContents:
         assert cmd[:2] == ["sleap-nn", "train"]
 
 
+class TestMaterializeLabelsContent:
+    """Tests for `_materialize_labels_content` (item 3.1).
+
+    Mirrors `_materialize_config_contents`'s exact approach: the client
+    sends raw .slp bytes inline (base64-encoded, since .slp is a binary
+    HDF5 file, not text) when it has no worker-resolvable path for the
+    labels file; the worker writes them to a temp file and points
+    `labels_path` at it, since `CommandBuilder` only ever reads paths.
+    """
+
+    def test_writes_decoded_bytes_to_a_temp_file(self):
+        import base64
+
+        raw = b"\x89HDF\r\n\x1a\nnot a real slp file"
+        spec = TrainJobSpec(
+            config_contents=["x: y"], labels_content=base64.b64encode(raw).decode()
+        )
+
+        JobMethods._materialize_labels_content(spec)
+
+        assert spec.labels_path is not None
+        assert Path(spec.labels_path).read_bytes() == raw
+
+    def test_is_a_noop_when_labels_content_absent(self):
+        spec = TrainJobSpec(config_contents=["x: y"], labels_path="/already/there.slp")
+
+        JobMethods._materialize_labels_content(spec)
+
+        assert spec.labels_path == "/already/there.slp"
+
+    def test_is_a_noop_for_a_track_spec(self):
+        spec = TrackJobSpec(data_path="/x.slp", model_paths=["/m"])
+
+        JobMethods._materialize_labels_content(spec)  # must not raise
+
+        assert spec.data_path == "/x.slp"
+
+    def test_invalid_base64_raises_job_spec_invalid(self):
+        spec = TrainJobSpec(
+            config_contents=["x: y"], labels_content="not-valid-base64!!!"
+        )
+
+        with pytest.raises(ProtocolError) as exc_info:
+            JobMethods._materialize_labels_content(spec)
+
+        assert exc_info.value.code == "job.spec_invalid"
+
+
 class TestSubscribe:
     """Tests for jobs.subscribe — backlog replay plus live delivery."""
 
@@ -547,6 +607,33 @@ class TestFsMethods:
 
         assert result == listing
 
+    async def test_fs_stat_delegates_to_file_manager(self, store, tmp_path):
+        stat_result = {
+            "path": "/data/a.slp",
+            "type": "file",
+            "size": 123,
+            "modified": 0.0,
+        }
+        fm = _FakeFileManager(mounts=[], listing=None, stat=stat_result)
+        methods = _make_methods(
+            store, tmp_path, [sys.executable, "-c", "pass"], file_manager=fm
+        )
+
+        result = await methods.fs_stat({"path": "/data/a.slp"}, conn=None)
+
+        assert result == stat_result
+
+    async def test_fs_read_delegates_to_file_manager(self, store, tmp_path):
+        read_result = {"path": "/data/a.slp", "content_base64": "aGVsbG8=", "size": 5}
+        fm = _FakeFileManager(mounts=[], listing=None, read=read_result)
+        methods = _make_methods(
+            store, tmp_path, [sys.executable, "-c", "pass"], file_manager=fm
+        )
+
+        result = await methods.fs_read({"path": "/data/a.slp"}, conn=None)
+
+        assert result == read_result
+
     def test_fs_methods_not_registered_without_a_file_manager(self, tmp_path):
         server = ProtocolV1Server(node_id="test-node")
         queue = JobQueue(max_concurrent=1)
@@ -557,6 +644,120 @@ class TestFsMethods:
             log_dir=tmp_path,
             command_builder=_FakeCommandBuilder([sys.executable]),
         )
-
         assert "fs.mounts" not in server._methods
         assert "fs.list" not in server._methods
+        assert "fs.stat" not in server._methods
+        assert "fs.read" not in server._methods
+
+
+class TestMetricsWiring:
+    """End-to-end: a real ZMQ-publishing fake train job, through
+    jobs.submit, emits job.metric events alongside the usual job.log/
+    job.status — exercising `_make_metrics_consumer`'s integration into
+    `_run_job_body`, not just `JobMetricsConsumer` in isolation (see
+    test_metrics.py for that).
+    """
+
+    _CONTROL_PORT = 19200
+    _PUBLISH_PORT = 19201
+
+    def _fake_train_cmd(self):
+        # A fake "sleap-nn" that publishes one real epoch_end ZMQ message
+        # on the same ports a real JobMetricsConsumer would bind to, then
+        # exits — mirrors sleap-nn's actual wire format (see metrics.py's
+        # module docstring).
+        script = (
+            "import json, time, zmq; "
+            "ctx = zmq.Context(); "
+            "sock = ctx.socket(zmq.PUB); "
+            f"sock.connect('tcp://127.0.0.1:{self._PUBLISH_PORT}'); "
+            "time.sleep(0.5); "  # slow-joiner
+            "sock.send_string(json.dumps({"
+            "'event': 'epoch_end', 'epoch': 0, "
+            "'logs': {'train/loss': 0.42}"
+            "})); "
+            "time.sleep(0.3); "  # give the consumer's 0.05s poll a chance
+            "sock.close(); ctx.term()"
+        )
+        return [sys.executable, "-c", script]
+
+    async def test_training_job_emits_job_metric(self, store, tmp_path, spec):
+        methods = _make_methods(
+            store,
+            tmp_path,
+            self._fake_train_cmd(),
+            metrics_ports={
+                "controller": self._CONTROL_PORT,
+                "publish": self._PUBLISH_PORT,
+            },
+        )
+
+        result = await methods.submit({"spec": spec.to_dict()}, conn=None)
+        job_id = result["job_id"]
+        await _wait_for_terminal(methods, store, job_id, timeout=15)
+
+        events = await store.get_events_since(job_id)
+        metrics = [e.data for e in events if e.topic == "job.metric"]
+        assert any(m["latest_train_loss"] == 0.42 for m in metrics)
+        curves = [e.data for e in events if e.topic == "job.curve"]
+        assert any(c["points"] for c in curves)
+
+    async def test_track_job_never_starts_a_metrics_consumer(self, store, tmp_path):
+        # TrackJobSpec has no epoch/loss stream — must not try to bind a
+        # ZMQ socket for it even when metrics_ports is configured.
+        spec = TrackJobSpec(data_path=str(tmp_path / "video.mp4"), model_paths=["/m"])
+        methods = _make_methods(
+            store,
+            tmp_path,
+            [sys.executable, "-c", "pass"],
+            metrics_ports={
+                "controller": self._CONTROL_PORT + 1,
+                "publish": self._PUBLISH_PORT + 1,
+            },
+        )
+
+        result = await methods.submit({"spec": spec.to_dict()}, conn=None)
+        record = await _wait_for_terminal(methods, store, result["job_id"])
+
+        assert record.state == "completed"
+        events = await store.get_events_since(result["job_id"])
+        assert not any(e.topic == "job.metric" for e in events)
+
+    async def test_metrics_disabled_by_default(self, store, tmp_path, spec):
+        # No metrics_ports passed — the default used by every other test in
+        # this file. Must not raise or bind anything.
+        methods = _make_methods(store, tmp_path, [sys.executable, "-c", "pass"])
+        assert methods._make_metrics_consumer("job-1", spec) is None
+
+    async def test_job_still_completes_when_metrics_port_is_already_bound(
+        self, store, tmp_path, spec
+    ):
+        # A stale process (or just bad luck) holding one of the configured
+        # ZMQ ports must not take the whole training job down — job.metric/
+        # job.curve are best-effort telemetry, not a training-correctness
+        # concern. Regression test for the gap where
+        # `JobMetricsConsumer.start()`'s bind failure propagated out of
+        # `_run_job_inner` and failed the job before sleap-nn ever ran.
+        control_port = self._CONTROL_PORT + 10
+        publish_port = self._PUBLISH_PORT + 10
+
+        ctx = zmq.Context()
+        blocker = ctx.socket(zmq.PUB)
+        blocker.bind(f"tcp://127.0.0.1:{control_port}")
+        try:
+            methods = _make_methods(
+                store,
+                tmp_path,
+                [sys.executable, "-c", "print('hello')"],
+                metrics_ports={"controller": control_port, "publish": publish_port},
+            )
+            result = await methods.submit({"spec": spec.to_dict()}, conn=None)
+            record = await _wait_for_terminal(methods, store, result["job_id"])
+
+            assert record.state == "completed"
+            events = await store.get_events_since(result["job_id"])
+            assert not any(e.topic == "job.metric" for e in events)
+        finally:
+            blocker.setsockopt(zmq.LINGER, 0)
+            blocker.close()
+            ctx.term()
