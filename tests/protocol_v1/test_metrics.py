@@ -211,3 +211,30 @@ class TestJobMetricsConsumer:
         )
         await c.stop()  # must not raise even though start() was never called
         await c.stop()  # and must be safe to call twice
+
+    async def test_stop_uses_the_async_teardown_not_the_sync_one(
+        self, consumer, monkeypatch
+    ):
+        # Regression guard: stop() must await ProgressReporter.async_cleanup()
+        # — not call the sync cleanup() — since stop() always runs from an
+        # event loop. The sync version only *requests* the listener task's
+        # cancellation without awaiting it before closing the sockets it's
+        # still using, which can race a still-running executor thread (see
+        # ProgressReporter.cleanup's own docstring warning against exactly
+        # this). The race is timing-dependent and doesn't reliably fail a
+        # real-ZMQ test, so this pins down the *call*, not the race itself.
+        calls = []
+        monkeypatch.setattr(
+            consumer._reporter, "cleanup", lambda: calls.append("sync")
+        )
+        orig_async_cleanup = consumer._reporter.async_cleanup
+
+        async def spy_async_cleanup():
+            calls.append("async")
+            await orig_async_cleanup()
+
+        monkeypatch.setattr(consumer._reporter, "async_cleanup", spy_async_cleanup)
+
+        await consumer.stop()
+
+        assert calls == ["async"]
