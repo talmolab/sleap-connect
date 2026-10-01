@@ -2,19 +2,19 @@
 
 Wires the SQLite job store, detached execution + reattach, and the job
 queue into the wire protocol: `jobs.submit`, `jobs.cancel`, `jobs.status`,
-`jobs.list`, `jobs.subscribe`. Also registers `fs.mounts`/`fs.list` when a
-`FileManager` is supplied, since that underlying capability already exists
-and wiring it up is cheap.
+`jobs.list`, `jobs.subscribe`. Also registers `fs.mounts`/`fs.list`/`fs.stat`/
+`fs.read` when a `FileManager` is supplied, since that underlying capability
+already exists and wiring it up is cheap.
 
-**Not included in this PR:** ZMQ-based `job.metric` events (epoch/loss
-reporting from sleap-nn's progress reporter). Execution here only streams
-raw subprocess output as `job.log` events (line by line, tailed from the
-log file `spawn_detached` writes to) and reports terminal `job.status` /
-`job.result`. Wiring the existing `ProgressReporter` in for real training
-metrics is a natural follow-up once this lands.
+Forwards sleap-nn's ZMQ epoch/loss stream as rate-capped `job.metric`/
+`job.curve` events for training jobs (opt-in via `metrics_ports`, since every
+existing caller of this class — tests especially — shouldn't suddenly start
+binding real ZMQ sockets); see `sleap_rtc.protocol_v1.metrics`.
 """
 
 import asyncio
+import base64
+import binascii
 import json
 import logging
 import os
@@ -23,7 +23,7 @@ import tempfile
 from pathlib import Path
 from typing import Dict, Optional
 
-from sleap_rtc.jobs.builder import CommandBuilder
+from sleap_rtc.jobs.builder import DEFAULT_ZMQ_PORTS, CommandBuilder
 from sleap_rtc.jobs.process import (
     is_alive,
     send_cancel_signal,
@@ -36,6 +36,7 @@ from sleap_rtc.jobs.store import TERMINAL_STATES, JobRecord, JobStore
 from sleap_rtc.protocol_v1.blobs import BlobIndex, compute_chunk_hashes, hash_file
 from sleap_rtc.protocol_v1.envelope import Event
 from sleap_rtc.protocol_v1.errors import JOB_NOT_FOUND, JOB_SPEC_INVALID, ProtocolError
+from sleap_rtc.protocol_v1.metrics import JobMetricsConsumer
 from sleap_rtc.protocol_v1.server import Connection, ProtocolV1Server
 
 # The line sleap-nn's track CLI prints on completion, e.g.
@@ -68,6 +69,7 @@ class JobMethods:
         file_manager: Optional[object] = None,
         command_builder: Optional[object] = None,
         blob_index: Optional[BlobIndex] = None,
+        metrics_ports: Optional[Dict[str, int]] = None,
     ):
         """Wire up and register the method handlers.
 
@@ -77,8 +79,8 @@ class JobMethods:
             queue: The concurrency-gating job queue (item 1.3).
             log_dir: Directory to write each job's subprocess log file into.
             file_manager: An existing `FileManager` instance, if `fs.mounts`
-                /`fs.list` should be exposed. Omit to leave those methods
-                unregistered.
+                /`fs.list`/`fs.stat`/`fs.read` should be exposed. Omit to
+                leave those methods unregistered.
             command_builder: An object with `build_command(spec) -> list[str]`.
                 Defaults to the real `CommandBuilder` (builds actual
                 ``sleap-nn`` invocations); tests inject a fake one so they
@@ -89,6 +91,16 @@ class JobMethods:
                 1.10). Omit to leave `job.result` reporting `{blobs: {}}`
                 like before — e.g. a worker not running the blob HTTP
                 server has nowhere for a client to fetch the bytes from.
+            metrics_ports: ZMQ `{"controller": port, "publish": port}` to
+                bind a `JobMetricsConsumer` on for each train job, forwarding
+                sleap-nn's epoch/loss stream as `job.metric`/`job.curve`
+                events. Omit (default) to leave metrics forwarding disabled
+                — e.g. for every existing caller of this class (tests
+                especially), which shouldn't suddenly start binding real
+                ZMQ sockets just by constructing a `JobMethods`. Production
+                code passes `sleap_rtc.jobs.builder.DEFAULT_ZMQ_PORTS` (the
+                same ports `CommandBuilder` wires into the actual `sleap-nn`
+                invocation when no override is given).
         """
         self.server = server
         self.store = store
@@ -96,6 +108,7 @@ class JobMethods:
         self.log_dir = Path(log_dir)
         self.file_manager = file_manager
         self.blob_index = blob_index
+        self.metrics_ports = metrics_ports
         self._builder = (
             command_builder if command_builder is not None else CommandBuilder()
         )
@@ -114,6 +127,8 @@ class JobMethods:
         if file_manager is not None:
             server.register("fs.mounts", self.fs_mounts)
             server.register("fs.list", self.fs_list)
+            server.register("fs.stat", self.fs_stat)
+            server.register("fs.read", self.fs_read)
 
     async def wait_for_job(self, job_id: str, timeout: Optional[float] = None) -> None:
         """Wait for a job's background execution task to fully finish.
@@ -154,52 +169,64 @@ class JobMethods:
 
     async def _run_job_body(self, job_id: str, spec) -> None:
         async with self.queue.slot():
+            metrics_consumer = self._make_metrics_consumer(job_id, spec)
             try:
-                await self.store.update_state(job_id, "running")
-                await self._emit(job_id, "job.status", {"state": "running"})
+                await self._run_job_inner(job_id, spec, metrics_consumer)
+            finally:
+                # Always torn down, including on an exception mid-run —
+                # ports are fixed (one job at a time per worker), so a
+                # leaked ZMQ bind here would break the *next* job too.
+                if metrics_consumer is not None:
+                    await metrics_consumer.stop()
 
-                self._materialize_config_contents(spec)
-                cmd = self._builder.build_command(spec)
-                log_path = self.log_dir / f"{job_id}.log"
-                process = await spawn_detached(
-                    cmd, job_id=job_id, store=self.store, log_path=log_path
-                )
+    async def _run_job_inner(
+        self, job_id: str, spec, metrics_consumer: Optional[JobMetricsConsumer]
+    ) -> None:
+        try:
+            await self.store.update_state(job_id, "running")
+            await self._emit(job_id, "job.status", {"state": "running"})
 
-                tail_task = asyncio.create_task(
-                    self._tail_log(job_id, log_path, process)
-                )
-                returncode = await process.wait()
-                await tail_task  # one final read to flush lines written right before exit
+            self._materialize_config_contents(spec)
+            self._materialize_labels_content(spec)
+            cmd = self._builder.build_command(spec)
+            log_path = self.log_dir / f"{job_id}.log"
+            if metrics_consumer is not None:
+                metrics_consumer.start()
+            process = await spawn_detached(
+                cmd, job_id=job_id, store=self.store, log_path=log_path
+            )
 
-                if returncode == 0:
-                    blobs = await self._register_result_blobs(job_id, spec, log_path)
-                    await self.store.update_state(
-                        job_id, "completed", result={"blobs": blobs}
-                    )
-                    # job.result BEFORE job.status: completed — a client that
-                    # resolves its "wait for this job" promise as soon as it
-                    # sees the terminal status (the natural, simplest thing
-                    # for it to do) must already have the result in hand at
-                    # that point, or it has no further chance to see it: the
-                    # instant a client considers a job over, it typically
-                    # unsubscribes, so a job.result arriving a message later
-                    # would silently go nowhere.
-                    await self._emit(job_id, "job.result", {"blobs": blobs})
-                    await self._emit(job_id, "job.status", {"state": "completed"})
-                else:
-                    detail = f"exit code {returncode}"
-                    await self.store.update_state(job_id, "failed", error=detail)
-                    await self._emit(
-                        job_id, "job.status", {"state": "failed", "detail": detail}
-                    )
-            except Exception as e:
-                logging.exception(
-                    f"[jobs] Job {job_id} failed with an unexpected error"
+            tail_task = asyncio.create_task(self._tail_log(job_id, log_path, process))
+            returncode = await process.wait()
+            await tail_task  # one final read to flush lines written right before exit
+
+            if returncode == 0:
+                blobs = await self._register_result_blobs(job_id, spec, log_path)
+                await self.store.update_state(
+                    job_id, "completed", result={"blobs": blobs}
                 )
-                await self.store.update_state(job_id, "failed", error=str(e))
+                # job.result BEFORE job.status: completed — a client that
+                # resolves its "wait for this job" promise as soon as it
+                # sees the terminal status (the natural, simplest thing
+                # for it to do) must already have the result in hand at
+                # that point, or it has no further chance to see it: the
+                # instant a client considers a job over, it typically
+                # unsubscribes, so a job.result arriving a message later
+                # would silently go nowhere.
+                await self._emit(job_id, "job.result", {"blobs": blobs})
+                await self._emit(job_id, "job.status", {"state": "completed"})
+            else:
+                detail = f"exit code {returncode}"
+                await self.store.update_state(job_id, "failed", error=detail)
                 await self._emit(
-                    job_id, "job.status", {"state": "failed", "detail": str(e)}
+                    job_id, "job.status", {"state": "failed", "detail": detail}
                 )
+        except Exception as e:
+            logging.exception(f"[jobs] Job {job_id} failed with an unexpected error")
+            await self.store.update_state(job_id, "failed", error=str(e))
+            await self._emit(
+                job_id, "job.status", {"state": "failed", "detail": str(e)}
+            )
 
     @staticmethod
     def _materialize_config_contents(spec) -> None:
@@ -234,6 +261,51 @@ class JobMethods:
                 f.write(content)
             temp_paths.append(temp_path)
         spec.config_paths = temp_paths
+
+    @staticmethod
+    def _materialize_labels_content(spec) -> None:
+        """Write `spec.labels_content` (base64-encoded raw .slp bytes) to a
+        temp file and populate `spec.labels_path`, mirroring
+        `_materialize_config_contents`'s exact approach for the same reason:
+        `CommandBuilder` only ever reads `labels_path`, so an inline-content
+        field is useless to it until materialized onto disk.
+
+        A no-op for `TrackJobSpec` (no `labels_content` concept) and for a
+        `TrainJobSpec` that didn't set `labels_content` (client resolved the
+        labels file to a worker-visible path instead of inlining it).
+        """
+        if not isinstance(spec, TrainJobSpec) or not spec.labels_content:
+            return
+
+        try:
+            raw = base64.b64decode(spec.labels_content, validate=True)
+        except (ValueError, binascii.Error) as e:
+            raise ProtocolError(
+                JOB_SPEC_INVALID, f"Invalid labels_content (not valid base64): {e}"
+            ) from e
+
+        fd, temp_path = tempfile.mkstemp(suffix=".slp", prefix="job_labels_")
+        with os.fdopen(fd, "wb") as f:
+            f.write(raw)
+        spec.labels_path = temp_path
+
+    def _make_metrics_consumer(self, job_id: str, spec) -> Optional[JobMetricsConsumer]:
+        """Build a `JobMetricsConsumer` for a training job, or None if metrics
+        forwarding isn't configured (`metrics_ports` omitted) or `spec` isn't
+        a `TrainJobSpec` (track/inference jobs have no epoch/loss stream).
+        """
+        if self.metrics_ports is None or not isinstance(spec, TrainJobSpec):
+            return None
+        return JobMetricsConsumer(
+            control_port=self.metrics_ports.get(
+                "controller", DEFAULT_ZMQ_PORTS["controller"]
+            ),
+            publish_port=self.metrics_ports.get(
+                "publish", DEFAULT_ZMQ_PORTS["publish"]
+            ),
+            emit=lambda topic, data: self._emit(job_id, topic, data),
+            total_epochs=spec.max_epochs,
+        )
 
     async def _tail_log(self, job_id: str, log_path: Path, process) -> None:
         """Poll a job's log file and emit each new line as a `job.log` event.
@@ -406,6 +478,18 @@ class JobMethods:
     async def fs_list(self, params: dict, conn: Connection) -> dict:
         """Handle `fs.list` — directory listing, scoped to configured mounts."""
         return self.file_manager.list_directory(params["path"], params.get("offset", 0))
+
+    async def fs_stat(self, params: dict, conn: Connection) -> dict:
+        """Handle `fs.stat` — metadata for one path, scoped to configured mounts."""
+        return self.file_manager.stat_path(params["path"])
+
+    async def fs_read(self, params: dict, conn: Connection) -> dict:
+        """Handle `fs.read` — a small direct byte range read, scoped to
+        configured mounts. NOT the bulk-transfer path (see the blob API).
+        """
+        return self.file_manager.read_file(
+            params["path"], params.get("offset", 0), params.get("length")
+        )
 
     async def _get_job_or_raise(self, job_id: str) -> JobRecord:
         record = await self.store.get_job(job_id)

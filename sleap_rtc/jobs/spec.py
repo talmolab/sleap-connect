@@ -21,6 +21,12 @@ class TrainJobSpec:
         model_types: Model type labels matching config_contents order
             (e.g. ["centroid", "centered_instance"])
         labels_path: Override for data_config.train_labels_path
+        labels_content: Base64-encoded raw .slp bytes, sent inline when the
+            client has no worker-resolvable path for the labels file (same
+            "send the bytes, not a path" escape hatch config_contents already
+            provides for configs). The worker materializes this to a temp
+            file and uses it in place of labels_path — see
+            `JobMethods._materialize_labels_content`.
         val_labels_path: Override for data_config.val_labels_path
         max_epochs: Maximum training epochs
         batch_size: Batch size for training and validation
@@ -43,6 +49,7 @@ class TrainJobSpec:
     config_contents: List[str] = field(default_factory=list)
     model_types: List[str] = field(default_factory=list)
     labels_path: Optional[str] = None
+    labels_content: Optional[str] = None
     val_labels_path: Optional[str] = None
     max_epochs: Optional[int] = None
     batch_size: Optional[int] = None

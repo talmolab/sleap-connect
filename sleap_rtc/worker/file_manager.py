@@ -5,6 +5,7 @@ and filesystem browsing for SLEAP-RTC workers.
 """
 
 import asyncio
+import base64
 import fnmatch
 import hashlib
 import logging
@@ -57,6 +58,11 @@ class FileManager:
     SEARCH_TIMEOUT = 10.0  # seconds
     MAX_SEARCH_DEPTH = 5
     MIN_PATTERN_CHARS = 3
+    # fs.read is for small direct reads (inspecting a config/log/text file) —
+    # bulk binary transfer goes through the blob API's content-addressed,
+    # chunk-verified path instead. 4 MiB keeps a single call's JSON payload
+    # reasonable; callers needing more page through with offset/length.
+    MAX_READ_BYTES = 4 * 1024 * 1024
 
     def __init__(
         self,
@@ -794,6 +800,153 @@ class FileManager:
             "entries": entries,
             "total_count": total_count,
             "has_more": has_more,
+        }
+
+    def stat_path(self, path: str) -> dict:
+        """Get metadata for a single file or directory within allowed mounts.
+
+        Mirrors `list_directory`'s security checks and error-shape
+        convention (an `error`/`error_code` field on failure, rather than
+        raising) exactly, for consistency with the existing `fs.list`.
+
+        Args:
+            path: File or directory path to stat.
+
+        Returns:
+            Dictionary with path, type ("file"|"directory"), size (0 for
+            directories), and modified (mtime), or an error/error_code pair.
+        """
+        target = Path(path)
+
+        try:
+            resolved = target.resolve()
+        except (OSError, ValueError) as e:
+            return {
+                "path": path,
+                "error": f"Invalid path: {e}",
+                "error_code": "PATH_NOT_FOUND",
+            }
+
+        if not self._is_path_allowed(resolved):
+            return {
+                "path": path,
+                "error": "Access denied: path is outside configured mounts",
+                "error_code": "ACCESS_DENIED",
+            }
+
+        if not resolved.exists():
+            return {
+                "path": path,
+                "error": "Path does not exist",
+                "error_code": "PATH_NOT_FOUND",
+            }
+
+        try:
+            st = resolved.stat()
+        except PermissionError:
+            return {
+                "path": path,
+                "error": "Permission denied",
+                "error_code": "ACCESS_DENIED",
+            }
+
+        return {
+            "path": str(resolved),
+            "type": "directory" if resolved.is_dir() else "file",
+            "size": st.st_size if resolved.is_file() else 0,
+            "modified": st.st_mtime,
+        }
+
+    def read_file(
+        self, path: str, offset: int = 0, length: Optional[int] = None
+    ) -> dict:
+        """Read a range of bytes from a file within allowed mounts.
+
+        For small direct reads (inspecting a config/log/text file) — NOT
+        the bulk-transfer path, which goes through the blob API's content-
+        addressed, chunk-verified reads instead. Content is base64-encoded
+        since this travels inside a JSON envelope frame.
+
+        Args:
+            path: File path to read.
+            offset: Byte offset to start reading from.
+            length: Number of bytes to read. Defaults to (and is capped at)
+                `MAX_READ_BYTES`; a caller reading a larger file pages
+                through with repeated offset-advancing calls.
+
+        Returns:
+            Dictionary with path, content_base64, offset, size (bytes
+            actually read), total_size, and eof (whether this read reached
+            the end of the file) — or an error/error_code pair on failure.
+        """
+        target = Path(path)
+
+        try:
+            resolved = target.resolve()
+        except (OSError, ValueError) as e:
+            return {
+                "path": path,
+                "error": f"Invalid path: {e}",
+                "error_code": "PATH_NOT_FOUND",
+            }
+
+        if not self._is_path_allowed(resolved):
+            return {
+                "path": path,
+                "error": "Access denied: path is outside configured mounts",
+                "error_code": "ACCESS_DENIED",
+            }
+
+        if not resolved.exists():
+            return {
+                "path": path,
+                "error": "Path does not exist",
+                "error_code": "PATH_NOT_FOUND",
+            }
+
+        if not resolved.is_file():
+            return {
+                "path": path,
+                "error": "Path is not a file",
+                "error_code": "PATH_NOT_FOUND",
+            }
+
+        if offset < 0:
+            return {
+                "path": path,
+                "error": "offset must be non-negative",
+                "error_code": "INVALID_RANGE",
+            }
+
+        read_len = (
+            self.MAX_READ_BYTES if length is None else min(length, self.MAX_READ_BYTES)
+        )
+
+        try:
+            total_size = resolved.stat().st_size
+            with open(resolved, "rb") as f:
+                f.seek(offset)
+                data = f.read(read_len)
+        except PermissionError:
+            return {
+                "path": path,
+                "error": "Permission denied",
+                "error_code": "ACCESS_DENIED",
+            }
+        except OSError as e:
+            return {
+                "path": path,
+                "error": f"Read failed: {e}",
+                "error_code": "IO_ERROR",
+            }
+
+        return {
+            "path": str(resolved),
+            "content_base64": base64.b64encode(data).decode("ascii"),
+            "offset": offset,
+            "size": len(data),
+            "total_size": total_size,
+            "eof": offset + len(data) >= total_size,
         }
 
     # =========================================================================
