@@ -14,6 +14,7 @@ import time
 from pathlib import Path
 
 import pytest
+import zmq
 
 from sleap_rtc.jobs.queue import JobQueue
 from sleap_rtc.jobs.spec import TrackJobSpec, TrainJobSpec
@@ -727,3 +728,36 @@ class TestMetricsWiring:
         # this file. Must not raise or bind anything.
         methods = _make_methods(store, tmp_path, [sys.executable, "-c", "pass"])
         assert methods._make_metrics_consumer("job-1", spec) is None
+
+    async def test_job_still_completes_when_metrics_port_is_already_bound(
+        self, store, tmp_path, spec
+    ):
+        # A stale process (or just bad luck) holding one of the configured
+        # ZMQ ports must not take the whole training job down — job.metric/
+        # job.curve are best-effort telemetry, not a training-correctness
+        # concern. Regression test for the gap where
+        # `JobMetricsConsumer.start()`'s bind failure propagated out of
+        # `_run_job_inner` and failed the job before sleap-nn ever ran.
+        control_port = self._CONTROL_PORT + 10
+        publish_port = self._PUBLISH_PORT + 10
+
+        ctx = zmq.Context()
+        blocker = ctx.socket(zmq.PUB)
+        blocker.bind(f"tcp://127.0.0.1:{control_port}")
+        try:
+            methods = _make_methods(
+                store,
+                tmp_path,
+                [sys.executable, "-c", "print('hello')"],
+                metrics_ports={"controller": control_port, "publish": publish_port},
+            )
+            result = await methods.submit({"spec": spec.to_dict()}, conn=None)
+            record = await _wait_for_terminal(methods, store, result["job_id"])
+
+            assert record.state == "completed"
+            events = await store.get_events_since(result["job_id"])
+            assert not any(e.topic == "job.metric" for e in events)
+        finally:
+            blocker.setsockopt(zmq.LINGER, 0)
+            blocker.close()
+            ctx.term()

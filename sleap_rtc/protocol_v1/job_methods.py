@@ -191,7 +191,7 @@ class JobMethods:
             cmd = self._builder.build_command(spec)
             log_path = self.log_dir / f"{job_id}.log"
             if metrics_consumer is not None:
-                metrics_consumer.start()
+                self._start_metrics_consumer(job_id, metrics_consumer)
             process = await spawn_detached(
                 cmd, job_id=job_id, store=self.store, log_path=log_path
             )
@@ -288,6 +288,26 @@ class JobMethods:
         with os.fdopen(fd, "wb") as f:
             f.write(raw)
         spec.labels_path = temp_path
+
+    @staticmethod
+    def _start_metrics_consumer(
+        job_id: str, metrics_consumer: JobMetricsConsumer
+    ) -> None:
+        """Start a `JobMetricsConsumer`, degrading to "no metrics" instead of
+        failing the whole job if its ZMQ sockets can't bind.
+
+        `job.metric`/`job.curve` forwarding is best-effort telemetry, not a
+        training-correctness concern — a bind failure (e.g. a stale process
+        still holding the configured ports) must not turn into the entire
+        training job failing before sleap-nn even gets a chance to run.
+        """
+        try:
+            metrics_consumer.start()
+        except Exception:
+            logging.exception(
+                f"[jobs] Job {job_id} could not start metrics forwarding — "
+                "continuing without job.metric/job.curve"
+            )
 
     def _make_metrics_consumer(self, job_id: str, spec) -> Optional[JobMetricsConsumer]:
         """Build a `JobMetricsConsumer` for a training job, or None if metrics
