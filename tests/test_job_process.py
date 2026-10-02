@@ -6,11 +6,19 @@ start-time semantics, which mocks can't meaningfully verify.
 """
 
 import asyncio
+import os
+import signal
 import sys
 
 import pytest
 
-from sleap_rtc.jobs.process import is_alive, reattach_all, spawn_detached
+from sleap_rtc.jobs.process import (
+    is_alive,
+    reattach_all,
+    send_stop_signal,
+    read_exit_code,
+    spawn_detached,
+)
 from sleap_rtc.jobs.spec import TrainJobSpec
 from sleap_rtc.jobs.store import JobStore
 
@@ -197,7 +205,9 @@ class TestReattachAll:
             process.kill()
             await process.wait()
 
-    async def test_marks_a_dead_job_failed(self, store, spec, tmp_path):
+    async def test_a_job_that_exited_while_no_worker_ran_is_left_to_finalize(
+        self, store, spec, tmp_path
+    ):
         await store.create_job("job-1", spec)
         await store.update_state("job-1", "running")
         process = await spawn_detached(
@@ -207,6 +217,31 @@ class TestReattachAll:
             log_path=tmp_path / "job-1.log",
         )
         await process.wait()  # let it actually exit before reattaching
+
+        outcomes = await reattach_all(store)
+
+        # Its exit code was recorded, so the caller can still tell whether it
+        # succeeded — reattach_all must not pre-emptively mark it failed.
+        assert outcomes == {"job-1": "exited"}
+        assert (await store.get_job("job-1")).state == "running"
+        assert read_exit_code(tmp_path / "job-1.log") == 0
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="POSIX process groups")
+    async def test_marks_a_dead_job_with_no_exit_code_failed(
+        self, store, spec, tmp_path
+    ):
+        await store.create_job("job-1", spec)
+        await store.update_state("job-1", "running")
+        process = await spawn_detached(
+            [sys.executable, "-c", "import time; time.sleep(30)"],
+            job_id="job-1",
+            store=store,
+            log_path=tmp_path / "job-1.log",
+        )
+        # SIGKILL the whole group (e.g. OOM killer, reboot): nothing gets to
+        # record an exit code.
+        os.killpg(process.pid, signal.SIGKILL)
+        await process.wait()
 
         outcomes = await reattach_all(store)
 
@@ -302,3 +337,79 @@ class TestSendCancelSignalTaskTracking:
 
         # Cleaned up once it completes — not a permanent leak either.
         assert len(process_module._background_tasks) == 0
+
+
+class TestExitCodeRecording:
+    """`spawn_detached` runs jobs under `_exit_code_wrapper.py`."""
+
+    async def _run(self, store, spec, tmp_path, code):
+        await store.create_job("job-1", spec)
+        process = await spawn_detached(
+            [sys.executable, "-c", code],
+            job_id="job-1",
+            store=store,
+            log_path=tmp_path / "job-1.log",
+        )
+        return await process.wait()
+
+    async def test_records_success(self, store, spec, tmp_path):
+        rc = await self._run(store, spec, tmp_path, "print('hi')")
+        assert rc == 0
+        assert read_exit_code(tmp_path / "job-1.log") == 0
+        assert "hi" in (tmp_path / "job-1.log").read_text()
+
+    async def test_records_and_passes_through_a_failure(self, store, spec, tmp_path):
+        rc = await self._run(store, spec, tmp_path, "raise SystemExit(3)")
+        assert rc == 3
+        assert read_exit_code(tmp_path / "job-1.log") == 3
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="POSIX signals")
+    async def test_a_signal_death_is_recorded_and_passed_through(
+        self, store, spec, tmp_path
+    ):
+        rc = await self._run(
+            store,
+            spec,
+            tmp_path,
+            "import os, signal; os.kill(os.getpid(), signal.SIGTERM)",
+        )
+        assert rc == -signal.SIGTERM
+        assert read_exit_code(tmp_path / "job-1.log") == -signal.SIGTERM
+
+    async def test_a_missing_command_is_recorded_as_127(self, store, spec, tmp_path):
+        await store.create_job("job-1", spec)
+        process = await spawn_detached(
+            ["definitely-not-a-real-command-xyz"],
+            job_id="job-1",
+            store=store,
+            log_path=tmp_path / "job-1.log",
+        )
+        assert await process.wait() == 127
+        assert "Failed to start" in (tmp_path / "job-1.log").read_text()
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="POSIX process groups")
+    async def test_graceful_stop_reaches_the_job_and_the_wrapper_records_it(
+        self, store, spec, tmp_path
+    ):
+        await store.create_job("job-1", spec)
+        process = await spawn_detached(
+            [
+                sys.executable,
+                "-c",
+                "import signal, sys, time\n"
+                "signal.signal(signal.SIGINT, lambda *a: sys.exit(7))\n"
+                "print('ready', flush=True)\n"
+                "time.sleep(30)",
+            ],
+            job_id="job-1",
+            store=store,
+            log_path=tmp_path / "job-1.log",
+        )
+        log = tmp_path / "job-1.log"
+        for _ in range(100):
+            if log.exists() and "ready" in log.read_text():
+                break
+            await asyncio.sleep(0.05)
+        send_stop_signal(process.pid)
+        assert await process.wait() == 7
+        assert read_exit_code(log) == 7

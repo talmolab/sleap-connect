@@ -21,11 +21,12 @@ import os
 import secrets
 import tempfile
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Callable, Dict, Optional
 
 from sleap_rtc.jobs.builder import DEFAULT_ZMQ_PORTS, CommandBuilder
 from sleap_rtc.jobs.process import (
     is_alive,
+    read_exit_code,
     send_cancel_signal,
     send_stop_signal,
     spawn_detached,
@@ -196,37 +197,97 @@ class JobMethods:
                 cmd, job_id=job_id, store=self.store, log_path=log_path
             )
 
-            tail_task = asyncio.create_task(self._tail_log(job_id, log_path, process))
-            returncode = await process.wait()
-            await tail_task  # one final read to flush lines written right before exit
-
-            if returncode == 0:
-                blobs = await self._register_result_blobs(job_id, spec, log_path)
-                await self.store.update_state(
-                    job_id, "completed", result={"blobs": blobs}
-                )
-                # job.result BEFORE job.status: completed — a client that
-                # resolves its "wait for this job" promise as soon as it
-                # sees the terminal status (the natural, simplest thing
-                # for it to do) must already have the result in hand at
-                # that point, or it has no further chance to see it: the
-                # instant a client considers a job over, it typically
-                # unsubscribes, so a job.result arriving a message later
-                # would silently go nowhere.
-                await self._emit(job_id, "job.result", {"blobs": blobs})
-                await self._emit(job_id, "job.status", {"state": "completed"})
-            else:
-                detail = f"exit code {returncode}"
-                await self.store.update_state(job_id, "failed", error=detail)
-                await self._emit(
-                    job_id, "job.status", {"state": "failed", "detail": detail}
-                )
+            tail_task = asyncio.create_task(
+                self._tail_log(job_id, log_path, lambda: process.returncode is None)
+            )
+            try:
+                returncode = await process.wait()
+                await tail_task  # final read: flush lines written right before exit
+            finally:
+                # On cancellation (worker shutting down) the tail task would
+                # otherwise outlive this one and keep emitting.
+                tail_task.cancel()
+            await self._finish(job_id, spec, log_path, returncode)
         except Exception as e:
             logging.exception(f"[jobs] Job {job_id} failed with an unexpected error")
             await self.store.update_state(job_id, "failed", error=str(e))
             await self._emit(
                 job_id, "job.status", {"state": "failed", "detail": str(e)}
             )
+
+    async def _finish(
+        self, job_id: str, spec, log_path: Path, returncode: Optional[int]
+    ) -> None:
+        """Record a job's terminal state once its process has exited."""
+        if returncode == 0:
+            blobs = await self._register_result_blobs(job_id, spec, log_path)
+            await self.store.update_state(job_id, "completed", result={"blobs": blobs})
+            # job.result BEFORE job.status: completed — a client that
+            # resolves its "wait for this job" promise as soon as it
+            # sees the terminal status (the natural, simplest thing
+            # for it to do) must already have the result in hand at
+            # that point, or it has no further chance to see it: the
+            # instant a client considers a job over, it typically
+            # unsubscribes, so a job.result arriving a message later
+            # would silently go nowhere.
+            await self._emit(job_id, "job.result", {"blobs": blobs})
+            await self._emit(job_id, "job.status", {"state": "completed"})
+        else:
+            if returncode is None:
+                detail = (
+                    "job's process exited without recording an exit code "
+                    "(killed outright, or started by an older worker version)"
+                )
+            else:
+                detail = f"exit code {returncode}"
+            await self.store.update_state(job_id, "failed", error=detail)
+            await self._emit(
+                job_id, "job.status", {"state": "failed", "detail": detail}
+            )
+
+    def resume_reattached(self, reattach_outcomes: Dict[str, str]) -> None:
+        """Take over jobs a previous worker left running (see `reattach_all`).
+
+        A reattached job is no longer this process's child, so nothing would
+        otherwise ever notice it finish: it would stay "running" forever. For
+        each one still running (or that finished while no worker was up),
+        resume tailing its log where the previous worker stopped and record
+        its terminal state from the exit code `_exit_code_wrapper.py` wrote.
+        Live ZMQ metrics are not resumed; `job.log` lines are.
+        """
+        for job_id, outcome in reattach_outcomes.items():
+            if outcome in ("reattached", "exited"):
+                self._tasks[job_id] = asyncio.create_task(self._run_reattached(job_id))
+
+    async def _run_reattached(self, job_id: str) -> None:
+        try:
+            # Holds the queue slot like any running job, so a new submission
+            # waits instead of sharing the GPU with it.
+            async with self.queue.slot():
+                record = await self.store.get_job(job_id)
+                log_path = Path(record.log_path)
+                already_emitted = sum(
+                    1
+                    for ev in await self.store.get_events_since(job_id, 0)
+                    if ev.topic == "job.log"
+                )
+                await self._tail_log(
+                    job_id,
+                    log_path,
+                    lambda: is_alive(record.pid, record.process_started_at),
+                    skip_lines=already_emitted,
+                )
+                await self._finish(
+                    job_id, record.spec, log_path, read_exit_code(log_path)
+                )
+        except Exception as e:
+            logging.exception(f"[jobs] Reattached job {job_id} failed unexpectedly")
+            await self.store.update_state(job_id, "failed", error=str(e))
+            await self._emit(
+                job_id, "job.status", {"state": "failed", "detail": str(e)}
+            )
+        finally:
+            self._tasks.pop(job_id, None)
 
     @staticmethod
     def _materialize_config_contents(spec) -> None:
@@ -327,28 +388,51 @@ class JobMethods:
             total_epochs=spec.max_epochs,
         )
 
-    async def _tail_log(self, job_id: str, log_path: Path, process) -> None:
+    async def _tail_log(
+        self,
+        job_id: str,
+        log_path: Path,
+        is_running: Callable[[], bool],
+        skip_lines: int = 0,
+    ) -> None:
         """Poll a job's log file and emit each new line as a `job.log` event.
 
-        Stops once `process.returncode` is set (i.e. the subprocess itself
-        has exited) — not once the job's *stored* state is no longer
-        "running", since that state is only set by `_run_job` *after*
-        awaiting this task, which would otherwise deadlock the two waiting
-        on each other.
+        Only complete lines are emitted (a partial last line waits for its
+        newline, or for the process to exit), so every non-empty line of the
+        file maps to exactly one `job.log` event. That is what lets a
+        restarted worker resume a reattached job's log by skipping the
+        `skip_lines` lines the previous worker already emitted.
+
+        Stops once `is_running()` is false (i.e. the subprocess itself has
+        exited) — not once the job's *stored* state is no longer "running",
+        since that state is only set *after* awaiting this task, which would
+        otherwise deadlock the two waiting on each other.
         """
         pos = 0
+        partial = ""
         while True:
             await asyncio.sleep(_LOG_POLL_INTERVAL_SECS)
+            done = not is_running()  # checked before reading: no lost tail
             if log_path.exists():
                 with open(log_path, "r", errors="replace") as f:
                     f.seek(pos)
                     new_data = f.read()
                     pos = f.tell()
-                for line in new_data.splitlines():
-                    if line:
-                        await self._emit(job_id, "job.log", {"line": line})
+                lines = (partial + new_data).split("\n")
+                partial = lines.pop()
+                if done and partial:
+                    lines.append(partial)
+                    partial = ""
+                for line in lines:
+                    line = line.rstrip("\r")
+                    if not line:
+                        continue
+                    if skip_lines > 0:
+                        skip_lines -= 1
+                        continue
+                    await self._emit(job_id, "job.log", {"line": line})
 
-            if process.returncode is not None:
+            if done:
                 return
 
     async def _register_result_blobs(self, job_id: str, spec, log_path: Path) -> dict:
