@@ -197,6 +197,29 @@ class TestMethodDispatch:
         assert received_size["n"] == 2 * 1024 * 1024
         await ws.close()
 
+    async def test_max_size_still_rejects_a_request_over_the_configured_cap(
+        self, tmp_path
+    ):
+        """The previous test only proves a payload BELOW the new 256 MiB
+        ceiling now round-trips — it doesn't prove the ceiling still exists
+        at all (e.g. a future refactor that drops `max_size` entirely, or
+        passes `None`, would leave this file fully green). Uses its own
+        tiny `max_size` rather than the real 256 MiB one so this stays a
+        fast unit test, not a 256 MiB transfer.
+        """
+        identity = WorkerIdentity(tmp_path / "identity.json")
+        server_obj = ProtocolV1Server(node_id=identity.node_id)
+        ws_server = await server_obj.serve("127.0.0.1", 0, max_size=1024)
+        port = ws_server.sockets[0].getsockname()[1]
+        try:
+            ws = await websockets.connect(f"ws://127.0.0.1:{port}")
+            with pytest.raises(websockets.exceptions.ConnectionClosedError):
+                await ws.send("x" * 2048)  # over the 1024-byte cap just configured
+                await ws.recv()
+        finally:
+            ws_server.close()
+            await ws_server.wait_closed()
+
     async def test_unknown_method_returns_proto_unknown_method_error(
         self, running_server
     ):

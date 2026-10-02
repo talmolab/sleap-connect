@@ -17,6 +17,7 @@ re-test the dispatch logic itself.
 """
 
 import asyncio
+import struct
 
 import iroh
 import pytest
@@ -26,9 +27,19 @@ from sleap_rtc.protocol_v1.auth import AuthMethods
 from sleap_rtc.protocol_v1.envelope import Hello, Req, parse_envelope
 from sleap_rtc.protocol_v1.errors import ProtocolError
 from sleap_rtc.protocol_v1.identity import WorkerIdentity
-from sleap_rtc.protocol_v1.iroh_transport import ALPN, IrohStreamTransport
+from sleap_rtc.protocol_v1.iroh_transport import (
+    ALPN,
+    FrameTooLarge,
+    IrohStreamTransport,
+    read_frame,
+)
 from sleap_rtc.protocol_v1.pairing import PendingPairings
-from sleap_rtc.protocol_v1.server import Connection, ProtocolV1Server
+from sleap_rtc.protocol_v1.server import (
+    DEFAULT_WS_MAX_SIZE,
+    Connection,
+    ProtocolV1Server,
+    TransportClosed,
+)
 from sleap_rtc.protocol_v1.trust_store import TrustStore
 
 _MINIMAL = iroh.preset_minimal
@@ -220,3 +231,62 @@ class TestIrohDisconnect:
         await asyncio.sleep(0.2)
         errors = [r for r in caplog.records if r.levelname == "ERROR"]
         assert errors == [], f"unhandled error in accept-loop task: {errors}"
+
+
+class _FakeRecvStream:
+    """Just enough of `iroh.RecvStream` for `read_frame`'s size check: a
+    length-prefix header, then (if the check passes and a second
+    `read_exact` is actually attempted) a fixed payload.
+    """
+
+    def __init__(self, header: bytes, payload: bytes = b""):
+        self._reads = [header, payload]
+
+    async def read_exact(self, n: int) -> bytes:
+        return self._reads.pop(0)
+
+
+class _FakeBiStream:
+    """Just enough of an iroh `BiStream` for `IrohStreamTransport.__init__`."""
+
+    def __init__(self, recv: _FakeRecvStream):
+        self._recv = recv
+
+    def send(self):
+        return None
+
+    def recv(self):
+        return self._recv
+
+
+class TestReadFrameSizeLimit:
+    """A raw QUIC stream has no built-in size limit the way a WS connection
+    does — these are the iroh-side counterpart of the WS `max_size` tests
+    above, proving the new defensive check in `read_frame` actually works.
+    Uses a minimal fake stream rather than a real iroh connection: the
+    check fires off the 4-byte length prefix alone, before any real bytes
+    would need to flow, so there's nothing a real connection would add.
+    """
+
+    async def test_read_frame_rejects_a_length_prefix_over_max_size(self):
+        header = struct.pack(">I", 2000)
+        with pytest.raises(FrameTooLarge):
+            await read_frame(_FakeRecvStream(header), max_size=1000)
+
+    async def test_read_frame_accepts_a_length_prefix_at_or_under_max_size(self):
+        # Sanity check the boundary isn't off-by-one in the wrong direction.
+        header = struct.pack(">I", 4)
+        fake = _FakeRecvStream(header, payload=b"test")
+        assert await read_frame(fake, max_size=4) == "test"
+
+    async def test_transport_recv_converts_an_oversized_frame_to_transport_closed(self):
+        # IrohStreamTransport.recv() doesn't expose a max_size override —
+        # it always uses read_frame's default (DEFAULT_WS_MAX_SIZE) — so
+        # the claimed length here has to exceed THAT, not an arbitrary
+        # small number.
+        header = struct.pack(">I", DEFAULT_WS_MAX_SIZE + 1)
+        transport = IrohStreamTransport(
+            connection=None, bi=_FakeBiStream(_FakeRecvStream(header))
+        )
+        with pytest.raises(TransportClosed):
+            await transport.recv()
