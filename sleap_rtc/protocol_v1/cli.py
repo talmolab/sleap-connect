@@ -36,6 +36,10 @@ from sleap_rtc.protocol_v1.runner import (
 )
 from sleap_rtc.worker.file_manager import FileManager
 
+# How long `serve` waits at startup for its iroh endpoint to reach a home
+# relay, so the first `pair` ticket is dialable from outside the LAN.
+IROH_ONLINE_TIMEOUT_SECS = 10.0
+
 
 def _parse_mount(raw: str) -> MountConfig:
     """Parse a `--mount` value: "PATH" or "PATH:LABEL"."""
@@ -253,6 +257,7 @@ async def _serve_async(
         file_manager=file_manager,
         enable_iroh=enable_iroh,
         enable_metrics=enable_metrics,
+        iroh_online_timeout=IROH_ONLINE_TIMEOUT_SECS,
     )
     try:
         click.echo(click.style("sleap-connect worker", bold=True))

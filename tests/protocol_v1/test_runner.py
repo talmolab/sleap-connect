@@ -388,3 +388,23 @@ class TestPartialStartupCleanup:
         # A leftover non-daemon thread is what kept `serve` hanging forever
         # after printing the bind error.
         assert leftover == []
+
+
+class TestIrohOnlineWait:
+    async def test_startup_continues_when_no_relay_arrives_in_time(
+        self, tmp_path, caplog
+    ):
+        # preset_minimal has no relay at all, so `online()` never resolves.
+        worker = await start_worker_server(
+            host="127.0.0.1",
+            port=0,
+            data_dir=tmp_path,
+            enable_iroh=True,
+            iroh_preset=iroh.preset_minimal(),
+            iroh_online_timeout=0.3,
+        )
+        try:
+            assert "found no home relay" in caplog.text
+            assert (tmp_path / "iroh_live.json").exists()
+        finally:
+            await worker.close()

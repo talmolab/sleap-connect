@@ -127,6 +127,7 @@ async def start_worker_server(
     enable_iroh: bool = False,
     iroh_preset: Optional[Any] = None,
     enable_metrics: bool = False,
+    iroh_online_timeout: Optional[float] = None,
 ) -> WorkerServer:
     """Assemble every protocol v1 piece and start listening.
 
@@ -159,6 +160,15 @@ async def start_worker_server(
             a real relay and reaches out to the real internet) — tests
             pass `iroh.preset_minimal()` so they have no external network
             dependency. Ignored unless `enable_iroh=True`.
+        iroh_online_timeout: If set, wait up to this many seconds for the
+            iroh endpoint to pick a home relay before publishing its live
+            file and returning. The relay arrives ~1-2 s after bind, and the
+            live file otherwise only refreshes every few seconds — so a
+            `sleap-rtc pair` run right after startup (the normal flow after
+            `serve --daemonize`) would mint a LAN-only ticket that a remote
+            client can't dial. On timeout (offline, relay blocked) startup
+            continues; the refresh loop still picks the relay up later.
+            `None` (tests, `preset_minimal` has no relay) doesn't wait.
 
     Returns:
         The running `WorkerServer` — `reattach_all` has already run by the
@@ -239,6 +249,17 @@ async def start_worker_server(
                 iroh.EndpointOptions(**endpoint_kwargs)
             )
             iroh_serve_task = asyncio.create_task(server.serve_iroh(iroh_endpoint))
+            if iroh_online_timeout is not None:
+                try:
+                    await asyncio.wait_for(
+                        iroh_endpoint.online(), timeout=iroh_online_timeout
+                    )
+                except asyncio.TimeoutError:
+                    logging.warning(
+                        f"[serve] iroh endpoint found no home relay within "
+                        f"{iroh_online_timeout:.0f}s; pairing tickets will "
+                        f"carry direct addresses only until it does"
+                    )
             # Publish this endpoint's reachability for `sleap-rtc pair` (a
             # separate process) to embed in tickets (item 2.1).
             write_iroh_live(

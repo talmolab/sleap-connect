@@ -224,9 +224,7 @@ class TestJobMetricsConsumer:
         # this). The race is timing-dependent and doesn't reliably fail a
         # real-ZMQ test, so this pins down the *call*, not the race itself.
         calls = []
-        monkeypatch.setattr(
-            consumer._reporter, "cleanup", lambda: calls.append("sync")
-        )
+        monkeypatch.setattr(consumer._reporter, "cleanup", lambda: calls.append("sync"))
         orig_async_cleanup = consumer._reporter.async_cleanup
 
         async def spy_async_cleanup():
