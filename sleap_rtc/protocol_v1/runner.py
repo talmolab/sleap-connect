@@ -181,65 +181,90 @@ async def start_worker_server(
     store = JobStore(job_store_path(data_dir))
     await store.connect()
 
-    reattach_outcomes = await reattach_all(store)
-    for job_id, outcome in reattach_outcomes.items():
-        logging.info(f"[serve] Startup reattach: job {job_id} -> {outcome}")
-
-    blob_index = BlobIndex(blob_index_path(data_dir))
-    blob_http_server = make_blob_http_server(blob_index, host, blob_port)
-    blob_port = blob_http_server.server_address[1]  # the real bound port
-    blob_http_thread = run_blob_http_server_in_thread(blob_http_server)
-
-    server = ProtocolV1Server(
-        node_id=identity.node_id,
-        blob_port=blob_port,
-        blob_index=blob_index,
-        sign_nonce=identity.sign,
-    )
-    AuthMethods(server, identity, trust_store, pending_pairings)
-    job_methods = JobMethods(
-        server,
-        store,
-        JobQueue(max_concurrent=1),
-        job_log_dir(data_dir),
-        file_manager=file_manager,
-        blob_index=blob_index,
-        metrics_ports=DEFAULT_ZMQ_PORTS if enable_metrics else None,
-    )
-
-    ws_server = await server.serve(host, port)
-
+    # Everything below starts something (a thread, a listening socket, an
+    # iroh endpoint) that keeps the process alive until it is closed. If a
+    # later step fails — most commonly the WS port already being in use —
+    # close what already started before re-raising, or the process prints
+    # the error and then hangs forever on the blob server's thread.
+    blob_index = None
+    blob_http_server = None
+    blob_http_thread = None
+    ws_server = None
     iroh_endpoint = None
-    iroh_serve_task = None
-    iroh_live_task = None
-    if enable_iroh:
-        # Deferred import: only a worker that actually enables iroh needs
-        # the dependency importable at all.
-        import iroh
+    try:
+        reattach_outcomes = await reattach_all(store)
+        for job_id, outcome in reattach_outcomes.items():
+            logging.info(f"[serve] Startup reattach: job {job_id} -> {outcome}")
 
-        from sleap_rtc.protocol_v1.iroh_transport import ALPN
+        blob_index = BlobIndex(blob_index_path(data_dir))
+        blob_http_server = make_blob_http_server(blob_index, host, blob_port)
+        blob_port = blob_http_server.server_address[1]  # the real bound port
+        blob_http_thread = run_blob_http_server_in_thread(blob_http_server)
 
-        endpoint_kwargs: Dict[str, Any] = {
-            "secret_key": identity.iroh_secret_key_bytes,
-            "alpns": [ALPN],
-        }
-        if iroh_preset is not None:
-            endpoint_kwargs["preset"] = iroh_preset
-        iroh_endpoint = await iroh.Endpoint.bind(
-            iroh.EndpointOptions(**endpoint_kwargs)
+        server = ProtocolV1Server(
+            node_id=identity.node_id,
+            blob_port=blob_port,
+            blob_index=blob_index,
+            sign_nonce=identity.sign,
         )
-        iroh_serve_task = asyncio.create_task(server.serve_iroh(iroh_endpoint))
-        # Publish this endpoint's reachability for `sleap-rtc pair` (a
-        # separate process) to embed in tickets (item 2.1).
-        write_iroh_live(
-            iroh_live_path(data_dir),
-            snapshot_iroh_section(iroh_endpoint, identity.node_id),
+        AuthMethods(server, identity, trust_store, pending_pairings)
+        job_methods = JobMethods(
+            server,
+            store,
+            JobQueue(max_concurrent=1),
+            job_log_dir(data_dir),
+            file_manager=file_manager,
+            blob_index=blob_index,
+            metrics_ports=DEFAULT_ZMQ_PORTS if enable_metrics else None,
         )
-        iroh_live_task = asyncio.create_task(
-            keep_iroh_live_updated(
-                iroh_endpoint, iroh_live_path(data_dir), identity.node_id
+
+        ws_server = await server.serve(host, port)
+
+        iroh_serve_task = None
+        iroh_live_task = None
+        if enable_iroh:
+            # Deferred import: only a worker that actually enables iroh needs
+            # the dependency importable at all.
+            import iroh
+
+            from sleap_rtc.protocol_v1.iroh_transport import ALPN
+
+            endpoint_kwargs: Dict[str, Any] = {
+                "secret_key": identity.iroh_secret_key_bytes,
+                "alpns": [ALPN],
+            }
+            if iroh_preset is not None:
+                endpoint_kwargs["preset"] = iroh_preset
+            iroh_endpoint = await iroh.Endpoint.bind(
+                iroh.EndpointOptions(**endpoint_kwargs)
             )
-        )
+            iroh_serve_task = asyncio.create_task(server.serve_iroh(iroh_endpoint))
+            # Publish this endpoint's reachability for `sleap-rtc pair` (a
+            # separate process) to embed in tickets (item 2.1).
+            write_iroh_live(
+                iroh_live_path(data_dir),
+                snapshot_iroh_section(iroh_endpoint, identity.node_id),
+            )
+            iroh_live_task = asyncio.create_task(
+                keep_iroh_live_updated(
+                    iroh_endpoint, iroh_live_path(data_dir), identity.node_id
+                )
+            )
+
+    except BaseException:
+        if iroh_endpoint is not None:
+            await iroh_endpoint.close()
+        if ws_server is not None:
+            ws_server.close()
+            await ws_server.wait_closed()
+        if blob_http_server is not None:
+            blob_http_server.shutdown()
+            blob_http_server.server_close()
+            blob_http_thread.join(timeout=5)
+        if blob_index is not None:
+            blob_index.close()
+        await store.close()
+        raise
 
     return WorkerServer(
         server=server,

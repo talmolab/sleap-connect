@@ -358,3 +358,33 @@ class TestMetricsWiring:
             assert worker.job_methods.metrics_ports == DEFAULT_ZMQ_PORTS
         finally:
             await worker.close()
+
+
+class TestPartialStartupCleanup:
+    """A failed startup must not leave anything running behind it."""
+
+    async def test_ws_port_in_use_closes_the_already_started_blob_server(
+        self, tmp_path
+    ):
+        import socket
+        import threading
+
+        with socket.socket() as taken:
+            taken.bind(("127.0.0.1", 0))
+            taken.listen()
+            port = taken.getsockname()[1]
+            threads_before = set(threading.enumerate())
+
+            with pytest.raises(OSError):
+                await start_worker_server(
+                    host="127.0.0.1", port=port, blob_port=0, data_dir=tmp_path
+                )
+
+        leftover = [
+            t
+            for t in set(threading.enumerate()) - threads_before
+            if t.is_alive() and not t.daemon
+        ]
+        # A leftover non-daemon thread is what kept `serve` hanging forever
+        # after printing the bind error.
+        assert leftover == []

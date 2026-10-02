@@ -7,15 +7,17 @@ find; `cli.py` just imports and registers `serve`/`pair`, and calls the
 `print_*_section` functions from within the existing `doctor`/`status`
 commands.
 
-**Not included in this PR:** OS service installation (`service install` —
-systemd --user+linger / LaunchAgent / Windows Task Scheduler). `serve` runs
-in the foreground; wrapping it as a persistent background service is a
-separate, substantial, OS-specific piece of work and a natural follow-up,
-not bundled in here.
+`serve --daemonize` / `serve --stop` run and stop the worker in the
+background (see `daemon.py`). OS service installation (`service install` —
+systemd --user / LaunchAgent / Windows Task Scheduler), for a worker that
+also comes back after a reboot, is a separate follow-up.
 """
 
 import asyncio
 import json
+import os
+import signal
+import sys
 import textwrap
 from pathlib import Path
 from typing import Optional
@@ -23,6 +25,7 @@ from typing import Optional
 import click
 
 from sleap_rtc.config import MountConfig
+from sleap_rtc.protocol_v1 import daemon
 from sleap_rtc.protocol_v1.runner import (
     DEFAULT_DATA_DIR,
     DEFAULT_PORT,
@@ -82,6 +85,27 @@ def _parse_mount(raw: str) -> MountConfig:
     "job.metric/job.curve events (item 3.1), so a remote client sees live "
     "training progress instead of only raw log lines.",
 )
+@click.option(
+    "--daemonize",
+    is_flag=True,
+    help="Run in the background: detach from this terminal (so it keeps "
+    "running after the terminal or SSH session closes) and return once the "
+    "worker is listening. Output goes to serve.log under --data-dir.",
+)
+@click.option(
+    "--stop",
+    is_flag=True,
+    help="Stop the worker running against --data-dir (e.g. one started with "
+    "--daemonize) and exit. Running jobs keep running and are reattached "
+    "by the next 'serve'.",
+)
+@click.option(
+    "--ready-file",
+    default=None,
+    hidden=True,
+    help="Internal: written once listening, so 'serve --daemonize' knows "
+    "its child is up.",
+)
 def serve(
     host: str,
     port: int,
@@ -90,6 +114,9 @@ def serve(
     mounts: tuple,
     iroh: bool,
     metrics: bool,
+    daemonize: bool,
+    stop: bool,
+    ready_file: Optional[str],
 ):
     """Run this machine as a sleap-connect worker (protocol v1).
 
@@ -98,17 +125,105 @@ def serve(
     connects straight to it over localhost/LAN/Tailscale, or via iroh if
     it can't reach this machine directly (see --iroh).
 
-    Runs in the foreground; press Ctrl-C to stop. To keep it running
-    persistently, use your OS's own service manager for now (systemd
-    --user, a LaunchAgent, or Task Scheduler) — first-class `service
-    install` support is a planned follow-up.
+    Runs in the foreground by default; press Ctrl-C to stop. With
+    --daemonize it runs in the background instead, surviving the terminal
+    or SSH session that started it, until 'serve --stop'. (It does not come
+    back after a reboot — that needs an OS service, a planned follow-up.)
 
-    Example:
+    Only one worker can run per --data-dir at a time.
+
+    Examples:
         sleap-rtc serve --port 9631 --mount /data/videos:lab-data
+        sleap-rtc serve --daemonize --mount /data/videos:lab-data
+        sleap-rtc serve --stop
     """
-    asyncio.run(
-        _serve_async(host, port, blob_port, Path(data_dir), mounts, iroh, metrics)
+    data_dir_path = Path(data_dir)
+
+    if stop:
+        _stop(data_dir_path)
+        return
+
+    if daemonize:
+        _daemonize(
+            daemon.serve_argv(
+                host=host,
+                port=port,
+                blob_port=blob_port,
+                data_dir=data_dir_path,
+                mounts=mounts,
+                iroh=iroh,
+                metrics=metrics,
+            ),
+            data_dir_path,
+        )
+        return
+
+    try:
+        daemon.acquire_pidfile(data_dir_path)
+    except daemon.AlreadyRunningError as e:
+        raise click.ClickException(_already_running_message(e, data_dir_path))
+    try:
+        asyncio.run(
+            _serve_async(
+                host,
+                port,
+                blob_port,
+                data_dir_path,
+                mounts,
+                iroh,
+                metrics,
+                ready_file=Path(ready_file) if ready_file else None,
+            )
+        )
+    finally:
+        daemon.release_pidfile(data_dir_path)
+
+
+def _already_running_message(e: daemon.AlreadyRunningError, data_dir: Path) -> str:
+    return (
+        f"A worker is already running against {data_dir} (pid "
+        f"{e.running.pid}). Stop it first with 'sleap-rtc serve --stop', or "
+        f"use a different --data-dir."
     )
+
+
+def _daemonize(argv: list, data_dir: Path) -> None:
+    running = daemon.read_running(data_dir)
+    if running is not None:
+        raise click.ClickException(
+            _already_running_message(daemon.AlreadyRunningError(running), data_dir)
+        )
+
+    click.echo("Starting worker in the background...")
+    try:
+        info = daemon.spawn_daemon(argv, data_dir)
+    except daemon.DaemonStartError as e:
+        if e.log_tail:
+            click.echo("")
+            click.echo(e.log_tail, err=True)
+            click.echo("")
+        raise click.ClickException(f"{e} (full log: {daemon.log_path(data_dir)})")
+
+    click.echo(click.style("sleap-connect worker running in the background", bold=True))
+    click.echo(f"  pid:       {info['pid']}")
+    click.echo(f"  node_id:   {info['node_id']}")
+    click.echo(f"  address:   {info['address']}")
+    click.echo(f"  log:       {daemon.log_path(data_dir)}")
+    click.echo("")
+    click.echo(
+        "Pair a client with 'sleap-rtc pair'; stop with 'sleap-rtc serve --stop'."
+    )
+
+
+def _stop(data_dir: Path) -> None:
+    try:
+        stopped = daemon.stop_running(data_dir)
+    except TimeoutError as e:
+        raise click.ClickException(str(e))
+    if stopped is None:
+        click.echo(f"No worker is running against {data_dir}.")
+    else:
+        click.echo(f"Stopped worker (pid {stopped.pid}).")
 
 
 async def _serve_async(
@@ -119,7 +234,16 @@ async def _serve_async(
     mounts: tuple = (),
     enable_iroh: bool = True,
     enable_metrics: bool = True,
+    ready_file: Optional[Path] = None,
 ) -> None:
+    # SIGTERM (`serve --stop`, `kill`, a service manager) gets the same clean
+    # shutdown as Ctrl-C instead of dying mid-write. Windows has no SIGTERM
+    # delivery to hook (see `daemon.stop_running`).
+    if sys.platform != "win32":
+        asyncio.get_running_loop().add_signal_handler(
+            signal.SIGTERM, asyncio.current_task().cancel
+        )
+
     file_manager = FileManager(mounts=[_parse_mount(m) for m in mounts])
     worker = await start_worker_server(
         host=host,
@@ -160,6 +284,16 @@ async def _serve_async(
 
         click.echo("")
         click.echo("Listening. Press Ctrl-C to stop.")
+        if ready_file is not None:
+            daemon.write_ready(
+                ready_file,
+                {
+                    "pid": os.getpid(),
+                    "node_id": worker.identity.node_id,
+                    "address": f"ws://{host}:{port}",
+                    "blob_port": worker.blob_port,
+                },
+            )
         await worker.ws_server.wait_closed()
     except (KeyboardInterrupt, asyncio.CancelledError):
         pass
@@ -301,6 +435,12 @@ def print_status_section(data_dir: Path = DEFAULT_DATA_DIR) -> None:
 
     identity = WorkerIdentity(id_path)
     click.echo(f"  node_id: {identity.node_id}")
+
+    running = daemon.read_running(data_dir)
+    if running is None:
+        click.echo("  Worker: not running")
+    else:
+        click.echo(f"  Worker: running (pid {running.pid})")
 
     trust_path = trust_store_path(data_dir)
     n_trusted = len(TrustStore(trust_path).list_trusted()) if trust_path.exists() else 0
