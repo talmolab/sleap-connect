@@ -287,6 +287,8 @@ async def start_worker_server(
         await store.close()
         raise
 
+    job_methods.resume_reattached(reattach_outcomes)
+
     return WorkerServer(
         server=server,
         identity=identity,

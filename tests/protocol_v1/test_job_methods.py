@@ -761,3 +761,134 @@ class TestMetricsWiring:
             blocker.setsockopt(zmq.LINGER, 0)
             blocker.close()
             ctx.term()
+
+
+class TestResumeReattached:
+    """A job left running by a previous worker is finished by the next one.
+
+    Simulates a worker restart in-process: the first `JobMethods` spawns
+    the job, then its watcher task is cancelled (the worker going away —
+    the job's detached process keeps running), and a second `JobMethods`
+    over the same store takes over via `reattach_all` + `resume_reattached`.
+    """
+
+    @staticmethod
+    def _job_cmd(go_file, exit_code=0):
+        # Prints a line, waits for the test to say "go", prints another.
+        return [
+            sys.executable,
+            "-c",
+            "import os, sys, time\n"
+            "print('line 1', flush=True)\n"
+            f"while not os.path.exists({str(go_file)!r}): time.sleep(0.05)\n"
+            "print('line 2', flush=True)\n"
+            f"sys.exit({exit_code})",
+        ]
+
+    async def _start_then_restart_worker(self, store, tmp_path, spec, cmd):
+        from sleap_rtc.jobs.process import reattach_all
+
+        first = _make_methods(store, tmp_path, cmd)
+        job_id = (await first.submit({"spec": spec.to_dict()}, conn=None))["job_id"]
+        deadline = time.monotonic() + 10
+        while not any(
+            ev.topic == "job.log" for ev in await store.get_events_since(job_id, 0)
+        ):
+            assert time.monotonic() < deadline, "job never logged its first line"
+            await asyncio.sleep(0.05)
+        task = first._tasks[job_id]
+        task.cancel()  # the first worker goes away; the job keeps running
+        await asyncio.gather(task, return_exceptions=True)
+        return job_id, reattach_all
+
+    async def _log_lines(self, store, job_id):
+        return [
+            ev.data["line"]
+            for ev in await store.get_events_since(job_id, 0)
+            if ev.topic == "job.log"
+        ]
+
+    async def test_a_reattached_job_completes_with_its_log_resumed_exactly(
+        self, store, spec, tmp_path
+    ):
+        go = tmp_path / "go"
+        cmd = self._job_cmd(go)
+        job_id, reattach_all = await self._start_then_restart_worker(
+            store, tmp_path, spec, cmd
+        )
+
+        outcomes = await reattach_all(store)
+        assert outcomes == {job_id: "reattached"}
+        second = _make_methods(store, tmp_path, cmd)
+        second.resume_reattached(outcomes)
+        go.touch()
+
+        record = await _wait_for_terminal(second, store, job_id)
+        assert record.state == "completed"
+        # No line lost or repeated across the restart.
+        assert await self._log_lines(store, job_id) == ["line 1", "line 2"]
+        topics = [ev.topic for ev in await store.get_events_since(job_id, 0)]
+        assert topics[-2:] == ["job.result", "job.status"]
+
+    async def test_a_reattached_job_that_fails_is_marked_failed_with_its_code(
+        self, store, spec, tmp_path
+    ):
+        go = tmp_path / "go"
+        cmd = self._job_cmd(go, exit_code=3)
+        job_id, reattach_all = await self._start_then_restart_worker(
+            store, tmp_path, spec, cmd
+        )
+
+        second = _make_methods(store, tmp_path, cmd)
+        second.resume_reattached(await reattach_all(store))
+        go.touch()
+
+        record = await _wait_for_terminal(second, store, job_id)
+        assert record.state == "failed"
+        assert record.error == "exit code 3"
+
+    async def test_a_job_that_finished_while_no_worker_ran_is_finalized(
+        self, store, spec, tmp_path
+    ):
+        from sleap_rtc.jobs.process import is_alive
+
+        go = tmp_path / "go"
+        cmd = self._job_cmd(go)
+        job_id, reattach_all = await self._start_then_restart_worker(
+            store, tmp_path, spec, cmd
+        )
+        go.touch()  # finishes while "no worker is running"
+        record = await store.get_job(job_id)
+        deadline = time.monotonic() + 10
+        while is_alive(record.pid, record.process_started_at):
+            assert time.monotonic() < deadline
+            await asyncio.sleep(0.05)
+
+        outcomes = await reattach_all(store)
+        assert outcomes == {job_id: "exited"}
+        second = _make_methods(store, tmp_path, cmd)
+        second.resume_reattached(outcomes)
+
+        record = await _wait_for_terminal(second, store, job_id)
+        assert record.state == "completed"
+        # The line printed while no worker was up is still delivered.
+        assert await self._log_lines(store, job_id) == ["line 1", "line 2"]
+
+    async def test_a_reattached_job_holds_the_queue_slot(self, store, spec, tmp_path):
+        go = tmp_path / "go"
+        cmd = self._job_cmd(go)
+        job_id, reattach_all = await self._start_then_restart_worker(
+            store, tmp_path, spec, cmd
+        )
+
+        second = _make_methods(store, tmp_path, cmd)
+        second.resume_reattached(await reattach_all(store))
+        await asyncio.sleep(0.2)
+        new_id = (await second.submit({"spec": spec.to_dict()}, conn=None))["job_id"]
+        await asyncio.sleep(1.0)
+        # Waits for the reattached job instead of sharing the GPU with it.
+        assert (await store.get_job(new_id)).state == "queued"
+
+        go.touch()
+        await _wait_for_terminal(second, store, job_id)
+        await _wait_for_terminal(second, store, new_id)
