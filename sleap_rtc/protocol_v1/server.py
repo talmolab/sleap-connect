@@ -186,6 +186,7 @@ class ProtocolV1Server:
         agent_platform: str = "unknown",
         blob_port: Optional[int] = None,
         blob_index: Optional[BlobIndex] = None,
+        sign_nonce: Optional[Callable[[str], str]] = None,
     ):
         """Initialize the server (does not start listening — see `serve`).
 
@@ -206,6 +207,15 @@ class ProtocolV1Server:
                 `_accept_iroh_blob_streams`). `None` disables that stream
                 (any open attempt gets `not_found`), independent of
                 `blob_port`/the HTTP path.
+            sign_nonce: Symmetric auth — signs an arbitrary nonce string
+                with this worker's long-term identity key, producing
+                `hello.proof` (see `envelope.Hello`). Typically
+                `WorkerIdentity.sign`; injected as a plain callable rather
+                than the whole identity object so this class doesn't need
+                to import/depend on `identity.py`. `None` disables `proof`
+                entirely (e.g. in tests not exercising auth) — the client
+                is expected to treat a missing `proof` the same as an
+                invalid one once this lands on the client side too.
         """
         self.node_id = node_id
         self.proto_min = proto_min
@@ -214,6 +224,7 @@ class ProtocolV1Server:
         self.agent_platform = agent_platform
         self.blob_port = blob_port
         self.blob_index = blob_index
+        self._sign_nonce = sign_nonce
         self.events = EventBus()
         self._methods: Dict[str, MethodHandler] = {}
 
@@ -397,6 +408,11 @@ class ProtocolV1Server:
         sent (`conn.own_nonce`) — `auth.prove` verifies the peer's signature
         of that nonce against that node_id.
 
+        Symmetric auth: signs the PEER's nonce (`frame.nonce`) with
+        `self._sign_nonce` and includes it as `hello.proof`, so the peer can
+        verify we hold `node_id`'s private key before trusting anything else
+        this connection says — see `envelope.Hello.proof`.
+
         Args:
             conn: The connection being established.
 
@@ -444,6 +460,7 @@ class ProtocolV1Server:
             node_id=self.node_id,
             nonce=conn.own_nonce,
             blob_port=self.blob_port,
+            proof=self._sign_nonce(frame.nonce) if self._sign_nonce else None,
         )
         await transport.send(our_hello.to_json())
         return True

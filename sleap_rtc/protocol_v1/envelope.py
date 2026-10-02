@@ -30,9 +30,7 @@ class Hello:
         agent: Identifies the sender — ``{"name", "version", "platform"}``.
         node_id: This side's persistent public-key identity (base64).
         nonce: Random per-connection nonce for the other side to sign back
-            in an `auth.prove` request (see protocol spec §3.3) — not
-            verified in this PR; see `sleap_rtc.protocol_v1.server` module
-            docstring for what's deferred to item 1.5.
+            in an `auth.prove` request (see protocol spec §3.3).
         blob_port: The worker's blob-serving HTTP port (spec §6.3), on the
             same host the client dialed for this WS connection — e.g.
             `GET http://<that host>:<blob_port>/blobs/<sha256>`. Additive
@@ -40,6 +38,18 @@ class Hello:
             worker not running the blob HTTP server, or when sent by a
             client (only workers serve blobs today). Only meaningful in the
             worker's own `hello`, never the client's.
+        proof: Symmetric auth: the WORKER's signature over the CLIENT's
+            `nonce` (the one in the client's own hello, previously unused —
+            see `nonce` above), proving the worker genuinely holds the
+            private key for the `node_id` it just claimed in this same
+            frame. The client verifies it immediately, before ever
+            attempting `pair.claim`/`auth.prove` — closing the gap where an
+            impostor could otherwise just lie about `node_id` in its hello
+            with no cryptographic proof at all. Only meaningful in the
+            worker's own hello; `None` when sent by a client (a client has
+            no long-lived key the OTHER side verifies this way — the
+            reverse direction, client-proves-to-worker, is what
+            `pair.claim`/`auth.prove` already do).
         v: Envelope version.
     """
 
@@ -48,6 +58,7 @@ class Hello:
     node_id: str
     nonce: str
     blob_port: Optional[int] = None
+    proof: Optional[str] = None
     v: int = PROTOCOL_VERSION
 
     def to_dict(self) -> dict:
@@ -62,6 +73,8 @@ class Hello:
         }
         if self.blob_port is not None:
             d["blob_port"] = self.blob_port
+        if self.proof is not None:
+            d["proof"] = self.proof
         return d
 
     def to_json(self) -> str:
@@ -78,6 +91,7 @@ class Hello:
             node_id=d["node_id"],
             nonce=d["nonce"],
             blob_port=d.get("blob_port"),
+            proof=d.get("proof"),
         )
 
 
