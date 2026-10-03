@@ -57,6 +57,9 @@ class TrainJobSpec:
     run_name: Optional[str] = None
     resume_ckpt_path: Optional[str] = None
     path_mappings: Dict[str, str] = field(default_factory=dict)
+    # Set by the protocol v1 worker itself (overriding anything a client
+    # sends) to a per-job folder, so it knows where sleap-nn put the model.
+    ckpt_dir: Optional[str] = None
 
     def __post_init__(self):
         """Normalize config_path/config_paths after initialization."""

@@ -291,7 +291,9 @@ class TestResultBlobs:
         result = await methods.submit({"spec": spec.to_dict()}, conn=None)
         record = await _wait_for_terminal(methods, store, result["job_id"])
 
-        assert record.result == {"blobs": {}}
+        assert record.result["blobs"] == {}
+        # A train job reports where its model went instead (see TestTrainOutputs).
+        assert "model_dir" in record.result
 
     async def test_job_result_is_emitted_before_job_status_completed(
         self, store, tmp_path
@@ -699,8 +701,8 @@ class TestMetricsWiring:
         events = await store.get_events_since(job_id)
         metrics = [e.data for e in events if e.topic == "job.metric"]
         assert any(m["latest_train_loss"] == 0.42 for m in metrics)
-        curves = [e.data for e in events if e.topic == "job.curve"]
-        assert any(c["points"] for c in curves)
+        epochs = [e.data for e in events if e.topic == "job.epoch"]
+        assert any(ep["train_loss"] == 0.42 for ep in epochs)
 
     async def test_track_job_never_starts_a_metrics_consumer(self, store, tmp_path):
         # TrackJobSpec has no epoch/loss stream — must not try to bind a
@@ -892,3 +894,161 @@ class TestResumeReattached:
         go.touch()
         await _wait_for_terminal(second, store, job_id)
         await _wait_for_terminal(second, store, new_id)
+
+
+class TestProgressLines:
+    """tqdm-style `\\r` redraws become throttled `progress` events."""
+
+    async def test_progress_bar_is_throttled_then_finalized_as_one_line(
+        self, store, spec, tmp_path
+    ):
+        # ~2.5 s of redraws, 20 per second, like a fast tqdm bar.
+        script = (
+            "import sys, time\n"
+            "print('start', flush=True)\n"
+            "for i in range(50):\n"
+            "    sys.stdout.write(f'\\rEpoch 1: {i*2}%|bar| {i}/50')\n"
+            "    sys.stdout.flush()\n"
+            "    time.sleep(0.05)\n"
+            "sys.stdout.write('\\rEpoch 1: 100%|bar| 50/50\\n')\n"
+            "print('done', flush=True)\n"
+        )
+        methods = _make_methods(store, tmp_path, [sys.executable, "-c", script])
+        job_id = (await methods.submit({"spec": spec.to_dict()}, conn=None))["job_id"]
+        await _wait_for_terminal(methods, store, job_id)
+
+        logs = [
+            e.data for e in await store.get_events_since(job_id) if e.topic == "job.log"
+        ]
+        lines = [d["line"] for d in logs if not d.get("progress")]
+        progress = [d["line"] for d in logs if d.get("progress")]
+
+        assert lines == ["start", "Epoch 1: 100%|bar| 50/50", "done"]
+        # Redraws are visible while running, but nowhere near one per redraw.
+        assert 1 <= len(progress) <= 5
+        assert all(p.startswith("Epoch 1: ") and "\r" not in p for p in progress)
+
+    async def test_crlf_output_is_not_mistaken_for_a_redraw(
+        self, store, spec, tmp_path
+    ):
+        script = "import sys; sys.stdout.write('a\\r\\nb\\r\\n')"
+        methods = _make_methods(store, tmp_path, [sys.executable, "-c", script])
+        job_id = (await methods.submit({"spec": spec.to_dict()}, conn=None))["job_id"]
+        await _wait_for_terminal(methods, store, job_id)
+
+        logs = [
+            e.data for e in await store.get_events_since(job_id) if e.topic == "job.log"
+        ]
+        assert logs == [{"line": "a"}, {"line": "b"}]
+
+
+class _CkptAwareBuilder:
+    """Runs `script(ckpt_dir)`, mimicking sleap-nn writing into its ckpt_dir."""
+
+    def __init__(self, script):
+        self._script = script
+
+    def build_command(self, spec):
+        return [sys.executable, "-c", self._script(spec.ckpt_dir)]
+
+
+def _make_ckpt_methods(store, tmp_path, script):
+    return JobMethods(
+        ProtocolV1Server(node_id="test-node"),
+        store,
+        JobQueue(max_concurrent=1),
+        log_dir=tmp_path / "job-logs",
+        command_builder=_CkptAwareBuilder(script),
+    )
+
+
+def _write_run(ckpt_dir, epochs=(), wait_for=None):
+    """Script: create a sleap-nn-like run folder, optionally logging epochs."""
+    return (
+        "import os, time\n"
+        f"run = os.path.join({ckpt_dir!r}, 'centroid')\n"
+        "os.makedirs(run, exist_ok=True)\n"
+        "open(os.path.join(run, 'training_config.yaml'), 'w').write('x: 1')\n"
+        "print('line 1', flush=True)\n"
+        + (
+            f"while not os.path.exists({str(wait_for)!r}): time.sleep(0.05)\n"
+            if wait_for
+            else ""
+        )
+        + "with open(os.path.join(run, 'training_log.csv'), 'w') as f:\n"
+        "    f.write('epoch,train_loss,val_loss,learning_rate\\n')\n"
+        + "".join(
+            f"    f.write('{e},{0.5 / (e + 1)},{0.6 / (e + 1)},0.001\\n')\n"
+            for e in epochs
+        )
+    )
+
+
+class TestTrainOutputs:
+    async def test_result_reports_model_dir_and_materialized_labels(
+        self, store, tmp_path
+    ):
+        import base64
+
+        spec = TrainJobSpec(
+            config_path="/data/centroid.yaml",
+            labels_content=base64.b64encode(b"slp-bytes").decode(),
+        )
+        methods = _make_ckpt_methods(store, tmp_path, _write_run)
+        job_id = (await methods.submit({"spec": spec.to_dict()}, conn=None))["job_id"]
+        record = await _wait_for_terminal(methods, store, job_id)
+
+        job_dir = tmp_path / "job-runs" / job_id
+        assert record.state == "completed"
+        assert record.result["model_dir"] == str(job_dir / "models" / "centroid")
+        assert record.result["labels_path"] == str(job_dir / "labels.slp")
+        assert (job_dir / "labels.slp").read_bytes() == b"slp-bytes"
+        result_events = [
+            e.data
+            for e in await store.get_events_since(job_id)
+            if e.topic == "job.result"
+        ]
+        assert result_events == [record.result]
+
+    async def test_client_supplied_ckpt_dir_is_overridden(self, store, tmp_path):
+        spec = TrainJobSpec(config_path="/data/c.yaml", ckpt_dir="/etc")
+        methods = _make_ckpt_methods(store, tmp_path, _write_run)
+        job_id = (await methods.submit({"spec": spec.to_dict()}, conn=None))["job_id"]
+        record = await _wait_for_terminal(methods, store, job_id)
+        assert record.result["model_dir"].startswith(str(tmp_path / "job-runs"))
+
+
+class TestReattachedEpochBackfill:
+    async def test_epochs_logged_while_no_worker_ran_are_backfilled_once(
+        self, store, tmp_path
+    ):
+        from sleap_rtc.jobs.process import reattach_all
+
+        go = tmp_path / "go"
+        script = lambda ckpt_dir: _write_run(ckpt_dir, epochs=(0, 1), wait_for=go)
+        spec = TrainJobSpec(config_path="/data/c.yaml")
+        first = _make_ckpt_methods(store, tmp_path, script)
+        job_id = (await first.submit({"spec": spec.to_dict()}, conn=None))["job_id"]
+        deadline = time.monotonic() + 10
+        while not any(
+            e.topic == "job.log" for e in await store.get_events_since(job_id)
+        ):
+            assert time.monotonic() < deadline
+            await asyncio.sleep(0.05)
+        task = first._tasks[job_id]
+        task.cancel()  # worker goes away
+        await asyncio.gather(task, return_exceptions=True)
+        go.touch()  # epochs get logged while no worker is running
+
+        second = _make_ckpt_methods(store, tmp_path, script)
+        second.resume_reattached(await reattach_all(store))
+        record = await _wait_for_terminal(second, store, job_id)
+
+        assert record.state == "completed"
+        epochs = [
+            e.data
+            for e in await store.get_events_since(job_id)
+            if e.topic == "job.epoch"
+        ]
+        assert [e["epoch"] for e in epochs] == [0, 1]
+        assert epochs[0]["train_loss"] == 0.5
