@@ -20,6 +20,7 @@ import logging
 import os
 import secrets
 import tempfile
+import time
 from pathlib import Path
 from typing import Callable, Dict, Optional
 
@@ -37,7 +38,7 @@ from sleap_rtc.jobs.store import TERMINAL_STATES, JobRecord, JobStore
 from sleap_rtc.protocol_v1.blobs import BlobIndex, compute_chunk_hashes, hash_file
 from sleap_rtc.protocol_v1.envelope import Event
 from sleap_rtc.protocol_v1.errors import JOB_NOT_FOUND, JOB_SPEC_INVALID, ProtocolError
-from sleap_rtc.protocol_v1.metrics import JobMetricsConsumer
+from sleap_rtc.protocol_v1.metrics import JobMetricsConsumer, read_training_log_epochs
 from sleap_rtc.protocol_v1.server import Connection, ProtocolV1Server
 
 # The line sleap-nn's track CLI prints on completion, e.g.
@@ -51,6 +52,20 @@ _OUTPUT_PATH_MARKER = "Predictions output path:"
 # extra dependency, and job.log traffic is inherently low-frequency (line-
 # buffered subprocess output, not the high-rate ZMQ batch_end stream).
 _LOG_POLL_INTERVAL_SECS = 0.5
+
+# How often an in-place progress bar's current state (a tqdm `\r` redraw) is
+# sent as a `job.log` `progress` event. tqdm redraws many times a second;
+# forwarding every redraw is what flooded clients' logs.
+_PROGRESS_EMIT_INTERVAL_SECS = 1.0
+
+
+def _visible_text(raw: str) -> str:
+    """What a terminal shows for `raw`: its last non-empty `\r` segment."""
+    for segment in reversed(raw.split("\r")):
+        segment = segment.rstrip()
+        if segment:
+            return segment
+    return ""
 
 
 def generate_job_id() -> str:
@@ -107,6 +122,9 @@ class JobMethods:
         self.store = store
         self.queue = queue
         self.log_dir = Path(log_dir)
+        # Per-job working folders (sleap-nn's ckpt_dir, materialized labels),
+        # alongside the logs, so a train job's model is always findable.
+        self.runs_dir = self.log_dir.parent / "job-runs"
         self.file_manager = file_manager
         self.blob_index = blob_index
         self.metrics_ports = metrics_ports
@@ -188,7 +206,11 @@ class JobMethods:
             await self._emit(job_id, "job.status", {"state": "running"})
 
             self._materialize_config_contents(spec)
-            self._materialize_labels_content(spec)
+            if isinstance(spec, TrainJobSpec):
+                job_dir = self._job_dir(job_id)
+                job_dir.mkdir(parents=True, exist_ok=True)
+                spec.ckpt_dir = str(job_dir / "models")
+                self._materialize_labels_content(spec, job_dir / "labels.slp")
             cmd = self._builder.build_command(spec)
             log_path = self.log_dir / f"{job_id}.log"
             if metrics_consumer is not None:
@@ -221,7 +243,10 @@ class JobMethods:
         """Record a job's terminal state once its process has exited."""
         if returncode == 0:
             blobs = await self._register_result_blobs(job_id, spec, log_path)
-            await self.store.update_state(job_id, "completed", result={"blobs": blobs})
+            result = {"blobs": blobs}
+            if isinstance(spec, TrainJobSpec):
+                result.update(self._train_outputs(job_id, spec))
+            await self.store.update_state(job_id, "completed", result=result)
             # job.result BEFORE job.status: completed — a client that
             # resolves its "wait for this job" promise as soon as it
             # sees the terminal status (the natural, simplest thing
@@ -230,7 +255,7 @@ class JobMethods:
             # instant a client considers a job over, it typically
             # unsubscribes, so a job.result arriving a message later
             # would silently go nowhere.
-            await self._emit(job_id, "job.result", {"blobs": blobs})
+            await self._emit(job_id, "job.result", result)
             await self._emit(job_id, "job.status", {"state": "completed"})
         else:
             if returncode is None:
@@ -245,6 +270,26 @@ class JobMethods:
                 job_id, "job.status", {"state": "failed", "detail": detail}
             )
 
+    def _job_dir(self, job_id: str) -> Path:
+        return self.runs_dir / job_id
+
+    def _train_outputs(self, job_id: str, spec) -> dict:
+        """Where a finished train job's model and training labels are.
+
+        `model_dir` is what `sleap-nn track --model_paths` takes, so a client
+        can run inference with it as a follow-up track job.
+        """
+        models = self._job_dir(job_id) / "models"
+        model_dirs = sorted(
+            (d for d in models.glob("*") if (d / "training_config.yaml").exists()),
+            key=lambda d: d.stat().st_mtime,
+        )
+        labels = self._job_dir(job_id) / "labels.slp"
+        return {
+            "model_dir": str(model_dirs[-1]) if model_dirs else None,
+            "labels_path": str(labels) if labels.exists() else spec.labels_path,
+        }
+
     def resume_reattached(self, reattach_outcomes: Dict[str, str]) -> None:
         """Take over jobs a previous worker left running (see `reattach_all`).
 
@@ -253,7 +298,11 @@ class JobMethods:
         each one still running (or that finished while no worker was up),
         resume tailing its log where the previous worker stopped and record
         its terminal state from the exit code `_exit_code_wrapper.py` wrote.
-        Live ZMQ metrics are not resumed; `job.log` lines are.
+
+        For a training job, also resumes live metrics: sleap-nn connects out
+        to the worker's ZMQ ports and reconnects on its own once they're
+        bound again. Epochs that finished while no worker was listening are
+        backfilled from sleap-nn's `training_log.csv`.
         """
         for job_id, outcome in reattach_outcomes.items():
             if outcome in ("reattached", "exited"):
@@ -266,17 +315,31 @@ class JobMethods:
             async with self.queue.slot():
                 record = await self.store.get_job(job_id)
                 log_path = Path(record.log_path)
+                events = await self.store.get_events_since(job_id, 0)
                 already_emitted = sum(
                     1
-                    for ev in await self.store.get_events_since(job_id, 0)
-                    if ev.topic == "job.log"
+                    for ev in events
+                    if ev.topic == "job.log" and not ev.data.get("progress")
                 )
-                await self._tail_log(
-                    job_id,
-                    log_path,
-                    lambda: is_alive(record.pid, record.process_started_at),
-                    skip_lines=already_emitted,
-                )
+                # Epochs that finished while no worker was listening, before
+                # the live stream takes over again.
+                await self._backfill_epochs(job_id)
+                metrics_consumer = self._make_metrics_consumer(job_id, record.spec)
+                try:
+                    if metrics_consumer is not None:
+                        self._start_metrics_consumer(job_id, metrics_consumer)
+                    await self._tail_log(
+                        job_id,
+                        log_path,
+                        lambda: is_alive(record.pid, record.process_started_at),
+                        skip_lines=already_emitted,
+                    )
+                finally:
+                    if metrics_consumer is not None:
+                        await metrics_consumer.stop()
+                # Anything that slipped between the two (e.g. an epoch ending
+                # right as the live stream was rebinding).
+                await self._backfill_epochs(job_id)
                 await self._finish(
                     job_id, record.spec, log_path, read_exit_code(log_path)
                 )
@@ -288,6 +351,23 @@ class JobMethods:
             )
         finally:
             self._tasks.pop(job_id, None)
+
+    async def _backfill_epochs(self, job_id: str) -> None:
+        """Emit `job.epoch` for epochs in the run's `training_log.csv` that no
+        `job.epoch` event reports yet (they finished while no worker was
+        listening to the job's ZMQ stream).
+        """
+        reported = {
+            ev.data.get("epoch")
+            for ev in await self.store.get_events_since(job_id, 0)
+            if ev.topic == "job.epoch"
+        }
+        models = self._job_dir(job_id) / "models"
+        for log_csv in sorted(models.glob("*/training_log.csv")):
+            for epoch in read_training_log_epochs(log_csv):
+                if epoch["epoch"] not in reported:
+                    reported.add(epoch["epoch"])
+                    await self._emit(job_id, "job.epoch", epoch)
 
     @staticmethod
     def _materialize_config_contents(spec) -> None:
@@ -324,7 +404,7 @@ class JobMethods:
         spec.config_paths = temp_paths
 
     @staticmethod
-    def _materialize_labels_content(spec) -> None:
+    def _materialize_labels_content(spec, dest: Optional[Path] = None) -> None:
         """Write `spec.labels_content` (base64-encoded raw .slp bytes) to a
         temp file and populate `spec.labels_path`, mirroring
         `_materialize_config_contents`'s exact approach for the same reason:
@@ -345,10 +425,14 @@ class JobMethods:
                 JOB_SPEC_INVALID, f"Invalid labels_content (not valid base64): {e}"
             ) from e
 
-        fd, temp_path = tempfile.mkstemp(suffix=".slp", prefix="job_labels_")
-        with os.fdopen(fd, "wb") as f:
-            f.write(raw)
-        spec.labels_path = temp_path
+        if dest is None:
+            fd, temp_path = tempfile.mkstemp(suffix=".slp", prefix="job_labels_")
+            with os.fdopen(fd, "wb") as f:
+                f.write(raw)
+            spec.labels_path = temp_path
+        else:
+            dest.write_bytes(raw)
+            spec.labels_path = str(dest)
 
     @staticmethod
     def _start_metrics_consumer(
@@ -395,13 +479,19 @@ class JobMethods:
         is_running: Callable[[], bool],
         skip_lines: int = 0,
     ) -> None:
-        """Poll a job's log file and emit each new line as a `job.log` event.
+        """Poll a job's log file and emit its output as `job.log` events.
 
-        Only complete lines are emitted (a partial last line waits for its
-        newline, or for the process to exit), so every non-empty line of the
-        file maps to exactly one `job.log` event. That is what lets a
-        restarted worker resume a reattached job's log by skipping the
-        `skip_lines` lines the previous worker already emitted.
+        Each finished (newline-terminated) line is one `job.log` event with
+        what a terminal would show for it: a line redrawn in place with
+        `\r` (a tqdm progress bar) collapses to its final state. That keeps
+        lines 1:1 with events, which is what lets a restarted worker resume
+        a reattached job's log by skipping the `skip_lines` lines the
+        previous worker already emitted.
+
+        A progress bar that is still being redrawn (no newline yet) is sent
+        as `{"line": <current state>, "progress": True}` at most every
+        `_PROGRESS_EMIT_INTERVAL_SECS`; clients replace the previous progress
+        line with it instead of appending.
 
         Stops once `is_running()` is false (i.e. the subprocess itself has
         exited) — not once the job's *stored* state is no longer "running",
@@ -410,11 +500,13 @@ class JobMethods:
         """
         pos = 0
         partial = ""
+        last_progress = ""
+        last_progress_at = 0.0
         while True:
             await asyncio.sleep(_LOG_POLL_INTERVAL_SECS)
             done = not is_running()  # checked before reading: no lost tail
             if log_path.exists():
-                with open(log_path, "r", errors="replace") as f:
+                with open(log_path, "r", errors="replace", newline="") as f:
                     f.seek(pos)
                     new_data = f.read()
                     pos = f.tell()
@@ -424,13 +516,31 @@ class JobMethods:
                     lines.append(partial)
                     partial = ""
                 for line in lines:
-                    line = line.rstrip("\r")
+                    line = _visible_text(line)
                     if not line:
                         continue
+                    last_progress = ""
                     if skip_lines > 0:
                         skip_lines -= 1
                         continue
                     await self._emit(job_id, "job.log", {"line": line})
+
+                if "\r" in partial:
+                    # Only the latest redraw matters; don't let a long epoch's
+                    # thousands of redraws accumulate in memory.
+                    cut = partial.rstrip("\r").rfind("\r")
+                    partial = partial[cut:]
+                    current = _visible_text(partial)
+                    now = time.monotonic()
+                    if (
+                        current
+                        and current != last_progress
+                        and now - last_progress_at >= _PROGRESS_EMIT_INTERVAL_SECS
+                    ):
+                        last_progress, last_progress_at = current, now
+                        await self._emit(
+                            job_id, "job.log", {"line": current, "progress": True}
+                        )
 
             if done:
                 return

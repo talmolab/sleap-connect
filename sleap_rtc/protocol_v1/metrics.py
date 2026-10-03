@@ -15,11 +15,17 @@ has been live since before protocol v1 existed) is a JSON object with an
 ...), `epoch`, and a `logs` dict with `"loss"`/`"train/loss"`/`"val/loss"`
 keys (occasionally nested under `py_dict` instead — jsonpickle encoding
 quirk from older sleap-nn versions).
+
+Emits, rate-capped to `EMIT_INTERVAL_SECS`: one `job.epoch` per completed
+epoch (persisted, so replaying a job's events rebuilds its epoch loss plot),
+`job.curve` (batch-level loss, M4-downsampled, whole curve each time) and a
+`job.metric` summary (ETA, best loss, wandb link).
 """
 
 import asyncio
 import json
 import logging
+import math
 from dataclasses import dataclass, field
 from typing import Awaitable, Callable, Dict, List, Optional, Tuple
 
@@ -36,6 +42,58 @@ MAX_CURVE_POINTS = 1000
 MAX_CURVE_BUCKETS = MAX_CURVE_POINTS // 4
 
 EmitFn = Callable[[str, dict], Awaitable[None]]
+
+
+def _finite_or_none(value) -> Optional[float]:
+    if isinstance(value, (int, float)) and math.isfinite(value):
+        return float(value)
+    return None
+
+
+def epoch_event(epoch, train_loss, val_loss) -> dict:
+    """A `job.epoch` event payload: one completed epoch's losses."""
+    return {
+        "epoch": int(epoch),
+        "train_loss": _finite_or_none(train_loss),
+        "val_loss": _finite_or_none(val_loss),
+    }
+
+
+def read_training_log_epochs(csv_path) -> List[dict]:
+    """`job.epoch` payloads for every epoch in sleap-nn's `training_log.csv`.
+
+    sleap-nn's `CSVLoggerCallback` writes one row per epoch (`epoch`,
+    `train_loss`, `val_loss`, ...) into the run folder. A restarted worker
+    uses this to backfill the epochs that finished while no worker was
+    listening to the job's ZMQ stream.
+    """
+    import csv
+
+    epochs = []
+    try:
+        with open(csv_path, newline="") as f:
+            for row in csv.DictReader(f):
+                try:
+                    epoch = int(float(row["epoch"]))
+                except (KeyError, TypeError, ValueError):
+                    continue
+                epochs.append(
+                    epoch_event(
+                        epoch,
+                        _to_float(row.get("train_loss")),
+                        _to_float(row.get("val_loss")),
+                    )
+                )
+    except FileNotFoundError:
+        pass
+    return epochs
+
+
+def _to_float(value) -> Optional[float]:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def downsample_m4(
@@ -125,7 +183,10 @@ class _MetricsState:
     best_loss: Optional[float] = None
     wandb_url: Optional[str] = None
     eta_seconds: Optional[float] = None
+    # Batch-level train loss only, x = global batch step. Epoch losses go
+    # out separately as one `job.epoch` event per epoch (`pending_epochs`).
     curve: List[Tuple[float, float]] = field(default_factory=list)
+    pending_epochs: List[dict] = field(default_factory=list)
     dirty: bool = False
     _epoch_started_at: Optional[float] = None
     _epoch_durations: List[float] = field(default_factory=list)
@@ -240,10 +301,10 @@ class JobMetricsConsumer:
             self._state.latest_train_loss = float(train_loss)
             if self._state.best_loss is None or train_loss < self._state.best_loss:
                 self._state.best_loss = float(train_loss)
-            self._step += 1.0
-            self._state.curve.append((self._step, float(train_loss)))
         if isinstance(val_loss, (int, float)):
             self._state.latest_val_loss = float(val_loss)
+        if isinstance(epoch, (int, float)):
+            self._state.pending_epochs.append(epoch_event(epoch, train_loss, val_loss))
 
         self._state.eta_seconds = self._estimate_eta()
         self._state.dirty = True
@@ -279,6 +340,11 @@ class JobMetricsConsumer:
     async def _emit_metric_and_curve(self) -> None:
         s = self._state
         try:
+            # Every epoch, not just the latest: these are what a client
+            # replaying the job's events rebuilds the epoch loss plot from.
+            pending, s.pending_epochs = s.pending_epochs, []
+            for ev in pending:
+                await self._emit("job.epoch", ev)
             await self._emit(
                 "job.metric",
                 {

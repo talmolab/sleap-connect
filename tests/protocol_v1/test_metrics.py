@@ -142,7 +142,7 @@ class TestJobMetricsConsumer:
     """Tests for `JobMetricsConsumer` — real ZMQ messages in, job.metric/
     job.curve events out, rate-capped."""
 
-    async def test_epoch_end_updates_metric_and_curve(
+    async def test_epoch_end_updates_metric_and_emits_job_epoch(
         self, consumer, fake_sleap_nn_publisher
     ):
         fake_sleap_nn_publisher.send_string(
@@ -162,8 +162,11 @@ class TestJobMetricsConsumer:
         assert metric["best_loss"] == 0.5
         assert metric["total_epochs"] == 10
 
+        epoch = await _wait_for_emit(consumer.recorder, "job.epoch")
+        assert epoch == {"epoch": 0, "train_loss": 0.5, "val_loss": 0.6}
+        # Epoch losses are not mixed into the batch-level curve.
         curve = await _wait_for_emit(consumer.recorder, "job.curve")
-        assert curve["points"][-1]["y"] == 0.5
+        assert curve["points"] == []
 
     async def test_best_loss_tracks_the_minimum_across_epochs(
         self, consumer, fake_sleap_nn_publisher
