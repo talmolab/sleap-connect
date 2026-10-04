@@ -23,6 +23,7 @@ from sleap_rtc.jobs.store import JobStore
 from sleap_rtc.protocol_v1.blobs import BlobIndex
 from sleap_rtc.protocol_v1.errors import JOB_NOT_FOUND, ProtocolError
 from sleap_rtc.protocol_v1.job_methods import JobMethods
+from sleap_rtc.protocol_v1 import job_methods as job_methods_module
 from sleap_rtc.protocol_v1.server import Connection, ProtocolV1Server
 
 TERMINAL_STATES = ("completed", "failed", "canceled")
@@ -90,6 +91,14 @@ async def _wait_for_state(store, job_id, state, timeout=5):
     raise AssertionError(
         f"job {job_id} did not reach state {state!r} within {timeout}s"
     )
+
+
+@pytest.fixture(autouse=True)
+def _skip_input_preflight(request, monkeypatch):
+    """Most tests here run a fake command against made-up input paths (they
+    never read them); only `TestPreflight` exercises the missing-input check."""
+    if request.cls is None or request.cls.__name__ != "TestPreflight":
+        monkeypatch.setattr(job_methods_module, "_missing_inputs", lambda spec: [])
 
 
 @pytest.fixture
@@ -1145,3 +1154,39 @@ class TestJobSummaries:
         (listed,) = (await methods.list_jobs({}, conn=None))["jobs"]
         assert listed["state"] == "failed"
         assert listed["error"] == "exit code 4"
+
+
+class TestPreflight:
+    """A job whose input files are missing fails before anything is spawned."""
+
+    async def test_missing_labels_fail_fast_without_spawning(self, store, tmp_path):
+        marker = tmp_path / "spawned"
+        config = tmp_path / "c.yaml"
+        config.write_text("x: 1")
+        spec = TrainJobSpec(config_paths=[str(config)], labels_path="/nope/labels.slp")
+        methods = _make_methods(
+            store, tmp_path, [sys.executable, "-c", f"open({str(marker)!r}, 'w')"]
+        )
+        job_id = (await methods.submit({"spec": spec.to_dict()}, conn=None))["job_id"]
+        record = await _wait_for_terminal(methods, store, job_id)
+
+        assert record.state == "failed"
+        assert record.error == "not found on worker: /nope/labels.slp"
+        assert not marker.exists()
+        status = [
+            e.data
+            for e in await store.get_events_since(job_id)
+            if e.topic == "job.status"
+        ][-1]
+        assert status["missing"] == ["/nope/labels.slp"]
+
+    async def test_missing_model_fails_a_track_job(self, store, tmp_path):
+        data = tmp_path / "v.slp"
+        data.write_bytes(b"x")
+        spec = TrackJobSpec(data_path=str(data), model_paths=["/nope/model"])
+        methods = _make_methods(store, tmp_path, [sys.executable, "-c", "pass"])
+        job_id = (await methods.submit({"spec": spec.to_dict()}, conn=None))["job_id"]
+        record = await _wait_for_terminal(methods, store, job_id)
+
+        assert record.state == "failed"
+        assert "/nope/model" in record.error

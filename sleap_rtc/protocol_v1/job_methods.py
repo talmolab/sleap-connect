@@ -235,6 +235,16 @@ class JobMethods:
                 job_dir.mkdir(parents=True, exist_ok=True)
                 spec.ckpt_dir = str(job_dir / "models")
                 self._materialize_labels_content(spec, job_dir / "labels.slp")
+            missing = _missing_inputs(spec)
+            if missing:
+                detail = f"not found on worker: {missing[0]}"
+                await self.store.update_state(job_id, "failed", error=detail)
+                await self._emit(
+                    job_id,
+                    "job.status",
+                    {"state": "failed", "detail": detail, "missing": missing},
+                )
+                return
             cmd = self._builder.build_command(spec)
             log_path = self.log_dir / f"{job_id}.log"
             if metrics_consumer is not None:
@@ -752,6 +762,21 @@ class JobMethods:
         if record is None:
             raise ProtocolError(JOB_NOT_FOUND, f"No such job: {job_id}")
         return record
+
+
+def _missing_inputs(spec) -> List[str]:
+    """Input paths a job names that don't exist on this worker.
+
+    Checked before spawning, so a moved or mistyped file fails the job in
+    seconds instead of partway into training. Video files referenced *inside*
+    an SLP are not checked here (that would mean parsing it); clients check
+    those with `fs.stat` before submitting.
+    """
+    if isinstance(spec, TrainJobSpec):
+        paths = [spec.labels_path, spec.val_labels_path, *spec.config_paths]
+    else:
+        paths = [spec.data_path, *spec.model_paths]
+    return [p for p in paths if p and not Path(p).exists()]
 
 
 def _spec_summary(spec) -> dict:
