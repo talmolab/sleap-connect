@@ -1190,3 +1190,47 @@ class TestPreflight:
 
         assert record.state == "failed"
         assert "/nope/model" in record.error
+
+
+class TestCancelBeforeSpawn:
+    """Cancelling a job that hasn't started its process yet must stop it from
+    ever starting (previously it was marked failed and then ran anyway)."""
+
+    async def test_cancelling_a_queued_job_means_it_never_runs(
+        self, store, spec, tmp_path
+    ):
+        go = tmp_path / "go"
+        marker = tmp_path / "second-ran"
+        blocker = [
+            sys.executable,
+            "-c",
+            f"import os, time\nwhile not os.path.exists({str(go)!r}): time.sleep(0.05)",
+        ]
+        methods = _make_methods(store, tmp_path, blocker)
+        first = (await methods.submit({"spec": spec.to_dict()}, conn=None))["job_id"]
+        await _wait_for_state(store, first, "running")
+        methods._builder = _FakeCommandBuilder(
+            [sys.executable, "-c", f"open({str(marker)!r}, 'w')"]
+        )
+        second = (await methods.submit({"spec": spec.to_dict()}, conn=None))["job_id"]
+        await asyncio.sleep(0.1)
+
+        await methods.cancel({"job_id": second}, conn=None)
+        go.touch()
+        await _wait_for_terminal(methods, store, first)
+        record = await _wait_for_terminal(methods, store, second)
+
+        assert record.state == "canceled"
+        assert not marker.exists()
+
+    async def test_cancel_right_after_submit_never_spawns(self, store, spec, tmp_path):
+        marker = tmp_path / "ran"
+        methods = _make_methods(
+            store, tmp_path, [sys.executable, "-c", f"open({str(marker)!r}, 'w')"]
+        )
+        job_id = (await methods.submit({"spec": spec.to_dict()}, conn=None))["job_id"]
+        await methods.cancel({"job_id": job_id, "mode": "stop"}, conn=None)
+
+        record = await _wait_for_terminal(methods, store, job_id)
+        assert record.state == "canceled"
+        assert not marker.exists()

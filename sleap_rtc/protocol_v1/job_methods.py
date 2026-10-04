@@ -147,6 +147,10 @@ class JobMethods:
         # Jobs waiting for a queue slot, in arrival order (the queue is FIFO),
         # so clients can show "#2 in line".
         self._waiting: List[str] = []
+        # Cancels that arrived before the job's process existed (queued, or
+        # between "running" and spawn): honored before spawning, or signalled
+        # right after it if the request landed mid-spawn. mode: "stop"/"cancel".
+        self._cancel_requested: Dict[str, str] = {}
 
         server.register("jobs.submit", self.submit)
         server.register("jobs.cancel", self.cancel)
@@ -226,6 +230,8 @@ class JobMethods:
         self, job_id: str, spec, metrics_consumer: Optional[JobMetricsConsumer]
     ) -> None:
         try:
+            if await self._honor_early_cancel(job_id):
+                return
             await self.store.update_state(job_id, "running")
             await self._emit(job_id, "job.status", {"state": "running"})
 
@@ -245,6 +251,8 @@ class JobMethods:
                     {"state": "failed", "detail": detail, "missing": missing},
                 )
                 return
+            if await self._honor_early_cancel(job_id):
+                return
             cmd = self._builder.build_command(spec)
             log_path = self.log_dir / f"{job_id}.log"
             if metrics_consumer is not None:
@@ -252,6 +260,11 @@ class JobMethods:
             process = await spawn_detached(
                 cmd, job_id=job_id, store=self.store, log_path=log_path
             )
+            late_cancel = self._cancel_requested.pop(job_id, None)
+            if late_cancel == "stop":
+                send_stop_signal(process.pid)
+            elif late_cancel is not None:
+                send_cancel_signal(process.pid)
 
             tail_task = asyncio.create_task(
                 self._tail_log(job_id, log_path, lambda: process.returncode is None)
@@ -270,6 +283,15 @@ class JobMethods:
             await self._emit(
                 job_id, "job.status", {"state": "failed", "detail": str(e)}
             )
+
+    async def _honor_early_cancel(self, job_id: str) -> bool:
+        """End a job as canceled if a cancel arrived before its process exists."""
+        if self._cancel_requested.pop(job_id, None) is None:
+            return False
+        detail = "canceled before it started"
+        await self.store.update_state(job_id, "canceled", error=detail)
+        await self._emit(job_id, "job.status", {"state": "canceled", "detail": detail})
+        return True
 
     async def _finish(
         self, job_id: str, spec, log_path: Path, returncode: Optional[int]
@@ -680,6 +702,10 @@ class JobMethods:
                 send_stop_signal(record.pid)
             else:
                 send_cancel_signal(record.pid)
+        elif job_id in self._tasks:
+            # Ours, but its process doesn't exist yet (queued, or about to
+            # spawn): make sure it never starts, or is signalled on start.
+            self._cancel_requested[job_id] = mode
         else:
             detail = "job's subprocess was not running when cancel was requested"
             await self.store.update_state(job_id, "failed", error=detail)
