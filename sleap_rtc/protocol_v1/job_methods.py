@@ -18,6 +18,7 @@ import binascii
 import json
 import logging
 import os
+import re
 import secrets
 import tempfile
 import time
@@ -59,8 +60,14 @@ _LOG_POLL_INTERVAL_SECS = 0.5
 _PROGRESS_EMIT_INTERVAL_SECS = 1.0
 
 
+# CSI (ESC [ ... final byte) and OSC (ESC ] ... BEL/ST) sequences, as emitted
+# by rich/tqdm progress output. They render invisibly but end up in copied logs.
+_ANSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)")
+
+
 def _visible_text(raw: str) -> str:
     """What a terminal shows for `raw`: its last non-empty `\r` segment."""
+    raw = _ANSI_RE.sub("", raw)
     for segment in reversed(raw.split("\r")):
         segment = segment.rstrip()
         if segment:

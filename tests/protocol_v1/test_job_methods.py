@@ -928,6 +928,20 @@ class TestProgressLines:
         assert 1 <= len(progress) <= 5
         assert all(p.startswith("Epoch 1: ") and "\r" not in p for p in progress)
 
+    async def test_ansi_control_sequences_are_stripped(self, store, spec, tmp_path):
+        script = (
+            "import sys\n"
+            "sys.stdout.write('\\x1b[2K\\x1b[1Aloading \\x1b[32mok\\x1b[0m\\n')\n"
+        )
+        methods = _make_methods(store, tmp_path, [sys.executable, "-c", script])
+        job_id = (await methods.submit({"spec": spec.to_dict()}, conn=None))["job_id"]
+        await _wait_for_terminal(methods, store, job_id)
+
+        logs = [
+            e.data for e in await store.get_events_since(job_id) if e.topic == "job.log"
+        ]
+        assert logs == [{"line": "loading ok"}]
+
     async def test_crlf_output_is_not_mistaken_for_a_redraw(
         self, store, spec, tmp_path
     ):
