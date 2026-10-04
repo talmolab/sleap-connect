@@ -414,9 +414,7 @@ class TestAgentInfo:
     async def test_hello_reports_the_real_version_and_platform(self, tmp_path):
         import sys
 
-        worker = await start_worker_server(
-            host="127.0.0.1", port=0, data_dir=tmp_path
-        )
+        worker = await start_worker_server(host="127.0.0.1", port=0, data_dir=tmp_path)
         try:
             port = worker.ws_server.sockets[0].getsockname()[1]
             ws = await websockets.connect(f"ws://127.0.0.1:{port}")
@@ -435,3 +433,30 @@ class TestAgentInfo:
 
         assert hello.agent["version"] not in ("", "0.0.0")
         assert hello.agent["platform"] == sys.platform
+
+
+class TestWorkerInfoWiring:
+    async def test_worker_info_is_served(self, tmp_path, monkeypatch):
+        from sleap_rtc.protocol_v1 import worker_info
+
+        monkeypatch.setattr(
+            worker_info,
+            "_detect_hardware",
+            lambda: {
+                "gpu_model": "CPU",
+                "gpu_memory_mb": 0,
+                "gpu_count": 0,
+                "cuda_version": "N/A",
+                "sleap_nn_version": "x",
+            },
+        )
+        worker = await start_worker_server(host="127.0.0.1", port=0, data_dir=tmp_path)
+        try:
+            port = worker.ws_server.sockets[0].getsockname()[1]
+            ticket = worker.pending_pairings.create(worker.identity.node_id, [])
+            node_id = public_key_to_b64(generate_keypair()[1])
+            reply = await _pair_and_call(port, ticket.secret, node_id, "worker.info")
+        finally:
+            await worker.close()
+        assert reply.result["gpu_model"] == "CPU"
+        assert reply.result["busy"] is False

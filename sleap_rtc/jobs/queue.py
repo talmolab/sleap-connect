@@ -43,11 +43,17 @@ class JobQueue:
             raise ValueError("max_concurrent must be >= 1")
         self._semaphore = Semaphore(max_concurrent)
         self._waiting = 0
+        self._running = 0
 
     @property
     def waiting(self) -> int:
         """Number of jobs currently queued, waiting for a free slot."""
         return self._waiting
+
+    @property
+    def running(self) -> int:
+        """Number of slots currently held (jobs executing)."""
+        return self._running
 
     async def acquire(self) -> None:
         """Wait for a free execution slot, incrementing `waiting` while queued."""
@@ -56,9 +62,11 @@ class JobQueue:
             await self._semaphore.acquire()
         finally:
             self._waiting -= 1
+        self._running += 1
 
     def release(self) -> None:
         """Free the execution slot for the next queued job."""
+        self._running -= 1
         self._semaphore.release()
 
     def slot(self) -> "_JobSlot":

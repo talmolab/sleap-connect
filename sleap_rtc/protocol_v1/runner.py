@@ -40,6 +40,7 @@ from sleap_rtc.protocol_v1.iroh_live import (
 from sleap_rtc.protocol_v1.job_methods import JobMethods
 from sleap_rtc.protocol_v1.pairing import PendingPairings
 from sleap_rtc.protocol_v1.server import ProtocolV1Server
+from sleap_rtc.protocol_v1.worker_info import WorkerInfoMethods
 from sleap_rtc.protocol_v1.trust_store import TrustStore
 
 DEFAULT_DATA_DIR = Path.home() / ".sleap-rtc" / "protocol_v1"
@@ -230,10 +231,12 @@ async def start_worker_server(
             agent_platform=sys.platform,
         )
         AuthMethods(server, identity, trust_store, pending_pairings)
+        queue = JobQueue(max_concurrent=1)
+        WorkerInfoMethods(server, queue)
         job_methods = JobMethods(
             server,
             store,
-            JobQueue(max_concurrent=1),
+            queue,
             job_log_dir(data_dir),
             file_manager=file_manager,
             blob_index=blob_index,
