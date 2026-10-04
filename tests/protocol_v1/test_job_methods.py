@@ -1066,3 +1066,27 @@ class TestReattachedEpochBackfill:
         ]
         assert [e["epoch"] for e in epochs] == [0, 1]
         assert epochs[0]["train_loss"] == 0.5
+
+
+class TestQueuePosition:
+    async def test_waiting_jobs_report_their_place_in_line(self, store, spec, tmp_path):
+        go = tmp_path / "go"
+        cmd = [
+            sys.executable,
+            "-c",
+            f"import os, time\nwhile not os.path.exists({str(go)!r}): time.sleep(0.05)",
+        ]
+        methods = _make_methods(store, tmp_path, cmd)
+        ids = [
+            (await methods.submit({"spec": spec.to_dict()}, conn=None))["job_id"]
+            for _ in range(3)
+        ]
+        await _wait_for_state(store, ids[0], "running")
+        await asyncio.sleep(0.1)
+
+        assert [methods.queue_position(i) for i in ids] == [None, 1, 2]
+
+        go.touch()
+        for job_id in ids:
+            await _wait_for_terminal(methods, store, job_id)
+        assert [methods.queue_position(i) for i in ids] == [None, None, None]

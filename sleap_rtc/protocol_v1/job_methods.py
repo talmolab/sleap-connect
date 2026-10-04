@@ -23,7 +23,7 @@ import secrets
 import tempfile
 import time
 from pathlib import Path
-from typing import Callable, Dict, Optional
+from typing import Callable, Dict, List, Optional
 
 from sleap_rtc.jobs.builder import DEFAULT_ZMQ_PORTS, CommandBuilder
 from sleap_rtc.jobs.process import (
@@ -144,6 +144,9 @@ class JobMethods:
         # store for a terminal state, which races with those emits still
         # landing.
         self._tasks: Dict[str, asyncio.Task] = {}
+        # Jobs waiting for a queue slot, in arrival order (the queue is FIFO),
+        # so clients can show "#2 in line".
+        self._waiting: List[str] = []
 
         server.register("jobs.submit", self.submit)
         server.register("jobs.cancel", self.cancel)
@@ -193,8 +196,20 @@ class JobMethods:
         finally:
             self._tasks.pop(job_id, None)
 
+    def queue_position(self, job_id: str) -> Optional[int]:
+        """1-based place in line of a job waiting for a slot, else None."""
+        try:
+            return self._waiting.index(job_id) + 1
+        except ValueError:
+            return None
+
     async def _run_job_body(self, job_id: str, spec) -> None:
-        async with self.queue.slot():
+        self._waiting.append(job_id)
+        try:
+            await self.queue.acquire()
+        finally:
+            self._waiting.remove(job_id)
+        try:
             metrics_consumer = self._make_metrics_consumer(job_id, spec)
             try:
                 await self._run_job_inner(job_id, spec, metrics_consumer)
@@ -204,6 +219,8 @@ class JobMethods:
                 # leaked ZMQ bind here would break the *next* job too.
                 if metrics_consumer is not None:
                     await metrics_consumer.stop()
+        finally:
+            self.queue.release()
 
     async def _run_job_inner(
         self, job_id: str, spec, metrics_consumer: Optional[JobMetricsConsumer]
