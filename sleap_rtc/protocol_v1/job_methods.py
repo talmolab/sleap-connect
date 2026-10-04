@@ -682,17 +682,35 @@ class JobMethods:
     async def status(self, params: dict, conn: Connection) -> dict:
         """Handle `jobs.status` — a full snapshot of one job."""
         record = await self._get_job_or_raise(params["job_id"])
-        return _record_to_dict(record)
+        summary = _spec_summary(record.spec)
+        return {
+            **_record_to_dict(record),
+            **summary,
+            "queue_position": self.queue_position(record.job_id),
+        }
 
     async def list_jobs(self, params: dict, conn: Connection) -> dict:
-        """Handle `jobs.list` — a summary of every job this worker knows about."""
-        records = await self.store.list_jobs()
-        return {
-            "jobs": [
-                {"job_id": r.job_id, "state": r.state, "created_at": r.created_at}
-                for r in records
-            ]
-        }
+        """Handle `jobs.list` — a summary of every job this worker knows about.
+
+        Newest first. Each entry is small enough to list hundreds of jobs: no
+        full spec (`jobs.status` has it) and never inline labels.
+        """
+        jobs = []
+        for r in await self.store.list_jobs():
+            summary = _spec_summary(r.spec)
+            summary.pop("spec")
+            jobs.append(
+                {
+                    "job_id": r.job_id,
+                    "state": r.state,
+                    "created_at": r.created_at,
+                    "updated_at": r.updated_at,
+                    "error": r.error,
+                    "queue_position": self.queue_position(r.job_id),
+                    **summary,
+                }
+            )
+        return {"jobs": jobs}
 
     async def subscribe(self, params: dict, conn: Connection) -> dict:
         """Handle `jobs.subscribe` — replay events-since-N, then live-subscribe."""
@@ -734,6 +752,27 @@ class JobMethods:
         if record is None:
             raise ProtocolError(JOB_NOT_FOUND, f"No such job: {job_id}")
         return record
+
+
+def _spec_summary(spec) -> dict:
+    """What a client needs to list or re-run a job, minus bulky inline labels.
+
+    `labels_content` (a base64 SLP, possibly hundreds of MB) is dropped;
+    `config_contents` is kept, since "run again" and "start from a past job"
+    need it.
+    """
+    data = spec.to_dict()
+    data.pop("labels_content", None)
+    kind = data.get("type")
+    return {
+        "kind": kind,
+        "model_types": data.get("model_types") or [],
+        "labels_path": (
+            data.get("labels_path") if kind == "train" else data.get("data_path")
+        ),
+        "project": data.get("project"),
+        "spec": data,
+    }
 
 
 def _record_to_dict(record: JobRecord) -> dict:

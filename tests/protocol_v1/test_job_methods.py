@@ -8,6 +8,7 @@ requiring sleap-nn to be installed.
 """
 
 import asyncio
+import json
 import hashlib
 import sys
 import time
@@ -1090,3 +1091,57 @@ class TestQueuePosition:
         for job_id in ids:
             await _wait_for_terminal(methods, store, job_id)
         assert [methods.queue_position(i) for i in ids] == [None, None, None]
+
+
+class TestJobSummaries:
+    """jobs.list / jobs.status describe a job well enough to list and re-run it."""
+
+    async def test_list_and_status_describe_the_job_without_inline_labels(
+        self, store, tmp_path
+    ):
+        import base64
+
+        spec = TrainJobSpec(
+            config_contents=["model: centroid"],
+            model_types=["centroid"],
+            labels_content=base64.b64encode(b"slp").decode(),
+            project={"name": "flies.slp", "id": "p1"},
+        )
+        methods = _make_methods(store, tmp_path, [sys.executable, "-c", "pass"])
+        job_id = (await methods.submit({"spec": spec.to_dict()}, conn=None))["job_id"]
+        await _wait_for_terminal(methods, store, job_id)
+
+        (listed,) = (await methods.list_jobs({}, conn=None))["jobs"]
+        assert listed["job_id"] == job_id
+        assert listed["kind"] == "train"
+        assert listed["model_types"] == ["centroid"]
+        assert listed["project"] == {"name": "flies.slp", "id": "p1"}
+        assert listed["queue_position"] is None
+        assert "spec" not in listed
+        assert "labels_content" not in json.dumps(listed)
+
+        status = await methods.status({"job_id": job_id}, conn=None)
+        assert status["spec"]["config_contents"] == ["model: centroid"]
+        assert "labels_content" not in status["spec"]
+        assert status["kind"] == "train"
+
+    async def test_track_job_lists_its_data_path(self, store, tmp_path):
+        spec = TrackJobSpec(data_path="/data/v.slp", model_paths=["/m"])
+        methods = _make_methods(store, tmp_path, [sys.executable, "-c", "pass"])
+        job_id = (await methods.submit({"spec": spec.to_dict()}, conn=None))["job_id"]
+        await _wait_for_terminal(methods, store, job_id)
+
+        (listed,) = (await methods.list_jobs({}, conn=None))["jobs"]
+        assert listed["kind"] == "track"
+        assert listed["labels_path"] == "/data/v.slp"
+
+    async def test_failed_job_lists_its_error(self, store, spec, tmp_path):
+        methods = _make_methods(
+            store, tmp_path, [sys.executable, "-c", "raise SystemExit(4)"]
+        )
+        job_id = (await methods.submit({"spec": spec.to_dict()}, conn=None))["job_id"]
+        await _wait_for_terminal(methods, store, job_id)
+
+        (listed,) = (await methods.list_jobs({}, conn=None))["jobs"]
+        assert listed["state"] == "failed"
+        assert listed["error"] == "exit code 4"
