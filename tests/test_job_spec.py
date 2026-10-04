@@ -575,3 +575,25 @@ class TestProjectTag:
         spec = parse_job_spec(json.dumps({"type": "train", "config_path": "/c.yaml"}))
         assert spec.project is None
         assert "project" not in spec.to_dict()
+
+
+class TestRunTag:
+    """Specs carry a run id linking jobs submitted together (e.g. top-down)."""
+
+    @pytest.mark.parametrize(
+        "base",
+        [
+            {"type": "train", "config_path": "/c.yaml"},
+            {"type": "track", "data_path": "/d.slp", "model_paths": ["/m"]},
+        ],
+    )
+    def test_round_trips(self, base):
+        run = {"id": "run-abc123", "index": 0, "count": 2}
+        spec = parse_job_spec(json.dumps({**base, "run": run}))
+        assert spec.run == run
+        assert parse_job_spec(spec.to_json()).run == run
+
+    def test_absent_is_none_and_not_serialized(self):
+        spec = parse_job_spec(json.dumps({"type": "train", "config_path": "/c.yaml"}))
+        assert spec.run is None
+        assert "run" not in spec.to_dict()

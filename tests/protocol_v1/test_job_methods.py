@@ -1110,11 +1110,13 @@ class TestJobSummaries:
     ):
         import base64
 
+        run = {"id": "run-abc123", "index": 0, "count": 2}
         spec = TrainJobSpec(
             config_contents=["model: centroid"],
             model_types=["centroid"],
             labels_content=base64.b64encode(b"slp").decode(),
             project={"name": "flies.slp", "id": "p1"},
+            run=run,
         )
         methods = _make_methods(store, tmp_path, [sys.executable, "-c", "pass"])
         job_id = (await methods.submit({"spec": spec.to_dict()}, conn=None))["job_id"]
@@ -1125,6 +1127,7 @@ class TestJobSummaries:
         assert listed["kind"] == "train"
         assert listed["model_types"] == ["centroid"]
         assert listed["project"] == {"name": "flies.slp", "id": "p1"}
+        assert listed["run"] == run
         assert listed["queue_position"] is None
         assert "spec" not in listed
         assert "labels_content" not in json.dumps(listed)
@@ -1133,6 +1136,8 @@ class TestJobSummaries:
         assert status["spec"]["config_contents"] == ["model: centroid"]
         assert "labels_content" not in status["spec"]
         assert status["kind"] == "train"
+        assert status["project"] == {"name": "flies.slp", "id": "p1"}
+        assert status["run"] == run
 
     async def test_track_job_lists_its_data_path(self, store, tmp_path):
         spec = TrackJobSpec(data_path="/data/v.slp", model_paths=["/m"])

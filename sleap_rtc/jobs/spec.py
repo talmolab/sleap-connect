@@ -5,7 +5,7 @@ that can be serialized, validated, and converted to sleap-nn commands.
 """
 
 from dataclasses import dataclass, asdict, field
-from typing import ClassVar, Dict, Optional, List, Set, Union
+from typing import Any, ClassVar, Dict, Optional, List, Set, Union
 import json
 
 
@@ -63,6 +63,10 @@ class TrainJobSpec:
     # Identity of the project that submitted the job ({"name", "id"}), so a
     # client listing a worker's jobs can tell its own apart. Opaque here.
     project: Optional[Dict[str, str]] = None
+    # Links jobs submitted together as one run (e.g. the centroid + centered
+    # instance jobs of a top-down train), {"id": str, "index": int,
+    # "count": int}. Opaque here; the client assigns and interprets it.
+    run: Optional[Dict[str, Any]] = None
 
     def __post_init__(self):
         """Normalize config_path/config_paths after initialization."""
@@ -165,6 +169,10 @@ class TrackJobSpec:
     # Identity of the project that submitted the job ({"name", "id"}), so a
     # client listing a worker's jobs can tell its own apart. Opaque here.
     project: Optional[Dict[str, str]] = None
+    # Links jobs submitted together as one run (e.g. the centroid + centered
+    # instance jobs of a top-down train), {"id": str, "index": int,
+    # "count": int}. Opaque here; the client assigns and interprets it.
+    run: Optional[Dict[str, Any]] = None
 
     _VALID_FRAME_FILTERS: ClassVar[Set[Optional[str]]] = {
         None,

@@ -822,6 +822,7 @@ def _spec_summary(spec) -> dict:
             data.get("labels_path") if kind == "train" else data.get("data_path")
         ),
         "project": data.get("project"),
+        "run": data.get("run"),
         "spec": data,
     }
 
