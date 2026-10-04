@@ -8,7 +8,9 @@ pair.claim, auth.prove), reconciles the job store against reality
 """
 
 import asyncio
+import importlib.metadata
 import logging
+import sys
 import threading
 from dataclasses import dataclass
 from http.server import ThreadingHTTPServer
@@ -46,6 +48,14 @@ DEFAULT_PORT = 9631
 # to remember (or forward through a firewall/NAT), not a second one to
 # separately configure.
 DEFAULT_BLOB_PORT_OFFSET = 1
+
+
+def _package_version(name: str) -> str:
+    """An installed package's version, or "unknown" (e.g. a bare checkout)."""
+    try:
+        return importlib.metadata.version(name)
+    except importlib.metadata.PackageNotFoundError:
+        return "unknown"
 
 
 def identity_path(data_dir: Path) -> Path:
@@ -216,6 +226,8 @@ async def start_worker_server(
             blob_port=blob_port,
             blob_index=blob_index,
             sign_nonce=identity.sign,
+            agent_version=_package_version("sleap-rtc"),
+            agent_platform=sys.platform,
         )
         AuthMethods(server, identity, trust_store, pending_pairings)
         job_methods = JobMethods(

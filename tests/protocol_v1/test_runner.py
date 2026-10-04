@@ -408,3 +408,30 @@ class TestIrohOnlineWait:
             assert (tmp_path / "iroh_live.json").exists()
         finally:
             await worker.close()
+
+
+class TestAgentInfo:
+    async def test_hello_reports_the_real_version_and_platform(self, tmp_path):
+        import sys
+
+        worker = await start_worker_server(
+            host="127.0.0.1", port=0, data_dir=tmp_path
+        )
+        try:
+            port = worker.ws_server.sockets[0].getsockname()[1]
+            ws = await websockets.connect(f"ws://127.0.0.1:{port}")
+            await ws.send(
+                Hello(
+                    proto={"min": 1, "max": 1},
+                    agent={"name": "t", "version": "0", "platform": "t"},
+                    node_id=public_key_to_b64(generate_keypair()[1]),
+                    nonce="n",
+                ).to_json()
+            )
+            hello = parse_envelope(await ws.recv())
+            await ws.close()
+        finally:
+            await worker.close()
+
+        assert hello.agent["version"] not in ("", "0.0.0")
+        assert hello.agent["platform"] == sys.platform
