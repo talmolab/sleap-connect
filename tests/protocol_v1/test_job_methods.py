@@ -1099,6 +1099,13 @@ class TestPostInferenceChaining:
         assert chained.spec.project == {"name": "flies.slp", "id": "p1"}
         assert chained.spec.peak_threshold == 0.3
         assert chained.spec.tracker == "simple"
+        # A run-less train job's chained job is grouped under its job id.
+        assert chained.spec.run == {
+            "id": job_id,
+            "index": 0,
+            "count": 1,
+            "stage": "inference",
+        }
 
         # job.result for the train job carries the chained id, emitted once.
         result_events = [
@@ -1153,6 +1160,13 @@ class TestPostInferenceChaining:
             record1.result["model_dir"],
         ]
         assert "chained_job_ids" not in record0_again.result  # dedupe: only job1 got it
+        # Grouped under the training run's id, outside its train siblings.
+        assert chained.spec.run == {
+            "id": run_id,
+            "index": 0,
+            "count": 1,
+            "stage": "inference",
+        }
 
     async def test_failed_sibling_never_chains(self, store, tmp_path):
         run_id = "run-fail"

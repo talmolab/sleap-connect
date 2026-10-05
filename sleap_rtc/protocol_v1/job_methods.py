@@ -444,7 +444,12 @@ class JobMethods:
 
             chained_job_ids: List[str] = []
             chain_error: Optional[str] = None
-            for entry in post_inference:
+            # Chained jobs share the training run's id (or the job id for a
+            # run-less train job), so a client can show a run's training and
+            # inference jobs together. `stage` keeps them out of the
+            # training siblings this method counts via `run.count`.
+            chain_run_id = run_id or job_id
+            for chain_index, entry in enumerate(post_inference):
                 try:
                     track_spec = TrackJobSpec.from_dict(
                         {
@@ -453,6 +458,12 @@ class JobMethods:
                             "data_path": result.get("labels_path"),
                             "model_paths": model_paths,
                             "project": spec.project,
+                            "run": {
+                                "id": chain_run_id,
+                                "index": chain_index,
+                                "count": len(post_inference),
+                                "stage": "inference",
+                            },
                         }
                     )
                     chained_job_ids.append(await self._submit_spec(track_spec))
