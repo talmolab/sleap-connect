@@ -891,6 +891,10 @@ class JobMethods:
                     "updated_at": r.updated_at,
                     "error": r.error,
                     "queue_position": self.queue_position(r.job_id),
+                    # The trained model's folder name (sleap-nn run name, e.g.
+                    # "260922_015758.centroid.n=19"), so a client can label a
+                    # finished training job without a jobs.status per row.
+                    "model_name": _model_name(r.result),
                     **summary,
                 }
             )
@@ -951,6 +955,12 @@ def _missing_inputs(spec) -> List[str]:
     else:
         paths = [spec.data_path, *spec.model_paths]
     return [p for p in paths if p and not Path(p).exists()]
+
+
+def _model_name(result: Optional[dict]) -> Optional[str]:
+    """Basename of a finished train job's `model_dir`, or None."""
+    model_dir = (result or {}).get("model_dir")
+    return Path(model_dir).name if model_dir else None
 
 
 def _has_chain_outcome(result: Optional[dict]) -> bool:

@@ -1120,6 +1120,8 @@ class TestPostInferenceChaining:
         }
         assert jobs[job_id]["post_inference"] is True
         assert jobs[chained_id]["post_inference"] is False
+        assert jobs[job_id]["model_name"] == Path(record.result["model_dir"]).name
+        assert jobs[chained_id]["model_name"] is None
 
     async def test_two_job_run_chains_once_after_the_second_completes(
         self, store, tmp_path
