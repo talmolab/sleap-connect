@@ -151,6 +151,15 @@ class JobMethods:
         # between "running" and spawn): honored before spawning, or signalled
         # right after it if the request landed mid-spawn. mode: "stop"/"cancel".
         self._cancel_requested: Dict[str, str] = {}
+        # Serializes the "are all of this run's siblings completed yet, and
+        # has one of them already chained post-inference?" check-and-act in
+        # `_chain_post_inference`, keyed by run id (or job id for a run-less
+        # single job). Today's `JobQueue` happens to fully serialize job
+        # execution (including `_finish`) since `max_concurrent` is always 1
+        # in production, but that's a queue capacity decision, not something
+        # this correctness guarantee should depend on — see
+        # `_chain_post_inference`'s docstring.
+        self._run_chain_locks: Dict[str, asyncio.Lock] = {}
 
         server.register("jobs.submit", self.submit)
         server.register("jobs.cancel", self.cancel)
@@ -188,10 +197,22 @@ class JobMethods:
         except Exception as e:
             raise ProtocolError(JOB_SPEC_INVALID, f"Invalid job spec: {e}") from e
 
+        return {"job_id": await self._submit_spec(spec)}
+
+    async def _submit_spec(self, spec) -> str:
+        """Create a job record and start running it in the background.
+
+        The common path behind both a client's `jobs.submit` and worker-
+        internal chaining (post-train inference, `_chain_post_inference`):
+        either way the job is recorded in the store, gated by the same
+        queue, and emits the usual `job.status`/`job.log`/`job.result`
+        events — so a chained job is indistinguishable from one a client
+        submitted directly, including showing up in `jobs.list`.
+        """
         job_id = generate_job_id()
         await self.store.create_job(job_id, spec)
         self._tasks[job_id] = asyncio.create_task(self._run_job(job_id, spec))
-        return {"job_id": job_id}
+        return job_id
 
     async def _run_job(self, job_id: str, spec) -> None:
         """Run a job to completion: queue, spawn, tail its log, record the result."""
@@ -303,6 +324,10 @@ class JobMethods:
             if isinstance(spec, TrainJobSpec):
                 result.update(self._train_outputs(job_id, spec))
             await self.store.update_state(job_id, "completed", result=result)
+            if isinstance(spec, TrainJobSpec):
+                chained = await self._chain_post_inference(job_id, spec, result)
+                if chained is not None:
+                    result = chained
             # job.result BEFORE job.status: completed — a client that
             # resolves its "wait for this job" promise as soon as it
             # sees the terminal status (the natural, simplest thing
@@ -345,6 +370,118 @@ class JobMethods:
             "model_dir": str(model_dirs[-1]) if model_dirs else None,
             "labels_path": str(labels) if labels.exists() else spec.labels_path,
         }
+
+    async def _chain_post_inference(
+        self, job_id: str, spec: TrainJobSpec, result: dict
+    ) -> Optional[dict]:
+        """Submit `post_inference` as chained track jobs once a whole run finishes.
+
+        `job_id` has just been recorded "completed" with `result` (so
+        `result["model_dir"]`/`result["labels_path"]` are this job's own
+        output). If `spec.run` links it to sibling jobs (e.g. the centroid +
+        centered_instance legs of a top-down train), this only proceeds once
+        *every* sibling named by `run.count` is itself "completed" — a
+        failed or canceled sibling means that condition can never become
+        true, so the run simply never chains, with no extra bookkeeping
+        needed. A run-less job is its own run of one.
+
+        Exactly once per run: whichever sibling's completion is the one
+        that observes "all completed" does the chaining and immediately
+        persists a dedupe marker (`chained_job_ids` or `chain_error`, always
+        set together inside the same critical section) to that sibling's
+        stored result, before releasing `self._run_chain_locks[run id]`. Two
+        siblings racing to finish at the same instant would otherwise both
+        see "all completed" and both chain — the lock serializes the
+        check-chain-persist sequence so the second one, once it gets the
+        lock, re-reads the store and finds the marker already there. A
+        per-job-id asyncio.Lock (rather than e.g. a SQL transaction) is
+        enough here: this all happens within one worker process, and today's
+        `JobQueue` even fully serializes job execution anyway (see
+        `__init__`) — but that's an orthogonal capacity decision this
+        shouldn't rely on for correctness.
+
+        Returns the triggering job's result with chaining fields merged in
+        (already persisted to the store), or None if nothing changed (not
+        ready to chain yet, nothing to chain, or another sibling already
+        did).
+        """
+        run = spec.run or {}
+        run_id = run.get("id")
+        count = (run.get("count") if run_id else None) or 1
+        lock = self._run_chain_locks.setdefault(run_id or job_id, asyncio.Lock())
+        async with lock:
+            siblings = await self._run_siblings(job_id, run_id)
+            if len(siblings) < count or any(r.state != "completed" for r in siblings):
+                return None  # not every sibling has finished yet
+            if any(_has_chain_outcome(r.result) for r in siblings):
+                return None  # a concurrent finisher already chained this run
+
+            post_inference = spec.post_inference or next(
+                (
+                    s.post_inference
+                    for s in (r.spec for r in siblings)
+                    if getattr(s, "post_inference", None)
+                ),
+                None,
+            )
+            if not post_inference:
+                return None
+
+            ordered = sorted(siblings, key=lambda r: (r.spec.run or {}).get("index", 0))
+            model_paths = [(r.result or {}).get("model_dir") for r in ordered]
+            merged = dict(result)
+            if any(mp is None for mp in model_paths):
+                missing = [
+                    r.job_id for r, mp in zip(ordered, model_paths) if mp is None
+                ]
+                logging.error(
+                    f"[jobs] post-inference chaining for run {run_id or job_id} "
+                    f"skipped: missing model_dir for {missing}"
+                )
+                merged["chain_error"] = f"missing model_dir for job(s): {missing}"
+                await self.store.update_state(job_id, "completed", result=merged)
+                return merged
+
+            chained_job_ids: List[str] = []
+            chain_error: Optional[str] = None
+            for entry in post_inference:
+                try:
+                    track_spec = TrackJobSpec.from_dict(
+                        {
+                            **entry,
+                            "type": "track",
+                            "data_path": result.get("labels_path"),
+                            "model_paths": model_paths,
+                            "project": spec.project,
+                        }
+                    )
+                    chained_job_ids.append(await self._submit_spec(track_spec))
+                except Exception as e:
+                    logging.exception(
+                        f"[jobs] post-inference chaining for run {run_id or job_id} "
+                        "failed to submit a chained track job"
+                    )
+                    chain_error = str(e)
+
+            merged["chained_job_ids"] = chained_job_ids
+            if chain_error is not None:
+                merged["chain_error"] = chain_error
+            await self.store.update_state(job_id, "completed", result=merged)
+            return merged
+
+    async def _run_siblings(
+        self, job_id: str, run_id: Optional[str]
+    ) -> List[JobRecord]:
+        """Every job sharing `run_id` (just `job_id` itself if there's none)."""
+        if run_id is None:
+            record = await self.store.get_job(job_id)
+            return [record] if record is not None else []
+        return [
+            r
+            for r in await self.store.list_jobs()
+            if isinstance(r.spec, TrainJobSpec)
+            and (r.spec.run or {}).get("id") == run_id
+        ]
 
     def resume_reattached(self, reattach_outcomes: Dict[str, str]) -> None:
         """Take over jobs a previous worker left running (see `reattach_all`).
@@ -805,6 +942,15 @@ def _missing_inputs(spec) -> List[str]:
     return [p for p in paths if p and not Path(p).exists()]
 
 
+def _has_chain_outcome(result: Optional[dict]) -> bool:
+    """Whether a completed train job's result already records a post-
+    inference chaining attempt (`_chain_post_inference`'s dedupe marker —
+    `chained_job_ids` and/or `chain_error`, always set together), meaning
+    some sibling already handled chaining for this run.
+    """
+    return bool(result) and ("chained_job_ids" in result or "chain_error" in result)
+
+
 def _spec_summary(spec) -> dict:
     """What a client needs to list or re-run a job, minus bulky inline labels.
 
@@ -823,6 +969,7 @@ def _spec_summary(spec) -> dict:
         ),
         "project": data.get("project"),
         "run": data.get("run"),
+        "post_inference": bool(data.get("post_inference")),
         "spec": data,
     }
 

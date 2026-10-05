@@ -1042,6 +1042,246 @@ class TestTrainOutputs:
         assert record.result["model_dir"].startswith(str(tmp_path / "job-runs"))
 
 
+class _TrainThenTrackBuilder:
+    """A train job's command writes a fake model dir (`train_script`,
+    typically `_write_run`); a track job's command just exits 0. Lets a
+    single `JobMethods`/`CommandBuilder` pair run both legs of a chained
+    post-inference run, like the real worker does.
+    """
+
+    def __init__(self, train_script=_write_run):
+        self._train_script = train_script
+
+    def build_command(self, spec):
+        if isinstance(spec, TrainJobSpec):
+            return [sys.executable, "-c", self._train_script(spec.ckpt_dir)]
+        return [sys.executable, "-c", "pass"]
+
+
+def _make_chaining_methods(store, tmp_path, train_script=_write_run):
+    return JobMethods(
+        ProtocolV1Server(node_id="test-node"),
+        store,
+        JobQueue(max_concurrent=1),
+        log_dir=tmp_path / "job-logs",
+        command_builder=_TrainThenTrackBuilder(train_script),
+    )
+
+
+class TestPostInferenceChaining:
+    """A train job's `post_inference` chains as track job(s) once every job
+    in its `run` (or just itself, run-less) has completed.
+    """
+
+    async def test_single_job_run_chains_one_track_job(self, store, tmp_path):
+        spec = TrainJobSpec(
+            config_path="/data/centroid.yaml",
+            labels_path="/data/train.slp",
+            project={"name": "flies.slp", "id": "p1"},
+            post_inference=[{"peak_threshold": 0.3, "tracker": "simple"}],
+        )
+        methods = _make_chaining_methods(store, tmp_path)
+
+        job_id = (await methods.submit({"spec": spec.to_dict()}, conn=None))["job_id"]
+        record = await _wait_for_terminal(methods, store, job_id)
+
+        assert record.state == "completed"
+        assert len(record.result["chained_job_ids"]) == 1
+        chained_id = record.result["chained_job_ids"][0]
+        chained = await _wait_for_terminal(methods, store, chained_id)
+
+        assert chained.state == "completed"
+        assert isinstance(chained.spec, TrackJobSpec)
+        assert (
+            chained.spec.data_path == record.result["labels_path"] == "/data/train.slp"
+        )
+        assert chained.spec.model_paths == [record.result["model_dir"]]
+        assert chained.spec.project == {"name": "flies.slp", "id": "p1"}
+        assert chained.spec.peak_threshold == 0.3
+        assert chained.spec.tracker == "simple"
+
+        # job.result for the train job carries the chained id, emitted once.
+        result_events = [
+            e.data
+            for e in await store.get_events_since(job_id)
+            if e.topic == "job.result"
+        ]
+        assert result_events == [record.result]
+
+        jobs = {
+            j["job_id"]: j for j in (await methods.list_jobs({}, conn=None))["jobs"]
+        }
+        assert jobs[job_id]["post_inference"] is True
+        assert jobs[chained_id]["post_inference"] is False
+
+    async def test_two_job_run_chains_once_after_the_second_completes(
+        self, store, tmp_path
+    ):
+        run_id = "run-abc"
+        spec0 = TrainJobSpec(
+            config_path="/data/centroid.yaml",
+            labels_path="/data/train.slp",
+            model_types=["centroid"],
+            run={"id": run_id, "index": 0, "count": 2},
+            post_inference=[{"frame_filter": "suggested"}],
+        )
+        spec1 = TrainJobSpec(
+            config_path="/data/centered_instance.yaml",
+            labels_path="/data/train.slp",
+            model_types=["centered_instance"],
+            run={"id": run_id, "index": 1, "count": 2},
+            post_inference=[{"frame_filter": "suggested"}],
+        )
+        methods = _make_chaining_methods(store, tmp_path)
+
+        job0 = (await methods.submit({"spec": spec0.to_dict()}, conn=None))["job_id"]
+        record0 = await _wait_for_terminal(methods, store, job0)
+        assert record0.state == "completed"
+        assert "chained_job_ids" not in record0.result  # sibling not done yet
+
+        job1 = (await methods.submit({"spec": spec1.to_dict()}, conn=None))["job_id"]
+        record1 = await _wait_for_terminal(methods, store, job1)
+        assert record1.state == "completed"
+        assert len(record1.result["chained_job_ids"]) == 1
+        chained_id = record1.result["chained_job_ids"][0]
+        chained = await _wait_for_terminal(methods, store, chained_id)
+
+        # model_paths ordered by run.index, not completion order.
+        record0_again = await store.get_job(job0)
+        assert chained.spec.model_paths == [
+            record0_again.result["model_dir"],
+            record1.result["model_dir"],
+        ]
+        assert "chained_job_ids" not in record0_again.result  # dedupe: only job1 got it
+
+    async def test_failed_sibling_never_chains(self, store, tmp_path):
+        run_id = "run-fail"
+        ok_spec = TrainJobSpec(
+            config_path="/data/centroid.yaml",
+            labels_path="/data/train.slp",
+            run={"id": run_id, "index": 0, "count": 2},
+            post_inference=[{"frame_filter": "suggested"}],
+        )
+        fail_spec = TrainJobSpec(
+            config_path="/data/centered_instance.yaml",
+            labels_path="/data/train.slp",
+            run={"id": run_id, "index": 1, "count": 2},
+            post_inference=[{"frame_filter": "suggested"}],
+        )
+        methods = _make_chaining_methods(store, tmp_path)
+        ok_id = (await methods.submit({"spec": ok_spec.to_dict()}, conn=None))["job_id"]
+        await _wait_for_terminal(methods, store, ok_id)
+
+        # A second `JobMethods` sharing the same store, so the sibling's
+        # command can fail outright instead of going through the ckpt-aware
+        # builder (which only knows how to succeed).
+        fail_methods = _make_methods(
+            store, tmp_path, [sys.executable, "-c", "import sys; sys.exit(1)"]
+        )
+        fail_id = (await fail_methods.submit({"spec": fail_spec.to_dict()}, conn=None))[
+            "job_id"
+        ]
+        record = await _wait_for_terminal(fail_methods, store, fail_id)
+
+        assert record.state == "failed"
+        jobs = (await methods.list_jobs({}, conn=None))["jobs"]
+        assert len(jobs) == 2  # no chained track job was ever created
+
+    async def test_no_post_inference_never_chains(self, store, tmp_path):
+        spec = TrainJobSpec(
+            config_path="/data/centroid.yaml", labels_path="/data/t.slp"
+        )
+        methods = _make_chaining_methods(store, tmp_path)
+
+        job_id = (await methods.submit({"spec": spec.to_dict()}, conn=None))["job_id"]
+        record = await _wait_for_terminal(methods, store, job_id)
+
+        assert "chained_job_ids" not in record.result
+        jobs = (await methods.list_jobs({}, conn=None))["jobs"]
+        assert len(jobs) == 1
+
+    async def test_missing_sibling_model_dir_records_chain_error(self, store, tmp_path):
+        # A plain command builder (no `_write_run`) never produces a model
+        # dir, so `_train_outputs` reports model_dir=None for both siblings.
+        run_id = "run-no-model"
+        spec0 = TrainJobSpec(
+            config_path="/data/c0.yaml",
+            labels_path="/data/t.slp",
+            run={"id": run_id, "index": 0, "count": 2},
+        )
+        spec1 = TrainJobSpec(
+            config_path="/data/c1.yaml",
+            labels_path="/data/t.slp",
+            run={"id": run_id, "index": 1, "count": 2},
+            post_inference=[{"frame_filter": "suggested"}],
+        )
+        methods = _make_methods(store, tmp_path, [sys.executable, "-c", "pass"])
+
+        job0 = (await methods.submit({"spec": spec0.to_dict()}, conn=None))["job_id"]
+        await _wait_for_terminal(methods, store, job0)
+        job1 = (await methods.submit({"spec": spec1.to_dict()}, conn=None))["job_id"]
+        record1 = await _wait_for_terminal(methods, store, job1)
+
+        assert record1.state == "completed"  # chaining failure doesn't fail the job
+        assert "missing model_dir" in record1.result["chain_error"]
+        assert "chained_job_ids" not in record1.result
+        jobs = (await methods.list_jobs({}, conn=None))["jobs"]
+        assert len(jobs) == 2  # no chained job was created
+
+    async def test_chained_submit_error_is_recorded_without_failing_the_job(
+        self, store, tmp_path
+    ):
+        spec = TrainJobSpec(
+            config_path="/data/centroid.yaml",
+            labels_path="/data/train.slp",
+            post_inference=[{"frame_filter": "not-a-real-filter"}],
+        )
+        methods = _make_chaining_methods(store, tmp_path)
+
+        job_id = (await methods.submit({"spec": spec.to_dict()}, conn=None))["job_id"]
+        record = await _wait_for_terminal(methods, store, job_id)
+
+        assert record.state == "completed"
+        assert record.result["chained_job_ids"] == []
+        assert "frame_filter" in record.result["chain_error"]
+
+    async def test_concurrent_finishers_chain_the_run_exactly_once(
+        self, store, tmp_path
+    ):
+        """Simulates two siblings finishing at the same instant (today's
+        queue happens to fully serialize execution, but `_chain_post_inference`
+        doesn't rely on that) by invoking the chaining step directly from two
+        tasks at once: only one may actually submit the chained job.
+        """
+        spec0 = TrainJobSpec(
+            config_path="/c0.yaml",
+            labels_path="/data/a.slp",
+            run={"id": "run-race", "index": 0, "count": 2},
+            post_inference=[{"peak_threshold": 0.5}],
+        )
+        spec1 = TrainJobSpec(
+            config_path="/c1.yaml",
+            labels_path="/data/a.slp",
+            run={"id": "run-race", "index": 1, "count": 2},
+        )
+        methods = _make_methods(store, tmp_path, [sys.executable, "-c", "pass"])
+        result0 = {"model_dir": "/models/m0", "labels_path": "/data/a.slp"}
+        result1 = {"model_dir": "/models/m1", "labels_path": "/data/a.slp"}
+        await store.create_job("job0", spec0)
+        await store.create_job("job1", spec1)
+        await store.update_state("job0", "completed", result=result0)
+        await store.update_state("job1", "completed", result=result1)
+
+        outcomes = await asyncio.gather(
+            methods._chain_post_inference("job0", spec0, result0),
+            methods._chain_post_inference("job1", spec1, result1),
+        )
+
+        chained = [o for o in outcomes if o is not None]
+        assert len(chained) == 1  # the other call saw the dedupe marker and no-oped
+        assert len(chained[0]["chained_job_ids"]) == 1
+
+
 class TestReattachedEpochBackfill:
     async def test_epochs_logged_while_no_worker_ran_are_backfilled_once(
         self, store, tmp_path

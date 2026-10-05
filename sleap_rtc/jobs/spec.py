@@ -34,6 +34,8 @@ class TrainJobSpec:
         run_name: Name for the training run (used in checkpoint directory)
         resume_ckpt_path: Path to checkpoint for resuming training
         path_mappings: Maps original client-side paths to resolved worker-side paths
+        post_inference: Partial TrackJobSpec dicts to chain as inference jobs
+            once every job sharing this spec's `run` has completed.
 
     Note:
         Either config_path/config_paths, config_content, or config_contents
@@ -67,6 +69,12 @@ class TrainJobSpec:
     # instance jobs of a top-down train), {"id": str, "index": int,
     # "count": int}. Opaque here; the client assigns and interprets it.
     run: Optional[Dict[str, Any]] = None
+    # Inference jobs to chain once every job in this spec's `run` has
+    # completed (see `JobMethods._chain_post_inference`). Each entry is a
+    # partial TrackJobSpec dict — everything a TrackJobSpec takes except
+    # `type`, `data_path`, and `model_paths`, which the worker fills in
+    # itself from the finished run's own labels/model output. Opaque here.
+    post_inference: Optional[List[Dict[str, Any]]] = None
 
     def __post_init__(self):
         """Normalize config_path/config_paths after initialization."""

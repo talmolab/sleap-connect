@@ -596,4 +596,34 @@ class TestRunTag:
     def test_absent_is_none_and_not_serialized(self):
         spec = parse_job_spec(json.dumps({"type": "train", "config_path": "/c.yaml"}))
         assert spec.run is None
+
+
+class TestPostInference:
+    """TrainJobSpec carries inference jobs to chain once its run completes."""
+
+    def test_round_trips(self):
+        post_inference = [{"frame_filter": "suggested", "tracker": "simple"}]
+        spec = parse_job_spec(
+            json.dumps(
+                {
+                    "type": "train",
+                    "config_path": "/c.yaml",
+                    "post_inference": post_inference,
+                }
+            )
+        )
+        assert spec.post_inference == post_inference
+        assert parse_job_spec(spec.to_json()).post_inference == post_inference
+
+    def test_absent_is_none_and_not_serialized(self):
+        spec = parse_job_spec(json.dumps({"type": "train", "config_path": "/c.yaml"}))
+        assert spec.post_inference is None
+        assert "post_inference" not in spec.to_dict()
+
+    def test_not_a_field_on_track_job_spec(self):
+        """Only a train job's completion can trigger chaining."""
+        spec = parse_job_spec(
+            json.dumps({"type": "track", "data_path": "/d.slp", "model_paths": ["/m"]})
+        )
+        assert not hasattr(spec, "post_inference")
         assert "run" not in spec.to_dict()
