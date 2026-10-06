@@ -100,7 +100,14 @@ class PendingPairings:
         if self._path is not None:
             self._secrets = self._load()  # pick up secrets from other processes
 
-        secret = secrets.token_urlsafe(24)
+        # 16 random bytes (128-bit), stored as the URL-safe base64 string of
+        # those exact bytes — `token_urlsafe(16)` does precisely that (it's
+        # `base64.urlsafe_b64encode(token_bytes(16))` with padding
+        # stripped), which matters because the one-line pairing code format
+        # (protocol_v1.pair_code) embeds this secret as 16 raw bytes and
+        # must reconstruct the identical string on decode for `claim` to
+        # recognize it.
+        secret = secrets.token_urlsafe(16)
         expires_at = time.time() + self._ttl_secs
         self._secrets[secret] = expires_at
         self._prune_expired()

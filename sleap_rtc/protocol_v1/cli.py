@@ -327,16 +327,29 @@ async def _serve_async(
     show_default=True,
     help="Must match the --data-dir a running 'sleap-rtc serve' is using.",
 )
-def pair(addrs: tuple, ttl: int, data_dir: str):
+@click.option(
+    "--json",
+    "as_json",
+    is_flag=True,
+    help="Print the full ticket as JSON (today's format: node_id, addrs, "
+    "secret, expires_at, and — if iroh is live — an iroh section including "
+    "direct_addrs) instead of the default one-line pairing code. For "
+    "scripts, or a client that wants to dial iroh direct addresses "
+    "without going through a relay first.",
+)
+def pair(addrs: tuple, ttl: int, data_dir: str, as_json: bool):
     """Generate a pairing ticket for a new client.
 
-    Prints a ticket (as JSON) that a new client uses to establish trust
-    with this worker on first contact — via 'pair.claim' in the protocol.
-    The ticket's secret is single-use and expires after --ttl seconds.
+    By default, prints a single-line pairing code (`sleap1...`) — select
+    and copy that one line, paste it into the app's Connect tab. Pass
+    --json to print the full ticket as JSON instead (today's format;
+    scripts/back-compat).
 
-    If a 'sleap-rtc serve --iroh' worker is running against the same
-    --data-dir, the ticket also carries an 'iroh' section (node_id,
-    relay_url, direct_addrs) so a client with no direct route can dial it.
+    The ticket's secret is single-use and expires after --ttl seconds. If
+    a 'sleap-rtc serve --iroh' worker is running against the same
+    --data-dir, a client with no direct route can still dial it: the
+    pairing code carries the worker's current relay, and --json's ticket
+    additionally carries iroh's node_id/relay_url/direct_addrs.
 
     Works whether or not 'sleap-rtc serve' is currently running: pending
     tickets are shared via a small file under --data-dir, so a running
@@ -347,6 +360,7 @@ def pair(addrs: tuple, ttl: int, data_dir: str):
         sleap-rtc pair --addr ws://192.168.1.42:9631
     """
     from sleap_rtc.protocol_v1.identity import WorkerIdentity
+    from sleap_rtc.protocol_v1.pair_code import encode_pair_code
     from sleap_rtc.protocol_v1.pairing import PendingPairings
 
     data_dir_path = Path(data_dir)
@@ -358,20 +372,28 @@ def pair(addrs: tuple, ttl: int, data_dir: str):
     iroh_section = read_iroh_live(iroh_live_path(data_dir_path), identity.node_id)
     ticket = pending_pairings.create(identity.node_id, list(addrs), iroh=iroh_section)
 
-    click.echo(click.style("Pairing ticket", bold=True))
-    click.echo(json.dumps(ticket.to_dict(), indent=2))
-    click.echo("")
-    if iroh_section is not None:
-        click.echo(
-            "This ticket includes iroh dial info from the running worker, so "
-            "the client can connect even without a shared network."
-        )
+    if as_json:
+        click.echo(click.style("Pairing ticket", bold=True))
+        click.echo(json.dumps(ticket.to_dict(), indent=2))
         click.echo("")
-    click.echo(textwrap.dedent(f"""\
-            Give this to the new client — it's single-use and expires in
-            {ttl} seconds. The client sends a 'pair.claim' request with this
-            ticket's secret and its own node_id to establish trust.
-            """))
+        if iroh_section is not None:
+            click.echo(
+                "This ticket includes iroh dial info from the running worker, so "
+                "the client can connect even without a shared network."
+            )
+            click.echo("")
+        click.echo(textwrap.dedent(f"""\
+                Give this to the new client — it's single-use and expires in
+                {ttl} seconds. The client sends a 'pair.claim' request with this
+                ticket's secret and its own node_id to establish trust.
+                """))
+        return
+
+    click.echo(click.style("Pairing code", bold=True))
+    click.echo(encode_pair_code(ticket))
+    click.echo("")
+    click.echo("In SLEAP: Connect → Pair a worker → paste the code")
+    click.echo(f"Expires in {ttl} seconds.")
 
 
 def print_doctor_section(data_dir: Path = DEFAULT_DATA_DIR) -> bool:

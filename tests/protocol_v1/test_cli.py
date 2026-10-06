@@ -18,6 +18,7 @@ from sleap_rtc.protocol_v1.cli import (
     print_doctor_section,
     print_status_section,
 )
+from sleap_rtc.protocol_v1.pair_code import decode_pair_code
 from sleap_rtc.protocol_v1.pairing import PendingPairings
 from sleap_rtc.protocol_v1.runner import identity_path, trust_store_path
 
@@ -48,10 +49,21 @@ class TestParseMount:
 class TestPairCommand:
     """Tests for the `sleap-rtc pair` command."""
 
-    def test_prints_a_ticket_as_json(self, tmp_path):
+    def test_prints_a_one_line_pairing_code_by_default(self, tmp_path):
         runner = CliRunner()
 
         result = runner.invoke(pair, ["--data-dir", str(tmp_path)])
+
+        assert result.exit_code == 0
+        lines = [line for line in result.output.splitlines() if line.strip()]
+        code_lines = [line for line in lines if line.startswith("sleap1")]
+        assert len(code_lines) == 1, result.output
+        decode_pair_code(code_lines[0])  # doesn't raise
+
+    def test_json_flag_prints_a_ticket_as_json(self, tmp_path):
+        runner = CliRunner()
+
+        result = runner.invoke(pair, ["--data-dir", str(tmp_path), "--json"])
 
         assert result.exit_code == 0
         assert "node_id" in result.output
@@ -70,15 +82,15 @@ class TestPairCommand:
         runner = CliRunner()
         result = runner.invoke(pair, ["--data-dir", str(tmp_path)])
 
-        # Extract the JSON block from the command's output.
-        json_start = result.output.index("{")
-        json_end = result.output.rindex("}") + 1
-        ticket = json.loads(result.output[json_start:json_end])
+        code = next(
+            line for line in result.output.splitlines() if line.startswith("sleap1")
+        )
+        ticket = decode_pair_code(code)
 
         from sleap_rtc.protocol_v1.runner import pairing_path
 
         claimer = PendingPairings(path=pairing_path(tmp_path))
-        assert claimer.claim(ticket["secret"]) is True
+        assert claimer.claim(ticket.secret) is True
 
     def test_respects_addr_option(self, tmp_path):
         runner = CliRunner()
@@ -88,6 +100,7 @@ class TestPairCommand:
             [
                 "--data-dir",
                 str(tmp_path),
+                "--json",
                 "--addr",
                 "ws://192.168.1.42:9631",
                 "--addr",
