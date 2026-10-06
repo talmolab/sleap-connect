@@ -46,7 +46,7 @@ class TestReadIrohLive:
     def test_missing_file_is_none(self, tmp_path):
         assert read_iroh_live(iroh_live_path(tmp_path), NODE) is None
 
-    def test_unparseable_file_is_none(self, tmp_path):
+    def test_unparsable_file_is_none(self, tmp_path):
         path = iroh_live_path(tmp_path)
         path.write_text("{not json")
 

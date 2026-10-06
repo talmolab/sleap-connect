@@ -229,7 +229,7 @@ class TestResultBlobs:
             sys.executable,
             "-c",
             f"open({str(captured_path)!r}, 'wb').write({content!r}); "
-            f"print('Predictions output path: {captured_path}')",
+            f"print('Predictions output path: ' + {str(captured_path)!r})",
         ]
         methods = _make_methods(store, tmp_path, cmd, blob_index=index)
 
