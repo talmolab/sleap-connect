@@ -101,6 +101,9 @@ class CommandBuilder:
         if effective_run_name:
             cmd.append(f"trainer_config.run_name={effective_run_name}")
 
+        if spec.ckpt_dir:
+            cmd.append(f"trainer_config.ckpt_dir={spec.ckpt_dir}")
+
         if spec.resume_ckpt_path:
             cmd.append(f"trainer_config.resume_ckpt_path={spec.resume_ckpt_path}")
 

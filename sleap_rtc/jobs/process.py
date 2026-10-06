@@ -8,7 +8,10 @@ crash mid-run shouldn't kill the run too). This module provides:
   worker's own signals/lifetime) with its stdout/stderr redirected to a log
   *file* rather than an in-process pipe — a pipe's read end only exists for
   the process that created it, but a file on disk can be tailed by anyone,
-  including a brand new worker process after a restart.
+  including a brand new worker process after a restart. The command runs
+  under `_exit_code_wrapper.py`, which records its exit code next to the
+  log (`read_exit_code`) — the only way a *restarted* worker, no longer the
+  job's parent, can tell whether it succeeded.
 - `is_alive`: checks whether a recorded PID is still the *same* process we
   spawned (not a different process that happens to have recycled the PID),
   using the OS-reported process start time as a fingerprint.
@@ -58,6 +61,23 @@ _background_tasks: set = set()
 # different process that happened to start within the same second.
 _START_TIME_TOLERANCE_SECS = 2.0
 
+_EXIT_CODE_WRAPPER = Path(__file__).with_name("_exit_code_wrapper.py")
+
+
+def exit_code_path(log_path: Union[str, Path]) -> Path:
+    """Where a job's exit code is recorded, next to its log file."""
+    return Path(log_path).with_suffix(".exit")
+
+
+def read_exit_code(log_path: Union[str, Path]) -> Optional[int]:
+    """The recorded exit code of the job logging to `log_path`, if it has
+    exited and recorded one (see `_exit_code_wrapper.py`).
+    """
+    try:
+        return int(exit_code_path(log_path).read_text().strip())
+    except (FileNotFoundError, ValueError):
+        return None
+
 
 async def spawn_detached(
     cmd: Sequence[str],
@@ -102,9 +122,15 @@ async def spawn_detached(
     """
     log_path = Path(log_path)
     log_path.parent.mkdir(parents=True, exist_ok=True)
+    exit_path = exit_code_path(log_path)
+    exit_path.unlink(missing_ok=True)
 
     with open(log_path, "ab", buffering=0) as log_file:
         process = await create_subprocess_exec(
+            sys.executable,
+            str(_EXIT_CODE_WRAPPER),
+            str(exit_path),
+            "--",
             *cmd,
             stdout=log_file,
             stderr=STDOUT,
@@ -186,8 +212,10 @@ async def reattach_all(store: JobStore) -> Dict[str, str]:
 
     Returns:
         A dict of ``{job_id: outcome}`` for every job that was "running",
-        where outcome is one of ``"reattached"`` or ``"marked_failed"`` — for
-        the caller to log/report.
+        where outcome is one of ``"reattached"`` (still running),
+        ``"exited"`` (finished while no worker was running, with a recorded
+        exit code — still stored as "running", for the caller to finalize
+        from `read_exit_code`), or ``"marked_failed"``.
     """
     outcomes: Dict[str, str] = {}
 
@@ -201,6 +229,10 @@ async def reattach_all(store: JobStore) -> Dict[str, str]:
             and is_alive(record.pid, record.process_started_at)
         ):
             outcomes[record.job_id] = "reattached"
+            continue
+
+        if record.log_path is not None and read_exit_code(record.log_path) is not None:
+            outcomes[record.job_id] = "exited"
             continue
 
         await store.update_state(
@@ -230,7 +262,8 @@ def send_stop_signal(pid: int) -> None:
     """
     try:
         if sys.platform == "win32":
-            psutil.Process(pid).terminate()
+            for proc in _windows_job_processes(pid):
+                proc.terminate()
         else:
             pgid = os.getpgid(pid)
             logging.info(f"Sending SIGINT to process group {pgid} (graceful stop)")
@@ -252,7 +285,8 @@ def send_cancel_signal(pid: int) -> None:
     """
     try:
         if sys.platform == "win32":
-            psutil.Process(pid).kill()
+            for proc in _windows_job_processes(pid):
+                proc.kill()
             return
 
         pgid = os.getpgid(pid)
@@ -263,6 +297,15 @@ def send_cancel_signal(pid: int) -> None:
         task.add_done_callback(_background_tasks.discard)
     except (ProcessLookupError, psutil.NoSuchProcess):
         pass
+
+
+def _windows_job_processes(pid: int) -> list:
+    """The job's own processes under its `_exit_code_wrapper` (Windows has
+    no process groups to signal). Falls back to `pid` itself if it has no
+    children, e.g. it already exited them.
+    """
+    wrapper = psutil.Process(pid)
+    return wrapper.children(recursive=True) or [wrapper]
 
 
 async def _escalate_to_sigkill(pid: int) -> None:

@@ -90,3 +90,12 @@ class TestJobQueue:
         await asyncio.gather(job(), job())
 
         assert running_count == 2
+
+    async def test_running_counts_held_slots(self):
+        queue = JobQueue(max_concurrent=2)
+        assert queue.running == 0
+        async with queue.slot():
+            assert queue.running == 1
+            async with queue.slot():
+                assert queue.running == 2
+        assert queue.running == 0

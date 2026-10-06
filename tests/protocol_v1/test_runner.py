@@ -358,3 +358,105 @@ class TestMetricsWiring:
             assert worker.job_methods.metrics_ports == DEFAULT_ZMQ_PORTS
         finally:
             await worker.close()
+
+
+class TestPartialStartupCleanup:
+    """A failed startup must not leave anything running behind it."""
+
+    async def test_ws_port_in_use_closes_the_already_started_blob_server(
+        self, tmp_path
+    ):
+        import socket
+        import threading
+
+        with socket.socket() as taken:
+            taken.bind(("127.0.0.1", 0))
+            taken.listen()
+            port = taken.getsockname()[1]
+            threads_before = set(threading.enumerate())
+
+            with pytest.raises(OSError):
+                await start_worker_server(
+                    host="127.0.0.1", port=port, blob_port=0, data_dir=tmp_path
+                )
+
+        leftover = [
+            t
+            for t in set(threading.enumerate()) - threads_before
+            if t.is_alive() and not t.daemon
+        ]
+        # A leftover non-daemon thread is what kept `serve` hanging forever
+        # after printing the bind error.
+        assert leftover == []
+
+
+class TestIrohOnlineWait:
+    async def test_startup_continues_when_no_relay_arrives_in_time(
+        self, tmp_path, caplog
+    ):
+        # preset_minimal has no relay at all, so `online()` never resolves.
+        worker = await start_worker_server(
+            host="127.0.0.1",
+            port=0,
+            data_dir=tmp_path,
+            enable_iroh=True,
+            iroh_preset=iroh.preset_minimal(),
+            iroh_online_timeout=0.3,
+        )
+        try:
+            assert "found no home relay" in caplog.text
+            assert (tmp_path / "iroh_live.json").exists()
+        finally:
+            await worker.close()
+
+
+class TestAgentInfo:
+    async def test_hello_reports_the_real_version_and_platform(self, tmp_path):
+        import sys
+
+        worker = await start_worker_server(host="127.0.0.1", port=0, data_dir=tmp_path)
+        try:
+            port = worker.ws_server.sockets[0].getsockname()[1]
+            ws = await websockets.connect(f"ws://127.0.0.1:{port}")
+            await ws.send(
+                Hello(
+                    proto={"min": 1, "max": 1},
+                    agent={"name": "t", "version": "0", "platform": "t"},
+                    node_id=public_key_to_b64(generate_keypair()[1]),
+                    nonce="n",
+                ).to_json()
+            )
+            hello = parse_envelope(await ws.recv())
+            await ws.close()
+        finally:
+            await worker.close()
+
+        assert hello.agent["version"] not in ("", "0.0.0")
+        assert hello.agent["platform"] == sys.platform
+
+
+class TestWorkerInfoWiring:
+    async def test_worker_info_is_served(self, tmp_path, monkeypatch):
+        from sleap_rtc.protocol_v1 import worker_info
+
+        monkeypatch.setattr(
+            worker_info,
+            "_detect_hardware",
+            lambda: {
+                "gpu_model": "CPU",
+                "gpu_memory_mb": 0,
+                "gpu_count": 0,
+                "cuda_version": "N/A",
+                "sleap_nn_version": "x",
+            },
+        )
+        worker = await start_worker_server(host="127.0.0.1", port=0, data_dir=tmp_path)
+        try:
+            port = worker.ws_server.sockets[0].getsockname()[1]
+            ticket = worker.pending_pairings.create(worker.identity.node_id, [])
+            node_id = public_key_to_b64(generate_keypair()[1])
+            reply = await _pair_and_call(port, ticket.secret, node_id, "worker.info")
+        finally:
+            await worker.close()
+        assert reply.result["gpu_model"] == "CPU"
+        assert reply.result["busy"] is False

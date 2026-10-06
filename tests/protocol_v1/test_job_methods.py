@@ -8,6 +8,7 @@ requiring sleap-nn to be installed.
 """
 
 import asyncio
+import json
 import hashlib
 import sys
 import time
@@ -22,6 +23,7 @@ from sleap_rtc.jobs.store import JobStore
 from sleap_rtc.protocol_v1.blobs import BlobIndex
 from sleap_rtc.protocol_v1.errors import JOB_NOT_FOUND, ProtocolError
 from sleap_rtc.protocol_v1.job_methods import JobMethods
+from sleap_rtc.protocol_v1 import job_methods as job_methods_module
 from sleap_rtc.protocol_v1.server import Connection, ProtocolV1Server
 
 TERMINAL_STATES = ("completed", "failed", "canceled")
@@ -89,6 +91,14 @@ async def _wait_for_state(store, job_id, state, timeout=5):
     raise AssertionError(
         f"job {job_id} did not reach state {state!r} within {timeout}s"
     )
+
+
+@pytest.fixture(autouse=True)
+def _skip_input_preflight(request, monkeypatch):
+    """Most tests here run a fake command against made-up input paths (they
+    never read them); only `TestPreflight` exercises the missing-input check."""
+    if request.cls is None or request.cls.__name__ != "TestPreflight":
+        monkeypatch.setattr(job_methods_module, "_missing_inputs", lambda spec: [])
 
 
 @pytest.fixture
@@ -291,7 +301,9 @@ class TestResultBlobs:
         result = await methods.submit({"spec": spec.to_dict()}, conn=None)
         record = await _wait_for_terminal(methods, store, result["job_id"])
 
-        assert record.result == {"blobs": {}}
+        assert record.result["blobs"] == {}
+        # A train job reports where its model went instead (see TestTrainOutputs).
+        assert "model_dir" in record.result
 
     async def test_job_result_is_emitted_before_job_status_completed(
         self, store, tmp_path
@@ -699,8 +711,8 @@ class TestMetricsWiring:
         events = await store.get_events_since(job_id)
         metrics = [e.data for e in events if e.topic == "job.metric"]
         assert any(m["latest_train_loss"] == 0.42 for m in metrics)
-        curves = [e.data for e in events if e.topic == "job.curve"]
-        assert any(c["points"] for c in curves)
+        epochs = [e.data for e in events if e.topic == "job.epoch"]
+        assert any(ep["train_loss"] == 0.42 for ep in epochs)
 
     async def test_track_job_never_starts_a_metrics_consumer(self, store, tmp_path):
         # TrackJobSpec has no epoch/loss stream — must not try to bind a
@@ -761,3 +773,467 @@ class TestMetricsWiring:
             blocker.setsockopt(zmq.LINGER, 0)
             blocker.close()
             ctx.term()
+
+
+class TestResumeReattached:
+    """A job left running by a previous worker is finished by the next one.
+
+    Simulates a worker restart in-process: the first `JobMethods` spawns
+    the job, then its watcher task is cancelled (the worker going away —
+    the job's detached process keeps running), and a second `JobMethods`
+    over the same store takes over via `reattach_all` + `resume_reattached`.
+    """
+
+    @staticmethod
+    def _job_cmd(go_file, exit_code=0):
+        # Prints a line, waits for the test to say "go", prints another.
+        return [
+            sys.executable,
+            "-c",
+            "import os, sys, time\n"
+            "print('line 1', flush=True)\n"
+            f"while not os.path.exists({str(go_file)!r}): time.sleep(0.05)\n"
+            "print('line 2', flush=True)\n"
+            f"sys.exit({exit_code})",
+        ]
+
+    async def _start_then_restart_worker(self, store, tmp_path, spec, cmd):
+        from sleap_rtc.jobs.process import reattach_all
+
+        first = _make_methods(store, tmp_path, cmd)
+        job_id = (await first.submit({"spec": spec.to_dict()}, conn=None))["job_id"]
+        deadline = time.monotonic() + 10
+        while not any(
+            ev.topic == "job.log" for ev in await store.get_events_since(job_id, 0)
+        ):
+            assert time.monotonic() < deadline, "job never logged its first line"
+            await asyncio.sleep(0.05)
+        task = first._tasks[job_id]
+        task.cancel()  # the first worker goes away; the job keeps running
+        await asyncio.gather(task, return_exceptions=True)
+        return job_id, reattach_all
+
+    async def _log_lines(self, store, job_id):
+        return [
+            ev.data["line"]
+            for ev in await store.get_events_since(job_id, 0)
+            if ev.topic == "job.log"
+        ]
+
+    async def test_a_reattached_job_completes_with_its_log_resumed_exactly(
+        self, store, spec, tmp_path
+    ):
+        go = tmp_path / "go"
+        cmd = self._job_cmd(go)
+        job_id, reattach_all = await self._start_then_restart_worker(
+            store, tmp_path, spec, cmd
+        )
+
+        outcomes = await reattach_all(store)
+        assert outcomes == {job_id: "reattached"}
+        second = _make_methods(store, tmp_path, cmd)
+        second.resume_reattached(outcomes)
+        go.touch()
+
+        record = await _wait_for_terminal(second, store, job_id)
+        assert record.state == "completed"
+        # No line lost or repeated across the restart.
+        assert await self._log_lines(store, job_id) == ["line 1", "line 2"]
+        topics = [ev.topic for ev in await store.get_events_since(job_id, 0)]
+        assert topics[-2:] == ["job.result", "job.status"]
+
+    async def test_a_reattached_job_that_fails_is_marked_failed_with_its_code(
+        self, store, spec, tmp_path
+    ):
+        go = tmp_path / "go"
+        cmd = self._job_cmd(go, exit_code=3)
+        job_id, reattach_all = await self._start_then_restart_worker(
+            store, tmp_path, spec, cmd
+        )
+
+        second = _make_methods(store, tmp_path, cmd)
+        second.resume_reattached(await reattach_all(store))
+        go.touch()
+
+        record = await _wait_for_terminal(second, store, job_id)
+        assert record.state == "failed"
+        assert record.error == "exit code 3"
+
+    async def test_a_job_that_finished_while_no_worker_ran_is_finalized(
+        self, store, spec, tmp_path
+    ):
+        from sleap_rtc.jobs.process import is_alive
+
+        go = tmp_path / "go"
+        cmd = self._job_cmd(go)
+        job_id, reattach_all = await self._start_then_restart_worker(
+            store, tmp_path, spec, cmd
+        )
+        go.touch()  # finishes while "no worker is running"
+        record = await store.get_job(job_id)
+        deadline = time.monotonic() + 10
+        while is_alive(record.pid, record.process_started_at):
+            assert time.monotonic() < deadline
+            await asyncio.sleep(0.05)
+
+        outcomes = await reattach_all(store)
+        assert outcomes == {job_id: "exited"}
+        second = _make_methods(store, tmp_path, cmd)
+        second.resume_reattached(outcomes)
+
+        record = await _wait_for_terminal(second, store, job_id)
+        assert record.state == "completed"
+        # The line printed while no worker was up is still delivered.
+        assert await self._log_lines(store, job_id) == ["line 1", "line 2"]
+
+    async def test_a_reattached_job_holds_the_queue_slot(self, store, spec, tmp_path):
+        go = tmp_path / "go"
+        cmd = self._job_cmd(go)
+        job_id, reattach_all = await self._start_then_restart_worker(
+            store, tmp_path, spec, cmd
+        )
+
+        second = _make_methods(store, tmp_path, cmd)
+        second.resume_reattached(await reattach_all(store))
+        await asyncio.sleep(0.2)
+        new_id = (await second.submit({"spec": spec.to_dict()}, conn=None))["job_id"]
+        await asyncio.sleep(1.0)
+        # Waits for the reattached job instead of sharing the GPU with it.
+        assert (await store.get_job(new_id)).state == "queued"
+
+        go.touch()
+        await _wait_for_terminal(second, store, job_id)
+        await _wait_for_terminal(second, store, new_id)
+
+
+class TestProgressLines:
+    """tqdm-style `\\r` redraws become throttled `progress` events."""
+
+    async def test_progress_bar_is_throttled_then_finalized_as_one_line(
+        self, store, spec, tmp_path
+    ):
+        # ~2.5 s of redraws, 20 per second, like a fast tqdm bar.
+        script = (
+            "import sys, time\n"
+            "print('start', flush=True)\n"
+            "for i in range(50):\n"
+            "    sys.stdout.write(f'\\rEpoch 1: {i*2}%|bar| {i}/50')\n"
+            "    sys.stdout.flush()\n"
+            "    time.sleep(0.05)\n"
+            "sys.stdout.write('\\rEpoch 1: 100%|bar| 50/50\\n')\n"
+            "print('done', flush=True)\n"
+        )
+        methods = _make_methods(store, tmp_path, [sys.executable, "-c", script])
+        job_id = (await methods.submit({"spec": spec.to_dict()}, conn=None))["job_id"]
+        await _wait_for_terminal(methods, store, job_id)
+
+        events = [e for e in await store.get_events_since(job_id) if e.topic == "job.log"]
+        logs = [e.data for e in events]
+        lines = [d["line"] for d in logs if not d.get("progress")]
+        progress = [d["line"] for d in logs if d.get("progress")]
+
+        assert lines == ["start", "Epoch 1: 100%|bar| 50/50", "done"]
+        # Redraws are visible while running, but at most about one per
+        # throttle interval of the script's real run time (a slow CI runner
+        # stretches the nominal 2.5 s), and nowhere near one per redraw (50).
+        elapsed = events[-1].created_at - events[0].created_at
+        assert 1 <= len(progress) <= elapsed / job_methods_module._PROGRESS_EMIT_INTERVAL_SECS + 2
+        assert len(progress) < 50
+        assert all(p.startswith("Epoch 1: ") and "\r" not in p for p in progress)
+
+    async def test_ansi_control_sequences_are_stripped(self, store, spec, tmp_path):
+        script = (
+            "import sys\n"
+            "sys.stdout.write('\\x1b[2K\\x1b[1Aloading \\x1b[32mok\\x1b[0m\\n')\n"
+        )
+        methods = _make_methods(store, tmp_path, [sys.executable, "-c", script])
+        job_id = (await methods.submit({"spec": spec.to_dict()}, conn=None))["job_id"]
+        await _wait_for_terminal(methods, store, job_id)
+
+        logs = [
+            e.data for e in await store.get_events_since(job_id) if e.topic == "job.log"
+        ]
+        assert logs == [{"line": "loading ok"}]
+
+    async def test_crlf_output_is_not_mistaken_for_a_redraw(
+        self, store, spec, tmp_path
+    ):
+        script = "import sys; sys.stdout.write('a\\r\\nb\\r\\n')"
+        methods = _make_methods(store, tmp_path, [sys.executable, "-c", script])
+        job_id = (await methods.submit({"spec": spec.to_dict()}, conn=None))["job_id"]
+        await _wait_for_terminal(methods, store, job_id)
+
+        logs = [
+            e.data for e in await store.get_events_since(job_id) if e.topic == "job.log"
+        ]
+        assert logs == [{"line": "a"}, {"line": "b"}]
+
+
+class _CkptAwareBuilder:
+    """Runs `script(ckpt_dir)`, mimicking sleap-nn writing into its ckpt_dir."""
+
+    def __init__(self, script):
+        self._script = script
+
+    def build_command(self, spec):
+        return [sys.executable, "-c", self._script(spec.ckpt_dir)]
+
+
+def _make_ckpt_methods(store, tmp_path, script):
+    return JobMethods(
+        ProtocolV1Server(node_id="test-node"),
+        store,
+        JobQueue(max_concurrent=1),
+        log_dir=tmp_path / "job-logs",
+        command_builder=_CkptAwareBuilder(script),
+    )
+
+
+def _write_run(ckpt_dir, epochs=(), wait_for=None):
+    """Script: create a sleap-nn-like run folder, optionally logging epochs."""
+    return (
+        "import os, time\n"
+        f"run = os.path.join({ckpt_dir!r}, 'centroid')\n"
+        "os.makedirs(run, exist_ok=True)\n"
+        "open(os.path.join(run, 'training_config.yaml'), 'w').write('x: 1')\n"
+        "print('line 1', flush=True)\n"
+        + (
+            f"while not os.path.exists({str(wait_for)!r}): time.sleep(0.05)\n"
+            if wait_for
+            else ""
+        )
+        + "with open(os.path.join(run, 'training_log.csv'), 'w') as f:\n"
+        "    f.write('epoch,train_loss,val_loss,learning_rate\\n')\n"
+        + "".join(
+            f"    f.write('{e},{0.5 / (e + 1)},{0.6 / (e + 1)},0.001\\n')\n"
+            for e in epochs
+        )
+    )
+
+
+class TestTrainOutputs:
+    async def test_result_reports_model_dir_and_materialized_labels(
+        self, store, tmp_path
+    ):
+        import base64
+
+        spec = TrainJobSpec(
+            config_path="/data/centroid.yaml",
+            labels_content=base64.b64encode(b"slp-bytes").decode(),
+        )
+        methods = _make_ckpt_methods(store, tmp_path, _write_run)
+        job_id = (await methods.submit({"spec": spec.to_dict()}, conn=None))["job_id"]
+        record = await _wait_for_terminal(methods, store, job_id)
+
+        job_dir = tmp_path / "job-runs" / job_id
+        assert record.state == "completed"
+        assert record.result["model_dir"] == str(job_dir / "models" / "centroid")
+        assert record.result["labels_path"] == str(job_dir / "labels.slp")
+        assert (job_dir / "labels.slp").read_bytes() == b"slp-bytes"
+        result_events = [
+            e.data
+            for e in await store.get_events_since(job_id)
+            if e.topic == "job.result"
+        ]
+        assert result_events == [record.result]
+
+    async def test_client_supplied_ckpt_dir_is_overridden(self, store, tmp_path):
+        spec = TrainJobSpec(config_path="/data/c.yaml", ckpt_dir="/etc")
+        methods = _make_ckpt_methods(store, tmp_path, _write_run)
+        job_id = (await methods.submit({"spec": spec.to_dict()}, conn=None))["job_id"]
+        record = await _wait_for_terminal(methods, store, job_id)
+        assert record.result["model_dir"].startswith(str(tmp_path / "job-runs"))
+
+
+class TestReattachedEpochBackfill:
+    async def test_epochs_logged_while_no_worker_ran_are_backfilled_once(
+        self, store, tmp_path
+    ):
+        from sleap_rtc.jobs.process import reattach_all
+
+        go = tmp_path / "go"
+        script = lambda ckpt_dir: _write_run(ckpt_dir, epochs=(0, 1), wait_for=go)
+        spec = TrainJobSpec(config_path="/data/c.yaml")
+        first = _make_ckpt_methods(store, tmp_path, script)
+        job_id = (await first.submit({"spec": spec.to_dict()}, conn=None))["job_id"]
+        deadline = time.monotonic() + 10
+        while not any(
+            e.topic == "job.log" for e in await store.get_events_since(job_id)
+        ):
+            assert time.monotonic() < deadline
+            await asyncio.sleep(0.05)
+        task = first._tasks[job_id]
+        task.cancel()  # worker goes away
+        await asyncio.gather(task, return_exceptions=True)
+        go.touch()  # epochs get logged while no worker is running
+
+        second = _make_ckpt_methods(store, tmp_path, script)
+        second.resume_reattached(await reattach_all(store))
+        record = await _wait_for_terminal(second, store, job_id)
+
+        assert record.state == "completed"
+        epochs = [
+            e.data
+            for e in await store.get_events_since(job_id)
+            if e.topic == "job.epoch"
+        ]
+        assert [e["epoch"] for e in epochs] == [0, 1]
+        assert epochs[0]["train_loss"] == 0.5
+
+
+class TestQueuePosition:
+    async def test_waiting_jobs_report_their_place_in_line(self, store, spec, tmp_path):
+        go = tmp_path / "go"
+        cmd = [
+            sys.executable,
+            "-c",
+            f"import os, time\nwhile not os.path.exists({str(go)!r}): time.sleep(0.05)",
+        ]
+        methods = _make_methods(store, tmp_path, cmd)
+        ids = [
+            (await methods.submit({"spec": spec.to_dict()}, conn=None))["job_id"]
+            for _ in range(3)
+        ]
+        await _wait_for_state(store, ids[0], "running")
+        await asyncio.sleep(0.1)
+
+        assert [methods.queue_position(i) for i in ids] == [None, 1, 2]
+
+        go.touch()
+        for job_id in ids:
+            await _wait_for_terminal(methods, store, job_id)
+        assert [methods.queue_position(i) for i in ids] == [None, None, None]
+
+
+class TestJobSummaries:
+    """jobs.list / jobs.status describe a job well enough to list and re-run it."""
+
+    async def test_list_and_status_describe_the_job_without_inline_labels(
+        self, store, tmp_path
+    ):
+        import base64
+
+        spec = TrainJobSpec(
+            config_contents=["model: centroid"],
+            model_types=["centroid"],
+            labels_content=base64.b64encode(b"slp").decode(),
+            project={"name": "flies.slp", "id": "p1"},
+        )
+        methods = _make_methods(store, tmp_path, [sys.executable, "-c", "pass"])
+        job_id = (await methods.submit({"spec": spec.to_dict()}, conn=None))["job_id"]
+        await _wait_for_terminal(methods, store, job_id)
+
+        (listed,) = (await methods.list_jobs({}, conn=None))["jobs"]
+        assert listed["job_id"] == job_id
+        assert listed["kind"] == "train"
+        assert listed["model_types"] == ["centroid"]
+        assert listed["project"] == {"name": "flies.slp", "id": "p1"}
+        assert listed["queue_position"] is None
+        assert "spec" not in listed
+        assert "labels_content" not in json.dumps(listed)
+
+        status = await methods.status({"job_id": job_id}, conn=None)
+        assert status["spec"]["config_contents"] == ["model: centroid"]
+        assert "labels_content" not in status["spec"]
+        assert status["kind"] == "train"
+
+    async def test_track_job_lists_its_data_path(self, store, tmp_path):
+        spec = TrackJobSpec(data_path="/data/v.slp", model_paths=["/m"])
+        methods = _make_methods(store, tmp_path, [sys.executable, "-c", "pass"])
+        job_id = (await methods.submit({"spec": spec.to_dict()}, conn=None))["job_id"]
+        await _wait_for_terminal(methods, store, job_id)
+
+        (listed,) = (await methods.list_jobs({}, conn=None))["jobs"]
+        assert listed["kind"] == "track"
+        assert listed["labels_path"] == "/data/v.slp"
+
+    async def test_failed_job_lists_its_error(self, store, spec, tmp_path):
+        methods = _make_methods(
+            store, tmp_path, [sys.executable, "-c", "raise SystemExit(4)"]
+        )
+        job_id = (await methods.submit({"spec": spec.to_dict()}, conn=None))["job_id"]
+        await _wait_for_terminal(methods, store, job_id)
+
+        (listed,) = (await methods.list_jobs({}, conn=None))["jobs"]
+        assert listed["state"] == "failed"
+        assert listed["error"] == "exit code 4"
+
+
+class TestPreflight:
+    """A job whose input files are missing fails before anything is spawned."""
+
+    async def test_missing_labels_fail_fast_without_spawning(self, store, tmp_path):
+        marker = tmp_path / "spawned"
+        config = tmp_path / "c.yaml"
+        config.write_text("x: 1")
+        spec = TrainJobSpec(config_paths=[str(config)], labels_path="/nope/labels.slp")
+        methods = _make_methods(
+            store, tmp_path, [sys.executable, "-c", f"open({str(marker)!r}, 'w')"]
+        )
+        job_id = (await methods.submit({"spec": spec.to_dict()}, conn=None))["job_id"]
+        record = await _wait_for_terminal(methods, store, job_id)
+
+        assert record.state == "failed"
+        assert record.error == "not found on worker: /nope/labels.slp"
+        assert not marker.exists()
+        status = [
+            e.data
+            for e in await store.get_events_since(job_id)
+            if e.topic == "job.status"
+        ][-1]
+        assert status["missing"] == ["/nope/labels.slp"]
+
+    async def test_missing_model_fails_a_track_job(self, store, tmp_path):
+        data = tmp_path / "v.slp"
+        data.write_bytes(b"x")
+        spec = TrackJobSpec(data_path=str(data), model_paths=["/nope/model"])
+        methods = _make_methods(store, tmp_path, [sys.executable, "-c", "pass"])
+        job_id = (await methods.submit({"spec": spec.to_dict()}, conn=None))["job_id"]
+        record = await _wait_for_terminal(methods, store, job_id)
+
+        assert record.state == "failed"
+        assert "/nope/model" in record.error
+
+
+class TestCancelBeforeSpawn:
+    """Cancelling a job that hasn't started its process yet must stop it from
+    ever starting (previously it was marked failed and then ran anyway)."""
+
+    async def test_cancelling_a_queued_job_means_it_never_runs(
+        self, store, spec, tmp_path
+    ):
+        go = tmp_path / "go"
+        marker = tmp_path / "second-ran"
+        blocker = [
+            sys.executable,
+            "-c",
+            f"import os, time\nwhile not os.path.exists({str(go)!r}): time.sleep(0.05)",
+        ]
+        methods = _make_methods(store, tmp_path, blocker)
+        first = (await methods.submit({"spec": spec.to_dict()}, conn=None))["job_id"]
+        await _wait_for_state(store, first, "running")
+        methods._builder = _FakeCommandBuilder(
+            [sys.executable, "-c", f"open({str(marker)!r}, 'w')"]
+        )
+        second = (await methods.submit({"spec": spec.to_dict()}, conn=None))["job_id"]
+        await asyncio.sleep(0.1)
+
+        await methods.cancel({"job_id": second}, conn=None)
+        go.touch()
+        await _wait_for_terminal(methods, store, first)
+        record = await _wait_for_terminal(methods, store, second)
+
+        assert record.state == "canceled"
+        assert not marker.exists()
+
+    async def test_cancel_right_after_submit_never_spawns(self, store, spec, tmp_path):
+        marker = tmp_path / "ran"
+        methods = _make_methods(
+            store, tmp_path, [sys.executable, "-c", f"open({str(marker)!r}, 'w')"]
+        )
+        job_id = (await methods.submit({"spec": spec.to_dict()}, conn=None))["job_id"]
+        await methods.cancel({"job_id": job_id, "mode": "stop"}, conn=None)
+
+        record = await _wait_for_terminal(methods, store, job_id)
+        assert record.state == "canceled"
+        assert not marker.exists()

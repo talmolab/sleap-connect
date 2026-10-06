@@ -18,14 +18,17 @@ import binascii
 import json
 import logging
 import os
+import re
 import secrets
 import tempfile
+import time
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Callable, Dict, List, Optional
 
 from sleap_rtc.jobs.builder import DEFAULT_ZMQ_PORTS, CommandBuilder
 from sleap_rtc.jobs.process import (
     is_alive,
+    read_exit_code,
     send_cancel_signal,
     send_stop_signal,
     spawn_detached,
@@ -36,7 +39,7 @@ from sleap_rtc.jobs.store import TERMINAL_STATES, JobRecord, JobStore
 from sleap_rtc.protocol_v1.blobs import BlobIndex, compute_chunk_hashes, hash_file
 from sleap_rtc.protocol_v1.envelope import Event
 from sleap_rtc.protocol_v1.errors import JOB_NOT_FOUND, JOB_SPEC_INVALID, ProtocolError
-from sleap_rtc.protocol_v1.metrics import JobMetricsConsumer
+from sleap_rtc.protocol_v1.metrics import JobMetricsConsumer, read_training_log_epochs
 from sleap_rtc.protocol_v1.server import Connection, ProtocolV1Server
 
 # The line sleap-nn's track CLI prints on completion, e.g.
@@ -50,6 +53,26 @@ _OUTPUT_PATH_MARKER = "Predictions output path:"
 # extra dependency, and job.log traffic is inherently low-frequency (line-
 # buffered subprocess output, not the high-rate ZMQ batch_end stream).
 _LOG_POLL_INTERVAL_SECS = 0.5
+
+# How often an in-place progress bar's current state (a tqdm `\r` redraw) is
+# sent as a `job.log` `progress` event. tqdm redraws many times a second;
+# forwarding every redraw is what flooded clients' logs.
+_PROGRESS_EMIT_INTERVAL_SECS = 1.0
+
+
+# CSI (ESC [ ... final byte) and OSC (ESC ] ... BEL/ST) sequences, as emitted
+# by rich/tqdm progress output. They render invisibly but end up in copied logs.
+_ANSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)")
+
+
+def _visible_text(raw: str) -> str:
+    """What a terminal shows for `raw`: its last non-empty `\r` segment."""
+    raw = _ANSI_RE.sub("", raw)
+    for segment in reversed(raw.split("\r")):
+        segment = segment.rstrip()
+        if segment:
+            return segment
+    return ""
 
 
 def generate_job_id() -> str:
@@ -106,6 +129,9 @@ class JobMethods:
         self.store = store
         self.queue = queue
         self.log_dir = Path(log_dir)
+        # Per-job working folders (sleap-nn's ckpt_dir, materialized labels),
+        # alongside the logs, so a train job's model is always findable.
+        self.runs_dir = self.log_dir.parent / "job-runs"
         self.file_manager = file_manager
         self.blob_index = blob_index
         self.metrics_ports = metrics_ports
@@ -118,6 +144,13 @@ class JobMethods:
         # store for a terminal state, which races with those emits still
         # landing.
         self._tasks: Dict[str, asyncio.Task] = {}
+        # Jobs waiting for a queue slot, in arrival order (the queue is FIFO),
+        # so clients can show "#2 in line".
+        self._waiting: List[str] = []
+        # Cancels that arrived before the job's process existed (queued, or
+        # between "running" and spawn): honored before spawning, or signalled
+        # right after it if the request landed mid-spawn. mode: "stop"/"cancel".
+        self._cancel_requested: Dict[str, str] = {}
 
         server.register("jobs.submit", self.submit)
         server.register("jobs.cancel", self.cancel)
@@ -167,8 +200,20 @@ class JobMethods:
         finally:
             self._tasks.pop(job_id, None)
 
+    def queue_position(self, job_id: str) -> Optional[int]:
+        """1-based place in line of a job waiting for a slot, else None."""
+        try:
+            return self._waiting.index(job_id) + 1
+        except ValueError:
+            return None
+
     async def _run_job_body(self, job_id: str, spec) -> None:
-        async with self.queue.slot():
+        self._waiting.append(job_id)
+        try:
+            await self.queue.acquire()
+        finally:
+            self._waiting.remove(job_id)
+        try:
             metrics_consumer = self._make_metrics_consumer(job_id, spec)
             try:
                 await self._run_job_inner(job_id, spec, metrics_consumer)
@@ -178,16 +223,36 @@ class JobMethods:
                 # leaked ZMQ bind here would break the *next* job too.
                 if metrics_consumer is not None:
                     await metrics_consumer.stop()
+        finally:
+            self.queue.release()
 
     async def _run_job_inner(
         self, job_id: str, spec, metrics_consumer: Optional[JobMetricsConsumer]
     ) -> None:
         try:
+            if await self._honor_early_cancel(job_id):
+                return
             await self.store.update_state(job_id, "running")
             await self._emit(job_id, "job.status", {"state": "running"})
 
             self._materialize_config_contents(spec)
-            self._materialize_labels_content(spec)
+            if isinstance(spec, TrainJobSpec):
+                job_dir = self._job_dir(job_id)
+                job_dir.mkdir(parents=True, exist_ok=True)
+                spec.ckpt_dir = str(job_dir / "models")
+                self._materialize_labels_content(spec, job_dir / "labels.slp")
+            missing = _missing_inputs(spec)
+            if missing:
+                detail = f"not found on worker: {missing[0]}"
+                await self.store.update_state(job_id, "failed", error=detail)
+                await self._emit(
+                    job_id,
+                    "job.status",
+                    {"state": "failed", "detail": detail, "missing": missing},
+                )
+                return
+            if await self._honor_early_cancel(job_id):
+                return
             cmd = self._builder.build_command(spec)
             log_path = self.log_dir / f"{job_id}.log"
             if metrics_consumer is not None:
@@ -195,38 +260,170 @@ class JobMethods:
             process = await spawn_detached(
                 cmd, job_id=job_id, store=self.store, log_path=log_path
             )
+            late_cancel = self._cancel_requested.pop(job_id, None)
+            if late_cancel == "stop":
+                send_stop_signal(process.pid)
+            elif late_cancel is not None:
+                send_cancel_signal(process.pid)
 
-            tail_task = asyncio.create_task(self._tail_log(job_id, log_path, process))
-            returncode = await process.wait()
-            await tail_task  # one final read to flush lines written right before exit
-
-            if returncode == 0:
-                blobs = await self._register_result_blobs(job_id, spec, log_path)
-                await self.store.update_state(
-                    job_id, "completed", result={"blobs": blobs}
-                )
-                # job.result BEFORE job.status: completed — a client that
-                # resolves its "wait for this job" promise as soon as it
-                # sees the terminal status (the natural, simplest thing
-                # for it to do) must already have the result in hand at
-                # that point, or it has no further chance to see it: the
-                # instant a client considers a job over, it typically
-                # unsubscribes, so a job.result arriving a message later
-                # would silently go nowhere.
-                await self._emit(job_id, "job.result", {"blobs": blobs})
-                await self._emit(job_id, "job.status", {"state": "completed"})
-            else:
-                detail = f"exit code {returncode}"
-                await self.store.update_state(job_id, "failed", error=detail)
-                await self._emit(
-                    job_id, "job.status", {"state": "failed", "detail": detail}
-                )
+            tail_task = asyncio.create_task(
+                self._tail_log(job_id, log_path, lambda: process.returncode is None)
+            )
+            try:
+                returncode = await process.wait()
+                await tail_task  # final read: flush lines written right before exit
+            finally:
+                # On cancellation (worker shutting down) the tail task would
+                # otherwise outlive this one and keep emitting.
+                tail_task.cancel()
+            await self._finish(job_id, spec, log_path, returncode)
         except Exception as e:
             logging.exception(f"[jobs] Job {job_id} failed with an unexpected error")
             await self.store.update_state(job_id, "failed", error=str(e))
             await self._emit(
                 job_id, "job.status", {"state": "failed", "detail": str(e)}
             )
+
+    async def _honor_early_cancel(self, job_id: str) -> bool:
+        """End a job as canceled if a cancel arrived before its process exists."""
+        if self._cancel_requested.pop(job_id, None) is None:
+            return False
+        detail = "canceled before it started"
+        await self.store.update_state(job_id, "canceled", error=detail)
+        await self._emit(job_id, "job.status", {"state": "canceled", "detail": detail})
+        return True
+
+    async def _finish(
+        self, job_id: str, spec, log_path: Path, returncode: Optional[int]
+    ) -> None:
+        """Record a job's terminal state once its process has exited."""
+        if returncode == 0:
+            blobs = await self._register_result_blobs(job_id, spec, log_path)
+            result = {"blobs": blobs}
+            if isinstance(spec, TrainJobSpec):
+                result.update(self._train_outputs(job_id, spec))
+            await self.store.update_state(job_id, "completed", result=result)
+            # job.result BEFORE job.status: completed — a client that
+            # resolves its "wait for this job" promise as soon as it
+            # sees the terminal status (the natural, simplest thing
+            # for it to do) must already have the result in hand at
+            # that point, or it has no further chance to see it: the
+            # instant a client considers a job over, it typically
+            # unsubscribes, so a job.result arriving a message later
+            # would silently go nowhere.
+            await self._emit(job_id, "job.result", result)
+            await self._emit(job_id, "job.status", {"state": "completed"})
+        else:
+            if returncode is None:
+                detail = (
+                    "job's process exited without recording an exit code "
+                    "(killed outright, or started by an older worker version)"
+                )
+            else:
+                detail = f"exit code {returncode}"
+            await self.store.update_state(job_id, "failed", error=detail)
+            await self._emit(
+                job_id, "job.status", {"state": "failed", "detail": detail}
+            )
+
+    def _job_dir(self, job_id: str) -> Path:
+        return self.runs_dir / job_id
+
+    def _train_outputs(self, job_id: str, spec) -> dict:
+        """Where a finished train job's model and training labels are.
+
+        `model_dir` is what `sleap-nn track --model_paths` takes, so a client
+        can run inference with it as a follow-up track job.
+        """
+        models = self._job_dir(job_id) / "models"
+        model_dirs = sorted(
+            (d for d in models.glob("*") if (d / "training_config.yaml").exists()),
+            key=lambda d: d.stat().st_mtime,
+        )
+        labels = self._job_dir(job_id) / "labels.slp"
+        return {
+            "model_dir": str(model_dirs[-1]) if model_dirs else None,
+            "labels_path": str(labels) if labels.exists() else spec.labels_path,
+        }
+
+    def resume_reattached(self, reattach_outcomes: Dict[str, str]) -> None:
+        """Take over jobs a previous worker left running (see `reattach_all`).
+
+        A reattached job is no longer this process's child, so nothing would
+        otherwise ever notice it finish: it would stay "running" forever. For
+        each one still running (or that finished while no worker was up),
+        resume tailing its log where the previous worker stopped and record
+        its terminal state from the exit code `_exit_code_wrapper.py` wrote.
+
+        For a training job, also resumes live metrics: sleap-nn connects out
+        to the worker's ZMQ ports and reconnects on its own once they're
+        bound again. Epochs that finished while no worker was listening are
+        backfilled from sleap-nn's `training_log.csv`.
+        """
+        for job_id, outcome in reattach_outcomes.items():
+            if outcome in ("reattached", "exited"):
+                self._tasks[job_id] = asyncio.create_task(self._run_reattached(job_id))
+
+    async def _run_reattached(self, job_id: str) -> None:
+        try:
+            # Holds the queue slot like any running job, so a new submission
+            # waits instead of sharing the GPU with it.
+            async with self.queue.slot():
+                record = await self.store.get_job(job_id)
+                log_path = Path(record.log_path)
+                events = await self.store.get_events_since(job_id, 0)
+                already_emitted = sum(
+                    1
+                    for ev in events
+                    if ev.topic == "job.log" and not ev.data.get("progress")
+                )
+                # Epochs that finished while no worker was listening, before
+                # the live stream takes over again.
+                await self._backfill_epochs(job_id)
+                metrics_consumer = self._make_metrics_consumer(job_id, record.spec)
+                try:
+                    if metrics_consumer is not None:
+                        self._start_metrics_consumer(job_id, metrics_consumer)
+                    await self._tail_log(
+                        job_id,
+                        log_path,
+                        lambda: is_alive(record.pid, record.process_started_at),
+                        skip_lines=already_emitted,
+                    )
+                finally:
+                    if metrics_consumer is not None:
+                        await metrics_consumer.stop()
+                # Anything that slipped between the two (e.g. an epoch ending
+                # right as the live stream was rebinding).
+                await self._backfill_epochs(job_id)
+                await self._finish(
+                    job_id, record.spec, log_path, read_exit_code(log_path)
+                )
+        except Exception as e:
+            logging.exception(f"[jobs] Reattached job {job_id} failed unexpectedly")
+            await self.store.update_state(job_id, "failed", error=str(e))
+            await self._emit(
+                job_id, "job.status", {"state": "failed", "detail": str(e)}
+            )
+        finally:
+            self._tasks.pop(job_id, None)
+
+    async def _backfill_epochs(self, job_id: str) -> None:
+        """Emit `job.epoch` for epochs in the run's `training_log.csv` that no
+        `job.epoch` event reports yet (they finished while no worker was
+        listening to the job's ZMQ stream).
+        """
+        reported = {
+            ev.data.get("epoch")
+            for ev in await self.store.get_events_since(job_id, 0)
+            if ev.topic == "job.epoch"
+        }
+        models = self._job_dir(job_id) / "models"
+        for log_csv in sorted(models.glob("*/training_log.csv")):
+            for epoch in read_training_log_epochs(log_csv):
+                if epoch["epoch"] not in reported:
+                    reported.add(epoch["epoch"])
+                    await self._emit(job_id, "job.epoch", epoch)
 
     @staticmethod
     def _materialize_config_contents(spec) -> None:
@@ -263,7 +460,7 @@ class JobMethods:
         spec.config_paths = temp_paths
 
     @staticmethod
-    def _materialize_labels_content(spec) -> None:
+    def _materialize_labels_content(spec, dest: Optional[Path] = None) -> None:
         """Write `spec.labels_content` (base64-encoded raw .slp bytes) to a
         temp file and populate `spec.labels_path`, mirroring
         `_materialize_config_contents`'s exact approach for the same reason:
@@ -284,10 +481,14 @@ class JobMethods:
                 JOB_SPEC_INVALID, f"Invalid labels_content (not valid base64): {e}"
             ) from e
 
-        fd, temp_path = tempfile.mkstemp(suffix=".slp", prefix="job_labels_")
-        with os.fdopen(fd, "wb") as f:
-            f.write(raw)
-        spec.labels_path = temp_path
+        if dest is None:
+            fd, temp_path = tempfile.mkstemp(suffix=".slp", prefix="job_labels_")
+            with os.fdopen(fd, "wb") as f:
+                f.write(raw)
+            spec.labels_path = temp_path
+        else:
+            dest.write_bytes(raw)
+            spec.labels_path = str(dest)
 
     @staticmethod
     def _start_metrics_consumer(
@@ -327,28 +528,77 @@ class JobMethods:
             total_epochs=spec.max_epochs,
         )
 
-    async def _tail_log(self, job_id: str, log_path: Path, process) -> None:
-        """Poll a job's log file and emit each new line as a `job.log` event.
+    async def _tail_log(
+        self,
+        job_id: str,
+        log_path: Path,
+        is_running: Callable[[], bool],
+        skip_lines: int = 0,
+    ) -> None:
+        """Poll a job's log file and emit its output as `job.log` events.
 
-        Stops once `process.returncode` is set (i.e. the subprocess itself
-        has exited) — not once the job's *stored* state is no longer
-        "running", since that state is only set by `_run_job` *after*
-        awaiting this task, which would otherwise deadlock the two waiting
-        on each other.
+        Each finished (newline-terminated) line is one `job.log` event with
+        what a terminal would show for it: a line redrawn in place with
+        `\r` (a tqdm progress bar) collapses to its final state. That keeps
+        lines 1:1 with events, which is what lets a restarted worker resume
+        a reattached job's log by skipping the `skip_lines` lines the
+        previous worker already emitted.
+
+        A progress bar that is still being redrawn (no newline yet) is sent
+        as `{"line": <current state>, "progress": True}` at most every
+        `_PROGRESS_EMIT_INTERVAL_SECS`; clients replace the previous progress
+        line with it instead of appending.
+
+        Stops once `is_running()` is false (i.e. the subprocess itself has
+        exited) — not once the job's *stored* state is no longer "running",
+        since that state is only set *after* awaiting this task, which would
+        otherwise deadlock the two waiting on each other.
         """
         pos = 0
+        partial = ""
+        last_progress = ""
+        last_progress_at = 0.0
         while True:
             await asyncio.sleep(_LOG_POLL_INTERVAL_SECS)
+            done = not is_running()  # checked before reading: no lost tail
             if log_path.exists():
-                with open(log_path, "r", errors="replace") as f:
+                with open(log_path, "r", errors="replace", newline="") as f:
                     f.seek(pos)
                     new_data = f.read()
                     pos = f.tell()
-                for line in new_data.splitlines():
-                    if line:
-                        await self._emit(job_id, "job.log", {"line": line})
+                lines = (partial + new_data).split("\n")
+                partial = lines.pop()
+                if done and partial:
+                    lines.append(partial)
+                    partial = ""
+                for line in lines:
+                    line = _visible_text(line)
+                    if not line:
+                        continue
+                    last_progress = ""
+                    if skip_lines > 0:
+                        skip_lines -= 1
+                        continue
+                    await self._emit(job_id, "job.log", {"line": line})
 
-            if process.returncode is not None:
+                if "\r" in partial:
+                    # Only the latest redraw matters; don't let a long epoch's
+                    # thousands of redraws accumulate in memory.
+                    cut = partial.rstrip("\r").rfind("\r")
+                    partial = partial[cut:]
+                    current = _visible_text(partial)
+                    now = time.monotonic()
+                    if (
+                        current
+                        and current != last_progress
+                        and now - last_progress_at >= _PROGRESS_EMIT_INTERVAL_SECS
+                    ):
+                        last_progress, last_progress_at = current, now
+                        await self._emit(
+                            job_id, "job.log", {"line": current, "progress": True}
+                        )
+
+            if done:
                 return
 
     async def _register_result_blobs(self, job_id: str, spec, log_path: Path) -> dict:
@@ -452,6 +702,10 @@ class JobMethods:
                 send_stop_signal(record.pid)
             else:
                 send_cancel_signal(record.pid)
+        elif job_id in self._tasks:
+            # Ours, but its process doesn't exist yet (queued, or about to
+            # spawn): make sure it never starts, or is signalled on start.
+            self._cancel_requested[job_id] = mode
         else:
             detail = "job's subprocess was not running when cancel was requested"
             await self.store.update_state(job_id, "failed", error=detail)
@@ -464,17 +718,35 @@ class JobMethods:
     async def status(self, params: dict, conn: Connection) -> dict:
         """Handle `jobs.status` — a full snapshot of one job."""
         record = await self._get_job_or_raise(params["job_id"])
-        return _record_to_dict(record)
+        summary = _spec_summary(record.spec)
+        return {
+            **_record_to_dict(record),
+            **summary,
+            "queue_position": self.queue_position(record.job_id),
+        }
 
     async def list_jobs(self, params: dict, conn: Connection) -> dict:
-        """Handle `jobs.list` — a summary of every job this worker knows about."""
-        records = await self.store.list_jobs()
-        return {
-            "jobs": [
-                {"job_id": r.job_id, "state": r.state, "created_at": r.created_at}
-                for r in records
-            ]
-        }
+        """Handle `jobs.list` — a summary of every job this worker knows about.
+
+        Newest first. Each entry is small enough to list hundreds of jobs: no
+        full spec (`jobs.status` has it) and never inline labels.
+        """
+        jobs = []
+        for r in await self.store.list_jobs():
+            summary = _spec_summary(r.spec)
+            summary.pop("spec")
+            jobs.append(
+                {
+                    "job_id": r.job_id,
+                    "state": r.state,
+                    "created_at": r.created_at,
+                    "updated_at": r.updated_at,
+                    "error": r.error,
+                    "queue_position": self.queue_position(r.job_id),
+                    **summary,
+                }
+            )
+        return {"jobs": jobs}
 
     async def subscribe(self, params: dict, conn: Connection) -> dict:
         """Handle `jobs.subscribe` — replay events-since-N, then live-subscribe."""
@@ -516,6 +788,42 @@ class JobMethods:
         if record is None:
             raise ProtocolError(JOB_NOT_FOUND, f"No such job: {job_id}")
         return record
+
+
+def _missing_inputs(spec) -> List[str]:
+    """Input paths a job names that don't exist on this worker.
+
+    Checked before spawning, so a moved or mistyped file fails the job in
+    seconds instead of partway into training. Video files referenced *inside*
+    an SLP are not checked here (that would mean parsing it); clients check
+    those with `fs.stat` before submitting.
+    """
+    if isinstance(spec, TrainJobSpec):
+        paths = [spec.labels_path, spec.val_labels_path, *spec.config_paths]
+    else:
+        paths = [spec.data_path, *spec.model_paths]
+    return [p for p in paths if p and not Path(p).exists()]
+
+
+def _spec_summary(spec) -> dict:
+    """What a client needs to list or re-run a job, minus bulky inline labels.
+
+    `labels_content` (a base64 SLP, possibly hundreds of MB) is dropped;
+    `config_contents` is kept, since "run again" and "start from a past job"
+    need it.
+    """
+    data = spec.to_dict()
+    data.pop("labels_content", None)
+    kind = data.get("type")
+    return {
+        "kind": kind,
+        "model_types": data.get("model_types") or [],
+        "labels_path": (
+            data.get("labels_path") if kind == "train" else data.get("data_path")
+        ),
+        "project": data.get("project"),
+        "spec": data,
+    }
 
 
 def _record_to_dict(record: JobRecord) -> dict:
