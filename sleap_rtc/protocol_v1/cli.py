@@ -74,6 +74,14 @@ def _parse_mount(raw: str) -> MountConfig:
     "direct-then-relay dialing. Additive: the plain WS binding above is "
     "always available regardless of this flag.",
 )
+@click.option(
+    "--metrics/--no-metrics",
+    default=True,
+    show_default=True,
+    help="Forward each training job's local ZMQ epoch/loss stream as "
+    "job.metric/job.curve events (item 3.1), so a remote client sees live "
+    "training progress instead of only raw log lines.",
+)
 def serve(
     host: str,
     port: int,
@@ -81,6 +89,7 @@ def serve(
     data_dir: str,
     mounts: tuple,
     iroh: bool,
+    metrics: bool,
 ):
     """Run this machine as a sleap-connect worker (protocol v1).
 
@@ -97,7 +106,9 @@ def serve(
     Example:
         sleap-rtc serve --port 9631 --mount /data/videos:lab-data
     """
-    asyncio.run(_serve_async(host, port, blob_port, Path(data_dir), mounts, iroh))
+    asyncio.run(
+        _serve_async(host, port, blob_port, Path(data_dir), mounts, iroh, metrics)
+    )
 
 
 async def _serve_async(
@@ -107,6 +118,7 @@ async def _serve_async(
     data_dir: Path,
     mounts: tuple = (),
     enable_iroh: bool = True,
+    enable_metrics: bool = True,
 ) -> None:
     file_manager = FileManager(mounts=[_parse_mount(m) for m in mounts])
     worker = await start_worker_server(
@@ -116,6 +128,7 @@ async def _serve_async(
         blob_port=blob_port,
         file_manager=file_manager,
         enable_iroh=enable_iroh,
+        enable_metrics=enable_metrics,
     )
     try:
         click.echo(click.style("sleap-connect worker", bold=True))

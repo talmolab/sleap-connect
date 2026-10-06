@@ -16,7 +16,12 @@ covered in test_auth.py, not here.
 import pytest
 import websockets
 
-from sleap_rtc.auth.keypair import generate_keypair, public_key_to_b64
+from sleap_rtc.auth.keypair import (
+    generate_keypair,
+    public_key_from_b64,
+    public_key_to_b64,
+    verify_signature,
+)
 from sleap_rtc.protocol_v1.auth import AuthMethods
 from sleap_rtc.protocol_v1.envelope import Event, Hello, Req, parse_envelope
 from sleap_rtc.protocol_v1.errors import ProtocolError
@@ -28,11 +33,17 @@ from sleap_rtc.protocol_v1.trust_store import TrustStore
 
 @pytest.fixture
 async def running_server(tmp_path):
-    """A ProtocolV1Server (with pairing/auth wired in) bound to a free port."""
+    """A ProtocolV1Server (with pairing/auth wired in) bound to a free port.
+
+    Wires `sign_nonce=identity.sign` (symmetric auth), matching how
+    `runner.py` constructs a real worker — so every test using this fixture
+    exercises the real `hello.proof` path by default, not an unconfigured
+    stand-in.
+    """
     identity = WorkerIdentity(tmp_path / "identity.json")
     trust_store = TrustStore(tmp_path / "trusted.json")
     pending_pairings = PendingPairings()
-    server_obj = ProtocolV1Server(node_id=identity.node_id)
+    server_obj = ProtocolV1Server(node_id=identity.node_id, sign_nonce=identity.sign)
     AuthMethods(server_obj, identity, trust_store, pending_pairings)
 
     ws_server = await server_obj.serve("127.0.0.1", 0)
@@ -145,6 +156,78 @@ class TestHelloHandshake:
         with pytest.raises(websockets.exceptions.ConnectionClosed):
             await ws.recv()
 
+    async def test_hello_proof_verifies_against_the_workers_own_node_id(
+        self, running_server
+    ):
+        """Symmetric auth: the worker's `hello.proof` must be a real
+        signature over the CLIENT's nonce, verifiable with the public key
+        encoded in that same hello's `node_id` — not a stand-in string."""
+        _server, port, _pending_pairings, identity = running_server
+
+        ws = await websockets.connect(f"ws://127.0.0.1:{port}")
+        client_nonce = "the-clients-own-nonce"
+        await ws.send(
+            Hello(
+                proto={"min": 1, "max": 1},
+                agent={},
+                node_id="client-node",
+                nonce=client_nonce,
+            ).to_json()
+        )
+        reply = parse_envelope(await ws.recv())
+        assert reply.node_id == identity.node_id
+        assert reply.proof is not None
+        public_key = public_key_from_b64(reply.node_id)
+        assert verify_signature(public_key, client_nonce, reply.proof)
+        await ws.close()
+
+    async def test_hello_proof_is_none_when_sign_nonce_is_not_configured(
+        self, tmp_path
+    ):
+        identity = WorkerIdentity(tmp_path / "identity.json")
+        server_obj = ProtocolV1Server(node_id=identity.node_id)  # no sign_nonce
+        ws_server = await server_obj.serve("127.0.0.1", 0)
+        port = ws_server.sockets[0].getsockname()[1]
+        try:
+            ws = await websockets.connect(f"ws://127.0.0.1:{port}")
+            await ws.send(
+                Hello(
+                    proto={"min": 1, "max": 1},
+                    agent={},
+                    node_id="client-node",
+                    nonce="client-nonce",
+                ).to_json()
+            )
+            reply = parse_envelope(await ws.recv())
+            assert reply.proof is None
+            await ws.close()
+        finally:
+            ws_server.close()
+            await ws_server.wait_closed()
+
+    async def test_hello_proof_does_not_verify_against_a_different_workers_key(
+        self, running_server
+    ):
+        """A proof is only valid for the EXACT nonce it signed — a signature
+        from a real, correctly-configured worker must still fail to verify
+        against a nonce the client never actually sent (guards against a
+        copy-pasted/replayed proof from a different handshake)."""
+        _server, port, _pending_pairings, identity = running_server
+
+        ws = await websockets.connect(f"ws://127.0.0.1:{port}")
+        await ws.send(
+            Hello(
+                proto={"min": 1, "max": 1},
+                agent={},
+                node_id="client-node",
+                nonce="the-real-nonce",
+            ).to_json()
+        )
+        reply = parse_envelope(await ws.recv())
+        public_key = public_key_from_b64(reply.node_id)
+        assert not verify_signature(public_key, "a-different-nonce", reply.proof)
+        await ws.close()
+
 
 class TestMethodDispatch:
     """Tests for req/res method dispatch."""
@@ -166,6 +249,59 @@ class TestMethodDispatch:
         assert reply.id == 1
         assert reply.result == {"echoed": {"x": 1}}
         await ws.close()
+
+    async def test_accepts_a_request_well_over_the_old_1_mib_default(
+        self, running_server
+    ):
+        """Regression test for item 3.3: `websockets`' own default `max_size`
+        (1 MiB) would silently reject a real `labels_content` embed before
+        `ProtocolV1Server.serve` started passing `DEFAULT_WS_MAX_SIZE` (256
+        MiB) — confirm a multi-MB request actually round-trips rather than
+        closing the connection.
+        """
+        server_obj, port, pending_pairings, identity = running_server
+
+        received_size = {}
+
+        async def echo_size(params, conn):
+            received_size["n"] = len(params["payload"])
+            return {"ok": True}
+
+        server_obj.register("test.echo", echo_size)
+        ws = await _connect_and_hello(port, pending_pairings, identity)
+
+        big_payload = "x" * (2 * 1024 * 1024)  # 2 MiB — over the old 1 MiB default
+        await ws.send(
+            Req(id=1, method="test.echo", params={"payload": big_payload}).to_json()
+        )
+        reply = parse_envelope(await ws.recv())
+
+        assert reply.result == {"ok": True}
+        assert received_size["n"] == 2 * 1024 * 1024
+        await ws.close()
+
+    async def test_max_size_still_rejects_a_request_over_the_configured_cap(
+        self, tmp_path
+    ):
+        """The previous test only proves a payload BELOW the new 256 MiB
+        ceiling now round-trips — it doesn't prove the ceiling still exists
+        at all (e.g. a future refactor that drops `max_size` entirely, or
+        passes `None`, would leave this file fully green). Uses its own
+        tiny `max_size` rather than the real 256 MiB one so this stays a
+        fast unit test, not a 256 MiB transfer.
+        """
+        identity = WorkerIdentity(tmp_path / "identity.json")
+        server_obj = ProtocolV1Server(node_id=identity.node_id)
+        ws_server = await server_obj.serve("127.0.0.1", 0, max_size=1024)
+        port = ws_server.sockets[0].getsockname()[1]
+        try:
+            ws = await websockets.connect(f"ws://127.0.0.1:{port}")
+            with pytest.raises(websockets.exceptions.ConnectionClosedError):
+                await ws.send("x" * 2048)  # over the 1024-byte cap just configured
+                await ws.recv()
+        finally:
+            ws_server.close()
+            await ws_server.wait_closed()
 
     async def test_unknown_method_returns_proto_unknown_method_error(
         self, running_server

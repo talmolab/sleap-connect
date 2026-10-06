@@ -219,8 +219,7 @@ class TestDirectoryListing:
         entries = result["entries"]
         # Find first file index
         first_file_idx = next(
-            (i for i, e in enumerate(entries) if e["type"] == "file"),
-            len(entries)
+            (i for i, e in enumerate(entries) if e["type"] == "file"), len(entries)
         )
 
         # All entries before first file should be directories
@@ -248,6 +247,77 @@ class TestDirectoryListing:
         """Test listing a file as directory."""
         result = file_manager.list_directory(str(temp_mount / "fly.slp"))
         assert result.get("error_code") == "PATH_NOT_FOUND"
+
+
+class TestStatPath:
+    """Tests for fs.stat's FileManager.stat_path (item 3.1)."""
+
+    def test_stat_a_file(self, file_manager, temp_mount):
+        result = file_manager.stat_path(str(temp_mount / "fly.slp"))
+        assert result["type"] == "file"
+        assert result["size"] == len("test")
+        assert "error" not in result
+
+    def test_stat_a_directory(self, file_manager, temp_mount):
+        result = file_manager.stat_path(str(temp_mount / "subdir"))
+        assert result["type"] == "directory"
+        assert result["size"] == 0
+
+    def test_stat_outside_mounts_denied(self, file_manager):
+        result = file_manager.stat_path("/etc")
+        assert result.get("error_code") == "ACCESS_DENIED"
+
+    def test_stat_nonexistent_path(self, file_manager, temp_mount):
+        result = file_manager.stat_path(str(temp_mount / "nonexistent"))
+        assert result.get("error_code") == "PATH_NOT_FOUND"
+
+
+class TestReadFile:
+    """Tests for fs.read's FileManager.read_file (item 3.1) — small direct
+    reads, NOT the bulk-transfer path (see the blob API for that)."""
+
+    def test_reads_whole_small_file(self, file_manager, temp_mount):
+        result = file_manager.read_file(str(temp_mount / "fly.slp"))
+        assert result["size"] == len("test")
+        assert result["eof"] is True
+        import base64
+
+        assert base64.b64decode(result["content_base64"]) == b"test"
+
+    def test_reads_a_byte_range(self, file_manager, temp_mount):
+        # "fly_tracking.slp" contains "test" * 100 == 400 bytes.
+        result = file_manager.read_file(
+            str(temp_mount / "fly_tracking.slp"), offset=4, length=4
+        )
+        import base64
+
+        assert base64.b64decode(result["content_base64"]) == b"test"
+        assert result["offset"] == 4
+        assert result["total_size"] == 400
+        assert result["eof"] is False
+
+    def test_length_is_capped_at_max_read_bytes(
+        self, file_manager, temp_mount, monkeypatch
+    ):
+        monkeypatch.setattr(FileManager, "MAX_READ_BYTES", 2)
+        result = file_manager.read_file(str(temp_mount / "fly.slp"), length=100)
+        assert result["size"] == 2
+
+    def test_read_outside_mounts_denied(self, file_manager):
+        result = file_manager.read_file("/etc/hosts")
+        assert result.get("error_code") == "ACCESS_DENIED"
+
+    def test_read_nonexistent_file(self, file_manager, temp_mount):
+        result = file_manager.read_file(str(temp_mount / "nonexistent"))
+        assert result.get("error_code") == "PATH_NOT_FOUND"
+
+    def test_read_a_directory_is_rejected(self, file_manager, temp_mount):
+        result = file_manager.read_file(str(temp_mount / "subdir"))
+        assert result.get("error_code") == "PATH_NOT_FOUND"
+
+    def test_negative_offset_is_rejected(self, file_manager, temp_mount):
+        result = file_manager.read_file(str(temp_mount / "fly.slp"), offset=-1)
+        assert result.get("error_code") == "INVALID_RANGE"
 
 
 class TestPathAllowedCheck:
@@ -341,10 +411,12 @@ class TestCheckVideoAccessibility:
         slp_file.write_text("slp data")
 
         # Mock sleap_io to return labels with accessible videos
-        mock_labels = self._create_mock_labels([
-            self._create_mock_video(str(video1)),
-            self._create_mock_video(str(video2)),
-        ])
+        mock_labels = self._create_mock_labels(
+            [
+                self._create_mock_video(str(video1)),
+                self._create_mock_video(str(video2)),
+            ]
+        )
 
         with patch("sleap_rtc.worker.file_manager.sio") as mock_sio:
             mock_sio.load_file.return_value = mock_labels
@@ -369,10 +441,12 @@ class TestCheckVideoAccessibility:
         slp_file.write_text("slp data")
 
         # Mock sleap_io with one accessible and one missing video
-        mock_labels = self._create_mock_labels([
-            self._create_mock_video(str(video1)),
-            self._create_mock_video("/nonexistent/video2.mp4"),
-        ])
+        mock_labels = self._create_mock_labels(
+            [
+                self._create_mock_video(str(video1)),
+                self._create_mock_video("/nonexistent/video2.mp4"),
+            ]
+        )
 
         with patch("sleap_rtc.worker.file_manager.sio") as mock_sio:
             mock_sio.load_file.return_value = mock_labels
@@ -392,9 +466,11 @@ class TestCheckVideoAccessibility:
         slp_file.write_text("slp data")
 
         # Mock sleap_io with embedded video (no external file needed)
-        mock_labels = self._create_mock_labels([
-            self._create_mock_video("/original/video.mp4", is_embedded=True),
-        ])
+        mock_labels = self._create_mock_labels(
+            [
+                self._create_mock_video("/original/video.mp4", is_embedded=True),
+            ]
+        )
 
         with patch("sleap_rtc.worker.file_manager.sio") as mock_sio:
             mock_sio.load_file.return_value = mock_labels
@@ -436,11 +512,13 @@ class TestCheckVideoAccessibility:
         slp_file.write_text("slp data")
 
         # Mock: 1 embedded, 1 accessible external, 1 missing external
-        mock_labels = self._create_mock_labels([
-            self._create_mock_video("/embedded/video.mp4", is_embedded=True),
-            self._create_mock_video(str(video1)),
-            self._create_mock_video("/missing/video.mp4"),
-        ])
+        mock_labels = self._create_mock_labels(
+            [
+                self._create_mock_video("/embedded/video.mp4", is_embedded=True),
+                self._create_mock_video(str(video1)),
+                self._create_mock_video("/missing/video.mp4"),
+            ]
+        )
 
         with patch("sleap_rtc.worker.file_manager.sio") as mock_sio:
             mock_sio.load_file.return_value = mock_labels
@@ -506,7 +584,9 @@ class TestScanDirectoryForFilenames:
         )
 
         assert result["error_code"] == "ACCESS_DENIED"
-        assert "outside" in result["error"].lower() or "denied" in result["error"].lower()
+        assert (
+            "outside" in result["error"].lower() or "denied" in result["error"].lower()
+        )
         assert result["found"] == {}
 
     def test_directory_not_found(self, file_manager, temp_mount):
@@ -597,10 +677,12 @@ class TestWriteSlpWithNewPaths:
         output_dir.mkdir()
 
         # Mock sleap_io
-        mock_labels = self._create_mock_labels([
-            self._create_mock_video("/old/path/video1.mp4"),
-            self._create_mock_video("/old/path/video2.mp4"),
-        ])
+        mock_labels = self._create_mock_labels(
+            [
+                self._create_mock_video("/old/path/video1.mp4"),
+                self._create_mock_video("/old/path/video2.mp4"),
+            ]
+        )
 
         filename_map = {
             "/old/path/video1.mp4": "/new/path/video1.mp4",
@@ -623,7 +705,9 @@ class TestWriteSlpWithNewPaths:
 
             # Verify sleap_io calls
             mock_sio.load_file.assert_called_once_with(str(slp_file), open_videos=False)
-            mock_labels.replace_filenames.assert_called_once_with(filename_map=filename_map, open_videos=False)
+            mock_labels.replace_filenames.assert_called_once_with(
+                filename_map=filename_map, open_videos=False
+            )
             mock_labels.save.assert_called_once()
 
             # Check output path format
@@ -706,9 +790,11 @@ class TestWriteSlpWithNewPaths:
         output_dir = temp_mount / "output"
         output_dir.mkdir()
 
-        mock_labels = self._create_mock_labels([
-            self._create_mock_video("/old/video.mp4"),
-        ])
+        mock_labels = self._create_mock_labels(
+            [
+                self._create_mock_video("/old/video.mp4"),
+            ]
+        )
 
         with patch("sleap_rtc.worker.file_manager.sio") as mock_sio:
             mock_sio.load_file.return_value = mock_labels
@@ -772,11 +858,13 @@ class TestWriteSlpWithNewPaths:
         output_dir.mkdir()
 
         # Mock with 3 videos but only map 2
-        mock_labels = self._create_mock_labels([
-            self._create_mock_video("/old/path/video1.mp4"),
-            self._create_mock_video("/old/path/video2.mp4"),
-            self._create_mock_video("/other/video3.mp4"),
-        ])
+        mock_labels = self._create_mock_labels(
+            [
+                self._create_mock_video("/old/path/video1.mp4"),
+                self._create_mock_video("/old/path/video2.mp4"),
+                self._create_mock_video("/other/video3.mp4"),
+            ]
+        )
 
         filename_map = {
             "/old/path/video1.mp4": "/new/path/video1.mp4",
@@ -806,9 +894,11 @@ class TestWriteSlpWithNewPaths:
         output_dir = temp_mount / "output"
         output_dir.mkdir()
 
-        mock_labels = self._create_mock_labels([
-            self._create_mock_video("/old/video.mp4"),
-        ])
+        mock_labels = self._create_mock_labels(
+            [
+                self._create_mock_video("/old/video.mp4"),
+            ]
+        )
         mock_labels.save.side_effect = PermissionError("Permission denied")
 
         with patch("sleap_rtc.worker.file_manager.sio") as mock_sio:

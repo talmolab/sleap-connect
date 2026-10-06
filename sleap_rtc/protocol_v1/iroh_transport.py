@@ -32,12 +32,25 @@ one exception type.
 import struct
 from typing import TYPE_CHECKING, Optional
 
-from sleap_rtc.protocol_v1.server import TransportClosed
+from sleap_rtc.protocol_v1.server import DEFAULT_WS_MAX_SIZE, TransportClosed
 
 if TYPE_CHECKING:
     import iroh
 
 _LENGTH_PREFIX = struct.Struct(">I")  # 4-byte big-endian length prefix
+
+
+class FrameTooLarge(Exception):
+    """A peer's length prefix claimed more than `max_size` bytes.
+
+    Raised before the (potentially huge) second `read_exact` is ever
+    attempted — a raw QUIC stream has no built-in size limit the way
+    `websockets` enforces one on a WS connection (`server.py`'s
+    `DEFAULT_WS_MAX_SIZE`), so this is iroh's counterpart: without it, a
+    malformed or hostile 4-byte length prefix (up to ~4 GiB) would make
+    `read_exact` try to buffer that much.
+    """
+
 
 # The ALPN identifying this protocol on the wire — an iroh connection with
 # any other ALPN is a different application entirely, not a malformed
@@ -56,17 +69,31 @@ async def write_frame(send: "iroh.SendStream", data: str) -> None:
     await send.write_all(_LENGTH_PREFIX.pack(len(payload)) + payload)
 
 
-async def read_frame(recv: "iroh.RecvStream") -> Optional[str]:
+async def read_frame(
+    recv: "iroh.RecvStream", max_size: int = DEFAULT_WS_MAX_SIZE
+) -> Optional[str]:
     """Read one length-prefixed frame (the read-side counterpart of
     `write_frame`). Returns `None` once the stream ends, clean or abrupt —
     per the module-level docstring above, iroh doesn't reliably distinguish
     those and this protocol doesn't need to.
+
+    Args:
+        recv: The stream to read from.
+        max_size: Largest frame accepted, in bytes — see `FrameTooLarge`.
+            Defaults to the same ceiling the WS transport enforces
+            (`DEFAULT_WS_MAX_SIZE`), so a `labels_content` embed that fits
+            over one transport fits over the other too.
+
+    Raises:
+        FrameTooLarge: the claimed length exceeds `max_size`.
     """
     import iroh
 
     try:
         header = await recv.read_exact(_LENGTH_PREFIX.size)
         (length,) = _LENGTH_PREFIX.unpack(header)
+        if length > max_size:
+            raise FrameTooLarge(f"frame length {length} exceeds max_size {max_size}")
         payload = await recv.read_exact(length)
     except iroh.IrohError as e:
         if e.kind() in (iroh.IrohErrorKind.STREAM, iroh.IrohErrorKind.CONNECTION):
@@ -106,7 +133,14 @@ class IrohStreamTransport:
         # simpler primitive, reused as-is by the blob stream's read loop,
         # which prefers a plain `if x is None: return` over an exception)
         # gets translated to that exception right here, at the boundary.
-        text = await read_frame(self._recv)
+        # An oversized frame is treated the same way, for the same reason
+        # the WS transport's own "message too big" close already looks like
+        # a plain disconnect to `_run_connection` (ConnectionClosed ->
+        # TransportClosed) rather than an unhandled exception.
+        try:
+            text = await read_frame(self._recv)
+        except FrameTooLarge:
+            raise TransportClosed()
         if text is None:
             raise TransportClosed()
         return text

@@ -17,6 +17,7 @@ from typing import Any, Dict, Optional
 
 from websockets.asyncio.server import Server
 
+from sleap_rtc.jobs.builder import DEFAULT_ZMQ_PORTS
 from sleap_rtc.jobs.process import reattach_all
 from sleap_rtc.jobs.queue import JobQueue
 from sleap_rtc.jobs.store import JobStore
@@ -125,6 +126,7 @@ async def start_worker_server(
     blob_port: Optional[int] = None,
     enable_iroh: bool = False,
     iroh_preset: Optional[Any] = None,
+    enable_metrics: bool = False,
 ) -> WorkerServer:
     """Assemble every protocol v1 piece and start listening.
 
@@ -146,6 +148,13 @@ async def start_worker_server(
             binding above. Defaults `False` here so every existing caller
             of this function (tests especially) is unaffected; `sleap-rtc
             serve` (the real CLI) opts in.
+        enable_metrics: Forward each training job's local ZMQ epoch/loss
+            stream as `job.metric`/`job.curve` events (item 3.1). Defaults
+            `False` so every existing caller of this function (tests
+            especially) is unaffected by a real ZMQ socket bind; `sleap-rtc
+            serve` (the real CLI) opts in. Uses
+            `sleap_rtc.jobs.builder.DEFAULT_ZMQ_PORTS` — the same ports
+            `CommandBuilder` wires into the `sleap-nn` invocation itself.
         iroh_preset: Overrides iroh's own default `Preset` (which includes
             a real relay and reaches out to the real internet) — tests
             pass `iroh.preset_minimal()` so they have no external network
@@ -182,7 +191,10 @@ async def start_worker_server(
     blob_http_thread = run_blob_http_server_in_thread(blob_http_server)
 
     server = ProtocolV1Server(
-        node_id=identity.node_id, blob_port=blob_port, blob_index=blob_index
+        node_id=identity.node_id,
+        blob_port=blob_port,
+        blob_index=blob_index,
+        sign_nonce=identity.sign,
     )
     AuthMethods(server, identity, trust_store, pending_pairings)
     job_methods = JobMethods(
@@ -192,6 +204,7 @@ async def start_worker_server(
         job_log_dir(data_dir),
         file_manager=file_manager,
         blob_index=blob_index,
+        metrics_ports=DEFAULT_ZMQ_PORTS if enable_metrics else None,
     )
 
     ws_server = await server.serve(host, port)

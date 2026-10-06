@@ -44,6 +44,15 @@ from sleap_rtc.protocol_v1.errors import (
 
 AGENT_NAME = "sleap-connect-worker"
 
+# `websockets`' own default (1 MiB) is far too small for a real
+# `labels_content` submission (item 3.1's labeled-frames pkg.slp embed) —
+# anything over it gets silently rejected at the transport layer before the
+# app's own WARN/HARD_CAP logic (trainingStore.ts) ever gets a chance to
+# surface a clear error. Sized comfortably above that cap's base64-inflated
+# size (150 MiB raw * 4/3 ≈ 200 MiB) with headroom; if either number changes,
+# change them together.
+DEFAULT_WS_MAX_SIZE = 256 * 1024 * 1024  # 256 MiB
+
 # The only methods an unauthenticated connection may call — everything else
 # gets AUTH_REQUIRED. See protocol spec §3.3.
 _UNAUTHENTICATED_METHODS = frozenset({"pair.claim", "auth.prove"})
@@ -177,6 +186,7 @@ class ProtocolV1Server:
         agent_platform: str = "unknown",
         blob_port: Optional[int] = None,
         blob_index: Optional[BlobIndex] = None,
+        sign_nonce: Optional[Callable[[str], str]] = None,
     ):
         """Initialize the server (does not start listening — see `serve`).
 
@@ -197,6 +207,15 @@ class ProtocolV1Server:
                 `_accept_iroh_blob_streams`). `None` disables that stream
                 (any open attempt gets `not_found`), independent of
                 `blob_port`/the HTTP path.
+            sign_nonce: Symmetric auth — signs an arbitrary nonce string
+                with this worker's long-term identity key, producing
+                `hello.proof` (see `envelope.Hello`). Typically
+                `WorkerIdentity.sign`; injected as a plain callable rather
+                than the whole identity object so this class doesn't need
+                to import/depend on `identity.py`. `None` disables `proof`
+                entirely (e.g. in tests not exercising auth) — the client
+                is expected to treat a missing `proof` the same as an
+                invalid one once this lands on the client side too.
         """
         self.node_id = node_id
         self.proto_min = proto_min
@@ -205,6 +224,7 @@ class ProtocolV1Server:
         self.agent_platform = agent_platform
         self.blob_port = blob_port
         self.blob_index = blob_index
+        self._sign_nonce = sign_nonce
         self.events = EventBus()
         self._methods: Dict[str, MethodHandler] = {}
 
@@ -217,18 +237,24 @@ class ProtocolV1Server:
         """
         self._methods[name] = handler
 
-    async def serve(self, host: str, port: int) -> Server:
+    async def serve(
+        self, host: str, port: int, max_size: int = DEFAULT_WS_MAX_SIZE
+    ) -> Server:
         """Start listening for WebSocket connections.
 
         Args:
             host: Bind address.
             port: Bind port.
+            max_size: Largest single WS message accepted, in bytes (see
+                `DEFAULT_WS_MAX_SIZE`). `websockets`' own default is 1 MiB —
+                far too small once a real `labels_content` embed (item 3.1)
+                is in play.
 
         Returns:
             The running `websockets` `Server` (use as an async context
             manager, or call `.close()` / `.wait_closed()` on it).
         """
-        return await serve(self._handle_ws_connection, host, port)
+        return await serve(self._handle_ws_connection, host, port, max_size=max_size)
 
     async def serve_iroh(self, endpoint) -> None:
         """Accept iroh connections and run each through the same handshake
@@ -382,6 +408,11 @@ class ProtocolV1Server:
         sent (`conn.own_nonce`) — `auth.prove` verifies the peer's signature
         of that nonce against that node_id.
 
+        Symmetric auth: signs the PEER's nonce (`frame.nonce`) with
+        `self._sign_nonce` and includes it as `hello.proof`, so the peer can
+        verify we hold `node_id`'s private key before trusting anything else
+        this connection says — see `envelope.Hello.proof`.
+
         Args:
             conn: The connection being established.
 
@@ -429,6 +460,7 @@ class ProtocolV1Server:
             node_id=self.node_id,
             nonce=conn.own_nonce,
             blob_port=self.blob_port,
+            proof=self._sign_nonce(frame.nonce) if self._sign_nonce else None,
         )
         await transport.send(our_hello.to_json())
         return True
