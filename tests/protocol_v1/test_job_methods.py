@@ -595,6 +595,165 @@ class TestSubscribe:
         assert exc_info.value.code == JOB_NOT_FOUND
 
 
+class TestDelete:
+    """Tests for jobs.delete — removing job records, never files."""
+
+    async def test_deletes_rows_and_events_but_leaves_the_log_file(
+        self, store, tmp_path, spec
+    ):
+        methods = _make_methods(
+            store, tmp_path, [sys.executable, "-c", "print('line1')"]
+        )
+        job_id = (await methods.submit({"spec": spec.to_dict()}, conn=None))["job_id"]
+        await _wait_for_terminal(methods, store, job_id)
+        log_path = methods.log_dir / f"{job_id}.log"
+        assert log_path.exists()
+
+        result = await methods.delete({"job_ids": [job_id]}, conn=None)
+
+        assert result == {"deleted": [job_id]}
+        assert await store.get_job(job_id) is None
+        assert await store.get_events_since(job_id) == []
+        assert log_path.exists()  # files stay on disk
+
+    async def test_deleted_job_is_gone_from_status_list_and_subscribe(
+        self, store, tmp_path, spec
+    ):
+        methods = _make_methods(store, tmp_path, [sys.executable, "-c", "pass"])
+        job_id = (await methods.submit({"spec": spec.to_dict()}, conn=None))["job_id"]
+        other_id = (await methods.submit({"spec": spec.to_dict()}, conn=None))["job_id"]
+        await _wait_for_terminal(methods, store, job_id)
+        await _wait_for_terminal(methods, store, other_id)
+
+        await methods.delete({"job_ids": [job_id]}, conn=None)
+
+        with pytest.raises(ProtocolError) as exc_info:
+            await methods.status({"job_id": job_id}, conn=None)
+        assert exc_info.value.code == JOB_NOT_FOUND
+
+        listing = await methods.list_jobs({}, conn=None)
+        assert job_id not in {j["job_id"] for j in listing["jobs"]}
+        assert other_id in {j["job_id"] for j in listing["jobs"]}
+
+        with pytest.raises(ProtocolError) as exc_info:
+            await methods.subscribe({"job_id": job_id}, conn=Connection(_FakeWs()))
+        assert exc_info.value.code == JOB_NOT_FOUND
+
+    async def test_drops_subscribers_from_the_event_bus(self, store, tmp_path, spec):
+        methods = _make_methods(store, tmp_path, [sys.executable, "-c", "pass"])
+        job_id = (await methods.submit({"spec": spec.to_dict()}, conn=None))["job_id"]
+        await _wait_for_terminal(methods, store, job_id)
+        conn = Connection(_FakeWs())
+        await methods.subscribe({"job_id": job_id, "since_seq": 0}, conn)
+        assert job_id in methods.server.events._subscribers
+
+        await methods.delete({"job_ids": [job_id]}, conn=None)
+
+        assert job_id not in methods.server.events._subscribers
+        assert job_id not in conn.subscribed_job_ids
+
+    async def test_refuses_to_delete_a_running_job(self, store, tmp_path, spec):
+        methods = _make_methods(
+            store, tmp_path, [sys.executable, "-c", "import time; time.sleep(30)"]
+        )
+        job_id = (await methods.submit({"spec": spec.to_dict()}, conn=None))["job_id"]
+        await _wait_for_state(store, job_id, "running")
+
+        with pytest.raises(ProtocolError) as exc_info:
+            await methods.delete({"job_ids": [job_id]}, conn=None)
+
+        assert exc_info.value.code == "job.active"
+        assert await store.get_job(job_id) is not None  # nothing was deleted
+
+        await methods.cancel({"job_id": job_id, "mode": "cancel"}, conn=None)
+        await _wait_for_terminal(methods, store, job_id, timeout=5)
+
+    async def test_refuses_to_delete_a_job_queued_behind_a_running_one(
+        self, store, tmp_path, spec
+    ):
+        # Tracked in self._tasks (waiting on the queue slot), even though
+        # its store state is still "queued" — this is the "normal
+        # operation" case the docstring distinguishes from an orphan.
+        go = tmp_path / "go"
+        blocker = [
+            sys.executable,
+            "-c",
+            f"import os, time\nwhile not os.path.exists({str(go)!r}): time.sleep(0.05)",
+        ]
+        methods = _make_methods(store, tmp_path, blocker)
+        first = (await methods.submit({"spec": spec.to_dict()}, conn=None))["job_id"]
+        await _wait_for_state(store, first, "running")
+        methods._builder = _FakeCommandBuilder([sys.executable, "-c", "pass"])
+        second = (await methods.submit({"spec": spec.to_dict()}, conn=None))["job_id"]
+        await asyncio.sleep(0.1)
+        assert (await store.get_job(second)).state == "queued"
+
+        with pytest.raises(ProtocolError) as exc_info:
+            await methods.delete({"job_ids": [second]}, conn=None)
+
+        assert exc_info.value.code == "job.active"
+
+        go.touch()
+        await _wait_for_terminal(methods, store, first)
+        await _wait_for_terminal(methods, store, second)
+
+    async def test_an_orphaned_queued_job_with_no_tracked_task_is_deletable(
+        self, store, tmp_path, spec
+    ):
+        # Simulates a job left "queued" by a worker that crashed/restarted
+        # before ever spawning it: the fresh process's self._tasks has
+        # nothing for it (unlike the "queued behind a running job" case
+        # above), so it can never finish on its own.
+        methods = _make_methods(store, tmp_path, [sys.executable, "-c", "pass"])
+        job = await store.create_job("orphaned-job", spec)
+        assert job.job_id not in methods._tasks
+
+        result = await methods.delete({"job_ids": [job.job_id]}, conn=None)
+
+        assert result == {"deleted": [job.job_id]}
+        assert await store.get_job(job.job_id) is None
+
+    async def test_unknown_id_raises_not_found_and_deletes_nothing(
+        self, store, tmp_path, spec
+    ):
+        methods = _make_methods(store, tmp_path, [sys.executable, "-c", "pass"])
+        job_id = (await methods.submit({"spec": spec.to_dict()}, conn=None))["job_id"]
+        await _wait_for_terminal(methods, store, job_id)
+
+        with pytest.raises(ProtocolError) as exc_info:
+            await methods.delete({"job_ids": [job_id, "does-not-exist"]}, conn=None)
+
+        assert exc_info.value.code == JOB_NOT_FOUND
+        # All-or-nothing: the known-good id wasn't deleted either.
+        assert await store.get_job(job_id) is not None
+
+    async def test_all_or_nothing_when_one_of_several_is_active(
+        self, store, tmp_path, spec
+    ):
+        # A genuinely terminal job the delete call *would* remove on its
+        # own, created directly so it isn't gated behind the running job
+        # below by the queue's max_concurrent=1.
+        done = await store.create_job("already-done-job", spec)
+        await store.update_state(done.job_id, "completed", result={})
+
+        methods = _make_methods(
+            store, tmp_path, [sys.executable, "-c", "import time; time.sleep(30)"]
+        )
+        running_id = (await methods.submit({"spec": spec.to_dict()}, conn=None))[
+            "job_id"
+        ]
+        await _wait_for_state(store, running_id, "running")
+
+        with pytest.raises(ProtocolError) as exc_info:
+            await methods.delete({"job_ids": [done.job_id, running_id]}, conn=None)
+
+        assert exc_info.value.code == "job.active"
+        assert await store.get_job(done.job_id) is not None  # nothing was deleted
+
+        await methods.cancel({"job_id": running_id, "mode": "cancel"}, conn=None)
+        await _wait_for_terminal(methods, store, running_id, timeout=5)
+
+
 class TestFsMethods:
     """Tests for fs.mounts / fs.list delegating to a FileManager."""
 
@@ -1045,6 +1204,262 @@ class TestTrainOutputs:
         assert record.result["model_dir"].startswith(str(tmp_path / "job-runs"))
 
 
+class _TrainThenTrackBuilder:
+    """A train job's command writes a fake model dir (`train_script`,
+    typically `_write_run`); a track job's command just exits 0. Lets a
+    single `JobMethods`/`CommandBuilder` pair run both legs of a chained
+    post-inference run, like the real worker does.
+    """
+
+    def __init__(self, train_script=_write_run):
+        self._train_script = train_script
+
+    def build_command(self, spec):
+        if isinstance(spec, TrainJobSpec):
+            return [sys.executable, "-c", self._train_script(spec.ckpt_dir)]
+        return [sys.executable, "-c", "pass"]
+
+
+def _make_chaining_methods(store, tmp_path, train_script=_write_run):
+    return JobMethods(
+        ProtocolV1Server(node_id="test-node"),
+        store,
+        JobQueue(max_concurrent=1),
+        log_dir=tmp_path / "job-logs",
+        command_builder=_TrainThenTrackBuilder(train_script),
+    )
+
+
+class TestPostInferenceChaining:
+    """A train job's `post_inference` chains as track job(s) once every job
+    in its `run` (or just itself, run-less) has completed.
+    """
+
+    async def test_single_job_run_chains_one_track_job(self, store, tmp_path):
+        spec = TrainJobSpec(
+            config_path="/data/centroid.yaml",
+            labels_path="/data/train.slp",
+            project={"name": "flies.slp", "id": "p1"},
+            post_inference=[{"peak_threshold": 0.3, "tracker": "simple"}],
+        )
+        methods = _make_chaining_methods(store, tmp_path)
+
+        job_id = (await methods.submit({"spec": spec.to_dict()}, conn=None))["job_id"]
+        record = await _wait_for_terminal(methods, store, job_id)
+
+        assert record.state == "completed"
+        assert len(record.result["chained_job_ids"]) == 1
+        chained_id = record.result["chained_job_ids"][0]
+        chained = await _wait_for_terminal(methods, store, chained_id)
+
+        assert chained.state == "completed"
+        assert isinstance(chained.spec, TrackJobSpec)
+        assert (
+            chained.spec.data_path == record.result["labels_path"] == "/data/train.slp"
+        )
+        assert chained.spec.model_paths == [record.result["model_dir"]]
+        assert chained.spec.project == {"name": "flies.slp", "id": "p1"}
+        assert chained.spec.peak_threshold == 0.3
+        assert chained.spec.tracker == "simple"
+        # A run-less train job's chained job is grouped under its job id.
+        assert chained.spec.run == {
+            "id": job_id,
+            "index": 0,
+            "count": 1,
+            "stage": "inference",
+        }
+
+        # job.result for the train job carries the chained id, emitted once.
+        result_events = [
+            e.data
+            for e in await store.get_events_since(job_id)
+            if e.topic == "job.result"
+        ]
+        assert result_events == [record.result]
+
+        jobs = {
+            j["job_id"]: j for j in (await methods.list_jobs({}, conn=None))["jobs"]
+        }
+        assert jobs[job_id]["post_inference"] is True
+        assert jobs[chained_id]["post_inference"] is False
+        assert jobs[job_id]["model_name"] == Path(record.result["model_dir"]).name
+        assert jobs[chained_id]["model_name"] is None
+
+    async def test_two_job_run_chains_once_after_the_second_completes(
+        self, store, tmp_path
+    ):
+        run_id = "run-abc"
+        spec0 = TrainJobSpec(
+            config_path="/data/centroid.yaml",
+            labels_path="/data/train.slp",
+            model_types=["centroid"],
+            run={"id": run_id, "index": 0, "count": 2},
+            post_inference=[{"frame_filter": "suggested"}],
+        )
+        spec1 = TrainJobSpec(
+            config_path="/data/centered_instance.yaml",
+            labels_path="/data/train.slp",
+            model_types=["centered_instance"],
+            run={"id": run_id, "index": 1, "count": 2},
+            post_inference=[{"frame_filter": "suggested"}],
+        )
+        methods = _make_chaining_methods(store, tmp_path)
+
+        job0 = (await methods.submit({"spec": spec0.to_dict()}, conn=None))["job_id"]
+        record0 = await _wait_for_terminal(methods, store, job0)
+        assert record0.state == "completed"
+        assert "chained_job_ids" not in record0.result  # sibling not done yet
+
+        job1 = (await methods.submit({"spec": spec1.to_dict()}, conn=None))["job_id"]
+        record1 = await _wait_for_terminal(methods, store, job1)
+        assert record1.state == "completed"
+        assert len(record1.result["chained_job_ids"]) == 1
+        chained_id = record1.result["chained_job_ids"][0]
+        chained = await _wait_for_terminal(methods, store, chained_id)
+
+        # model_paths ordered by run.index, not completion order.
+        record0_again = await store.get_job(job0)
+        assert chained.spec.model_paths == [
+            record0_again.result["model_dir"],
+            record1.result["model_dir"],
+        ]
+        assert "chained_job_ids" not in record0_again.result  # dedupe: only job1 got it
+        # Grouped under the training run's id, outside its train siblings.
+        assert chained.spec.run == {
+            "id": run_id,
+            "index": 0,
+            "count": 1,
+            "stage": "inference",
+        }
+
+    async def test_failed_sibling_never_chains(self, store, tmp_path):
+        run_id = "run-fail"
+        ok_spec = TrainJobSpec(
+            config_path="/data/centroid.yaml",
+            labels_path="/data/train.slp",
+            run={"id": run_id, "index": 0, "count": 2},
+            post_inference=[{"frame_filter": "suggested"}],
+        )
+        fail_spec = TrainJobSpec(
+            config_path="/data/centered_instance.yaml",
+            labels_path="/data/train.slp",
+            run={"id": run_id, "index": 1, "count": 2},
+            post_inference=[{"frame_filter": "suggested"}],
+        )
+        methods = _make_chaining_methods(store, tmp_path)
+        ok_id = (await methods.submit({"spec": ok_spec.to_dict()}, conn=None))["job_id"]
+        await _wait_for_terminal(methods, store, ok_id)
+
+        # A second `JobMethods` sharing the same store, so the sibling's
+        # command can fail outright instead of going through the ckpt-aware
+        # builder (which only knows how to succeed).
+        fail_methods = _make_methods(
+            store, tmp_path, [sys.executable, "-c", "import sys; sys.exit(1)"]
+        )
+        fail_id = (await fail_methods.submit({"spec": fail_spec.to_dict()}, conn=None))[
+            "job_id"
+        ]
+        record = await _wait_for_terminal(fail_methods, store, fail_id)
+
+        assert record.state == "failed"
+        jobs = (await methods.list_jobs({}, conn=None))["jobs"]
+        assert len(jobs) == 2  # no chained track job was ever created
+
+    async def test_no_post_inference_never_chains(self, store, tmp_path):
+        spec = TrainJobSpec(
+            config_path="/data/centroid.yaml", labels_path="/data/t.slp"
+        )
+        methods = _make_chaining_methods(store, tmp_path)
+
+        job_id = (await methods.submit({"spec": spec.to_dict()}, conn=None))["job_id"]
+        record = await _wait_for_terminal(methods, store, job_id)
+
+        assert "chained_job_ids" not in record.result
+        jobs = (await methods.list_jobs({}, conn=None))["jobs"]
+        assert len(jobs) == 1
+
+    async def test_missing_sibling_model_dir_records_chain_error(self, store, tmp_path):
+        # A plain command builder (no `_write_run`) never produces a model
+        # dir, so `_train_outputs` reports model_dir=None for both siblings.
+        run_id = "run-no-model"
+        spec0 = TrainJobSpec(
+            config_path="/data/c0.yaml",
+            labels_path="/data/t.slp",
+            run={"id": run_id, "index": 0, "count": 2},
+        )
+        spec1 = TrainJobSpec(
+            config_path="/data/c1.yaml",
+            labels_path="/data/t.slp",
+            run={"id": run_id, "index": 1, "count": 2},
+            post_inference=[{"frame_filter": "suggested"}],
+        )
+        methods = _make_methods(store, tmp_path, [sys.executable, "-c", "pass"])
+
+        job0 = (await methods.submit({"spec": spec0.to_dict()}, conn=None))["job_id"]
+        await _wait_for_terminal(methods, store, job0)
+        job1 = (await methods.submit({"spec": spec1.to_dict()}, conn=None))["job_id"]
+        record1 = await _wait_for_terminal(methods, store, job1)
+
+        assert record1.state == "completed"  # chaining failure doesn't fail the job
+        assert "missing model_dir" in record1.result["chain_error"]
+        assert "chained_job_ids" not in record1.result
+        jobs = (await methods.list_jobs({}, conn=None))["jobs"]
+        assert len(jobs) == 2  # no chained job was created
+
+    async def test_chained_submit_error_is_recorded_without_failing_the_job(
+        self, store, tmp_path
+    ):
+        spec = TrainJobSpec(
+            config_path="/data/centroid.yaml",
+            labels_path="/data/train.slp",
+            post_inference=[{"frame_filter": "not-a-real-filter"}],
+        )
+        methods = _make_chaining_methods(store, tmp_path)
+
+        job_id = (await methods.submit({"spec": spec.to_dict()}, conn=None))["job_id"]
+        record = await _wait_for_terminal(methods, store, job_id)
+
+        assert record.state == "completed"
+        assert record.result["chained_job_ids"] == []
+        assert "frame_filter" in record.result["chain_error"]
+
+    async def test_concurrent_finishers_chain_the_run_exactly_once(
+        self, store, tmp_path
+    ):
+        """Simulates two siblings finishing at the same instant (today's
+        queue happens to fully serialize execution, but `_chain_post_inference`
+        doesn't rely on that) by invoking the chaining step directly from two
+        tasks at once: only one may actually submit the chained job.
+        """
+        spec0 = TrainJobSpec(
+            config_path="/c0.yaml",
+            labels_path="/data/a.slp",
+            run={"id": "run-race", "index": 0, "count": 2},
+            post_inference=[{"peak_threshold": 0.5}],
+        )
+        spec1 = TrainJobSpec(
+            config_path="/c1.yaml",
+            labels_path="/data/a.slp",
+            run={"id": "run-race", "index": 1, "count": 2},
+        )
+        methods = _make_methods(store, tmp_path, [sys.executable, "-c", "pass"])
+        result0 = {"model_dir": "/models/m0", "labels_path": "/data/a.slp"}
+        result1 = {"model_dir": "/models/m1", "labels_path": "/data/a.slp"}
+        await store.create_job("job0", spec0)
+        await store.create_job("job1", spec1)
+        await store.update_state("job0", "completed", result=result0)
+        await store.update_state("job1", "completed", result=result1)
+
+        outcomes = await asyncio.gather(
+            methods._chain_post_inference("job0", spec0, result0),
+            methods._chain_post_inference("job1", spec1, result1),
+        )
+
+        chained = [o for o in outcomes if o is not None]
+        assert len(chained) == 1  # the other call saw the dedupe marker and no-oped
+        assert len(chained[0]["chained_job_ids"]) == 1
+
+
 class TestReattachedEpochBackfill:
     async def test_epochs_logged_while_no_worker_ran_are_backfilled_once(
         self, store, tmp_path
@@ -1113,11 +1528,13 @@ class TestJobSummaries:
     ):
         import base64
 
+        run = {"id": "run-abc123", "index": 0, "count": 2}
         spec = TrainJobSpec(
             config_contents=["model: centroid"],
             model_types=["centroid"],
             labels_content=base64.b64encode(b"slp").decode(),
             project={"name": "flies.slp", "id": "p1"},
+            run=run,
         )
         methods = _make_methods(store, tmp_path, [sys.executable, "-c", "pass"])
         job_id = (await methods.submit({"spec": spec.to_dict()}, conn=None))["job_id"]
@@ -1128,6 +1545,7 @@ class TestJobSummaries:
         assert listed["kind"] == "train"
         assert listed["model_types"] == ["centroid"]
         assert listed["project"] == {"name": "flies.slp", "id": "p1"}
+        assert listed["run"] == run
         assert listed["queue_position"] is None
         assert "spec" not in listed
         assert "labels_content" not in json.dumps(listed)
@@ -1136,6 +1554,8 @@ class TestJobSummaries:
         assert status["spec"]["config_contents"] == ["model: centroid"]
         assert "labels_content" not in status["spec"]
         assert status["kind"] == "train"
+        assert status["project"] == {"name": "flies.slp", "id": "p1"}
+        assert status["run"] == run
 
     async def test_track_job_lists_its_data_path(self, store, tmp_path):
         spec = TrackJobSpec(data_path="/data/v.slp", model_paths=["/m"])

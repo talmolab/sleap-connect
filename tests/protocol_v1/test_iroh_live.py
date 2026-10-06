@@ -27,6 +27,7 @@ from sleap_rtc.protocol_v1.iroh_live import (
     write_iroh_live,
 )
 from sleap_rtc.protocol_v1.iroh_transport import ALPN, IrohStreamTransport
+from sleap_rtc.protocol_v1.pair_code import decode_pair_code
 from sleap_rtc.protocol_v1.runner import start_worker_server
 
 NODE = "node-abc"
@@ -175,7 +176,9 @@ class TestServeToPairBridge:
         live = iroh_live_path(tmp_path)
         await _wait_for(lambda: read_iroh_live(live, iroh_worker.identity.node_id))
 
-        result = CliRunner().invoke(pair, ["--data-dir", str(tmp_path)])
+        # --json: the default one-line code drops direct_addrs entirely
+        # (see pair_code.py), but this test needs them to dial below.
+        result = CliRunner().invoke(pair, ["--data-dir", str(tmp_path), "--json"])
 
         assert result.exit_code == 0, result.output
         ticket = json.loads(
@@ -190,7 +193,7 @@ class TestServeToPairBridge:
     ):
         live = iroh_live_path(tmp_path)
         await _wait_for(lambda: read_iroh_live(live, iroh_worker.identity.node_id))
-        result = CliRunner().invoke(pair, ["--data-dir", str(tmp_path)])
+        result = CliRunner().invoke(pair, ["--data-dir", str(tmp_path), "--json"])
         ticket = json.loads(
             result.output[result.output.index("{") : result.output.rindex("}") + 1]
         )
@@ -225,6 +228,27 @@ class TestServeToPairBridge:
         finally:
             await client_ep.close()
 
+    async def test_default_pairing_code_has_no_relay_when_the_worker_has_none(
+        self, iroh_worker, tmp_path
+    ):
+        # `iroh_worker` binds on `preset_minimal()` (relay disabled, direct
+        # addresses only — see its fixture), so its live file's relay_url
+        # is None even though direct_addrs is populated. The pairing code
+        # only ever carries a relay (never direct addrs — see the module
+        # docstring), so it should come back with no iroh section at all.
+        live = iroh_live_path(tmp_path)
+        await _wait_for(lambda: read_iroh_live(live, iroh_worker.identity.node_id))
+        section = read_iroh_live(live, iroh_worker.identity.node_id)
+        assert section["relay_url"] is None  # sanity-check the premise above
+
+        result = CliRunner().invoke(pair, ["--data-dir", str(tmp_path)])
+        code = next(
+            line for line in result.output.splitlines() if line.startswith("sleap1")
+        )
+        ticket = decode_pair_code(code)
+
+        assert ticket.iroh is None
+
     async def test_closing_the_worker_removes_the_file(self, tmp_path, monkeypatch):
         monkeypatch.setattr(iroh_live, "DEFAULT_REFRESH_INTERVAL_SECS", 0.05)
         worker = await start_worker_server(
@@ -250,7 +274,7 @@ class TestServeToPairBridge:
 
 class TestPairWithoutLiveFile:
     def test_ticket_has_no_iroh_key_when_no_serve_is_running(self, tmp_path):
-        result = CliRunner().invoke(pair, ["--data-dir", str(tmp_path)])
+        result = CliRunner().invoke(pair, ["--data-dir", str(tmp_path), "--json"])
 
         assert result.exit_code == 0
         assert "iroh" not in result.output
@@ -258,7 +282,7 @@ class TestPairWithoutLiveFile:
     def test_garbage_live_file_leaves_pair_output_unchanged(self, tmp_path):
         iroh_live_path(tmp_path).write_text("{garbage")
 
-        result = CliRunner().invoke(pair, ["--data-dir", str(tmp_path)])
+        result = CliRunner().invoke(pair, ["--data-dir", str(tmp_path), "--json"])
 
         assert result.exit_code == 0
         assert "iroh" not in result.output

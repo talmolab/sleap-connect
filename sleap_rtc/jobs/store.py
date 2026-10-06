@@ -375,6 +375,44 @@ class JobStore:
             await conn.commit()
             return next_seq
 
+    async def delete_jobs(self, job_ids: List[str]) -> List[str]:
+        """Permanently delete job records and their event logs.
+
+        Deletes every id's `job_events` rows, then its `jobs` row, all in
+        one transaction (so a crash mid-delete can't leave a job's events
+        orphaned, or a job deleted but its events left behind — the FK
+        above isn't enforced, so SQLite wouldn't catch that itself). Never
+        touches anything on disk (the job's log file, its `job-runs/<id>`
+        working directory, a trained model, predictions, ...) — this store
+        only owns the rows; whether a job is safe to delete at all (e.g.
+        not currently running) is the caller's decision, not this method's
+        (see `sleap_rtc.protocol_v1.job_methods.JobMethods.delete`).
+
+        Args:
+            job_ids: The job ids to delete. All-or-nothing: if any doesn't
+                exist, nothing is deleted.
+
+        Returns:
+            `job_ids`, unchanged — so a caller can return it straight back
+            as `{"deleted": ...}`.
+
+        Raises:
+            JobStoreError: If any id in `job_ids` doesn't exist.
+        """
+        conn = self._require_conn()
+        for job_id in job_ids:
+            if await self.get_job(job_id) is None:
+                raise JobStoreError(f"No such job: {job_id!r}")
+
+        for job_id in job_ids:
+            await conn.execute("DELETE FROM job_events WHERE job_id = ?", (job_id,))
+            await conn.execute("DELETE FROM jobs WHERE job_id = ?", (job_id,))
+        await conn.commit()
+
+        for job_id in job_ids:
+            self._event_locks.pop(job_id, None)
+        return list(job_ids)
+
     async def get_events_since(self, job_id: str, since_seq: int = 0) -> List[JobEvent]:
         """Fetch all events for a job with seq > since_seq, in order.
 
