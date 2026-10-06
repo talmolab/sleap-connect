@@ -180,9 +180,11 @@ class TestDecodeErrors:
 
     def test_a_single_mistyped_character_fails_the_checksum(self):
         code = encode_pair_code(_ticket(addrs=["ws://192.168.1.42:9631"]))
-        last = code[-1]
-        replacement = "a" if last != "a" else "b"
-        mistyped = code[:-1] + replacement
+        # Change a character in the middle: base32's last character can carry
+        # unused padding bits, so altering it doesn't always change the data.
+        i = len(code) // 2
+        replacement = "a" if code[i] != "a" else "b"
+        mistyped = code[:i] + replacement + code[i + 1 :]
 
         with pytest.raises(PairCodeError):
             decode_pair_code(mistyped)
