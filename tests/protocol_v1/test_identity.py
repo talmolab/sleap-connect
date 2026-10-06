@@ -1,5 +1,9 @@
 """Tests for WorkerIdentity (persistent Ed25519 keypair)."""
 
+import sys
+
+import pytest
+
 from sleap_rtc.auth.keypair import public_key_from_b64, verify_signature
 from sleap_rtc.protocol_v1.identity import WorkerIdentity
 
@@ -37,6 +41,9 @@ class TestWorkerIdentity:
         public_key = public_key_from_b64(identity.node_id)
         assert verify_signature(public_key, nonce, sig) is True
 
+    @pytest.mark.skipif(
+        sys.platform == "win32", reason="POSIX permission bits don't apply on Windows"
+    )
     def test_creates_the_file_with_restrictive_permissions(self, tmp_path):
         import stat
 

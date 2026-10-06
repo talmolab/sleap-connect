@@ -12,9 +12,37 @@ import json
 
 from click.testing import CliRunner
 
-from sleap_rtc.protocol_v1.cli import pair, print_doctor_section, print_status_section
+from sleap_rtc.protocol_v1.cli import (
+    _parse_mount,
+    pair,
+    print_doctor_section,
+    print_status_section,
+)
 from sleap_rtc.protocol_v1.pairing import PendingPairings
 from sleap_rtc.protocol_v1.runner import identity_path, trust_store_path
+
+
+class TestParseMount:
+    """Tests for `_parse_mount`, the `--mount PATH[:LABEL]` parser."""
+
+    def test_bare_path_labels_itself_with_the_basename(self):
+        mount = _parse_mount("/data/videos")
+
+        assert mount.path == "/data/videos"
+        assert mount.label == "videos"
+
+    def test_path_with_explicit_label(self):
+        mount = _parse_mount("/data/videos:Lab Data")
+
+        assert mount.path == "/data/videos"
+        assert mount.label == "Lab Data"
+
+    def test_root_path_falls_back_to_the_path_itself_for_a_label(self):
+        # Path("/").name is "" — the basename fallback would be empty.
+        mount = _parse_mount("/")
+
+        assert mount.path == "/"
+        assert mount.label == "/"
 
 
 class TestPairCommand:

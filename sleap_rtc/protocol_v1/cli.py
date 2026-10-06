@@ -18,9 +18,11 @@ import asyncio
 import json
 import textwrap
 from pathlib import Path
+from typing import Optional
 
 import click
 
+from sleap_rtc.config import MountConfig
 from sleap_rtc.protocol_v1.runner import (
     DEFAULT_DATA_DIR,
     DEFAULT_PORT,
@@ -29,23 +31,63 @@ from sleap_rtc.protocol_v1.runner import (
     start_worker_server,
     trust_store_path,
 )
+from sleap_rtc.worker.file_manager import FileManager
+
+
+def _parse_mount(raw: str) -> MountConfig:
+    """Parse a `--mount` value: "PATH" or "PATH:LABEL"."""
+    path, sep, label = raw.partition(":")
+    return MountConfig(path=path, label=label if sep else Path(path).name or path)
 
 
 @click.command(name="serve")
 @click.option("--host", default="0.0.0.0", show_default=True, help="Bind address.")
 @click.option("--port", default=DEFAULT_PORT, show_default=True, help="Bind port.")
 @click.option(
+    "--blob-port",
+    default=None,
+    type=int,
+    help="Bind port for the blob-serving HTTP endpoint (spec §6.3) — a "
+    "completed track job's predictions are fetched from here. Defaults "
+    "to --port + 1.",
+)
+@click.option(
     "--data-dir",
     default=str(DEFAULT_DATA_DIR),
     show_default=True,
     help="Where to persist identity, trust store, pairing tickets, and jobs.",
 )
-def serve(host: str, port: int, data_dir: str):
+@click.option(
+    "--mount",
+    "mounts",
+    multiple=True,
+    help="A directory clients may browse (fs.mounts/fs.list), as PATH or "
+    "PATH:LABEL. Repeatable. fs.mounts/fs.list are always available even "
+    "with none given — they just report an empty mount list.",
+)
+@click.option(
+    "--iroh/--no-iroh",
+    default=True,
+    show_default=True,
+    help="Also accept connections over iroh (item 2.2) — works even "
+    "without a shared network/VPN/Tailscale, via iroh's own "
+    "direct-then-relay dialing. Additive: the plain WS binding above is "
+    "always available regardless of this flag.",
+)
+def serve(
+    host: str,
+    port: int,
+    blob_port: Optional[int],
+    data_dir: str,
+    mounts: tuple,
+    iroh: bool,
+):
     """Run this machine as a sleap-connect worker (protocol v1).
 
     Starts the worker's own server directly — no signaling server, no
     rooms. A client pairs with this worker (see `sleap-rtc pair`) and
-    connects straight to it over localhost/LAN/Tailscale.
+    connects straight to it over localhost/LAN/Tailscale, or via iroh if
+    it can't reach this machine directly (see --iroh).
 
     Runs in the foreground; press Ctrl-C to stop. To keep it running
     persistently, use your OS's own service manager for now (systemd
@@ -53,18 +95,39 @@ def serve(host: str, port: int, data_dir: str):
     install` support is a planned follow-up.
 
     Example:
-        sleap-rtc serve --port 9631
+        sleap-rtc serve --port 9631 --mount /data/videos:lab-data
     """
-    asyncio.run(_serve_async(host, port, Path(data_dir)))
+    asyncio.run(_serve_async(host, port, blob_port, Path(data_dir), mounts, iroh))
 
 
-async def _serve_async(host: str, port: int, data_dir: Path) -> None:
-    worker = await start_worker_server(host=host, port=port, data_dir=data_dir)
+async def _serve_async(
+    host: str,
+    port: int,
+    blob_port: Optional[int],
+    data_dir: Path,
+    mounts: tuple = (),
+    enable_iroh: bool = True,
+) -> None:
+    file_manager = FileManager(mounts=[_parse_mount(m) for m in mounts])
+    worker = await start_worker_server(
+        host=host,
+        port=port,
+        data_dir=data_dir,
+        blob_port=blob_port,
+        file_manager=file_manager,
+        enable_iroh=enable_iroh,
+    )
     try:
         click.echo(click.style("sleap-connect worker", bold=True))
-        click.echo(f"  node_id:  {worker.identity.node_id}")
-        click.echo(f"  address:  ws://{host}:{port}")
-        click.echo(f"  data dir: {worker.data_dir}")
+        click.echo(f"  node_id:   {worker.identity.node_id}")
+        click.echo(f"  address:   ws://{host}:{port}")
+        click.echo(f"  blob port: {worker.blob_port}")
+        click.echo(f"  data dir:  {worker.data_dir}")
+        if worker.iroh_endpoint is not None:
+            click.echo(
+                "  iroh:      enabled (same node_id as above; a client "
+                "reachable only via relay/hole-punch can still connect)"
+            )
 
         if worker.reattach_outcomes:
             click.echo("")
@@ -119,6 +182,10 @@ def pair(addrs: tuple, ttl: int, data_dir: str):
     with this worker on first contact — via 'pair.claim' in the protocol.
     The ticket's secret is single-use and expires after --ttl seconds.
 
+    If a 'sleap-rtc serve --iroh' worker is running against the same
+    --data-dir, the ticket also carries an 'iroh' section (node_id,
+    relay_url, direct_addrs) so a client with no direct route can dial it.
+
     Works whether or not 'sleap-rtc serve' is currently running: pending
     tickets are shared via a small file under --data-dir, so a running
     serve process picks up tickets minted here without needing to be
@@ -134,11 +201,20 @@ def pair(addrs: tuple, ttl: int, data_dir: str):
     identity = WorkerIdentity(identity_path(data_dir_path))
     pending_pairings = PendingPairings(ttl_secs=ttl, path=pairing_path(data_dir_path))
 
-    ticket = pending_pairings.create(identity.node_id, list(addrs))
+    from sleap_rtc.protocol_v1.iroh_live import iroh_live_path, read_iroh_live
+
+    iroh_section = read_iroh_live(iroh_live_path(data_dir_path), identity.node_id)
+    ticket = pending_pairings.create(identity.node_id, list(addrs), iroh=iroh_section)
 
     click.echo(click.style("Pairing ticket", bold=True))
     click.echo(json.dumps(ticket.to_dict(), indent=2))
     click.echo("")
+    if iroh_section is not None:
+        click.echo(
+            "This ticket includes iroh dial info from the running worker, so "
+            "the client can connect even without a shared network."
+        )
+        click.echo("")
     click.echo(textwrap.dedent(f"""\
             Give this to the new client — it's single-use and expires in
             {ttl} seconds. The client sends a 'pair.claim' request with this

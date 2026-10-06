@@ -36,21 +36,30 @@ class PairingTicket:
         addrs: Direct address(es) the client can dial (e.g. ``ws://host:port``).
         secret: One-time secret proving possession of this ticket.
         expires_at: Unix timestamp after which `secret` is no longer valid.
+        iroh: Optional iroh dial info (``node_id``, ``relay_url``,
+            ``direct_addrs`` — see `iroh_live.build_iroh_section`) for a
+            client that can't reach `addrs` directly. Omitted from the
+            serialized ticket entirely when ``None``, so tickets from a
+            worker not serving iroh are unchanged.
     """
 
     node_id: str
     addrs: List[str]
     secret: str
     expires_at: float
+    iroh: Optional[dict] = None
 
     def to_dict(self) -> dict:
         """Serialize to the ticket's wire/QR-code shape."""
-        return {
+        data = {
             "node_id": self.node_id,
             "addrs": self.addrs,
             "secret": self.secret,
             "expires_at": self.expires_at,
         }
+        if self.iroh is not None:
+            data["iroh"] = self.iroh
+        return data
 
 
 class PendingPairings:
@@ -75,12 +84,15 @@ class PendingPairings:
         self._path = Path(path) if path is not None else None
         self._secrets: Dict[str, float] = self._load() if self._path else {}
 
-    def create(self, node_id: str, addrs: List[str]) -> PairingTicket:
+    def create(
+        self, node_id: str, addrs: List[str], iroh: Optional[dict] = None
+    ) -> PairingTicket:
         """Generate a new one-time pairing ticket.
 
         Args:
             node_id: This worker's public identity, to embed in the ticket.
             addrs: Direct address(es) the client should dial.
+            iroh: Optional iroh dial info to embed in the ticket.
 
         Returns:
             The new `PairingTicket`.
@@ -97,7 +109,11 @@ class PendingPairings:
             self._save()
 
         return PairingTicket(
-            node_id=node_id, addrs=addrs, secret=secret, expires_at=expires_at
+            node_id=node_id,
+            addrs=addrs,
+            secret=secret,
+            expires_at=expires_at,
+            iroh=iroh,
         )
 
     def claim(self, secret: str) -> bool:

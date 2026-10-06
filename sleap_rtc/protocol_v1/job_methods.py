@@ -17,7 +17,9 @@ metrics is a natural follow-up once this lands.
 import asyncio
 import json
 import logging
+import os
 import secrets
+import tempfile
 from pathlib import Path
 from typing import Dict, Optional
 
@@ -29,11 +31,18 @@ from sleap_rtc.jobs.process import (
     spawn_detached,
 )
 from sleap_rtc.jobs.queue import JobQueue
-from sleap_rtc.jobs.spec import parse_job_spec
+from sleap_rtc.jobs.spec import TrackJobSpec, TrainJobSpec, parse_job_spec
 from sleap_rtc.jobs.store import TERMINAL_STATES, JobRecord, JobStore
+from sleap_rtc.protocol_v1.blobs import BlobIndex, compute_chunk_hashes, hash_file
 from sleap_rtc.protocol_v1.envelope import Event
 from sleap_rtc.protocol_v1.errors import JOB_NOT_FOUND, JOB_SPEC_INVALID, ProtocolError
 from sleap_rtc.protocol_v1.server import Connection, ProtocolV1Server
+
+# The line sleap-nn's track CLI prints on completion, e.g.
+# "Predictions output path: /data/video.predictions.slp" — mirrors the
+# legacy worker's job_executor.py capture (grep for it there for the
+# original, since-verified-in-production wording this must keep matching).
+_OUTPUT_PATH_MARKER = "Predictions output path:"
 
 # How often to poll a job's log file for new lines. Polling (rather than an
 # OS-level file-watch) is deliberate: it's portable across platforms with no
@@ -58,6 +67,7 @@ class JobMethods:
         log_dir: Path,
         file_manager: Optional[object] = None,
         command_builder: Optional[object] = None,
+        blob_index: Optional[BlobIndex] = None,
     ):
         """Wire up and register the method handlers.
 
@@ -74,12 +84,18 @@ class JobMethods:
                 ``sleap-nn`` invocations); tests inject a fake one so they
                 can exercise the full submit → spawn → tail → complete flow
                 with a trivial command instead of requiring sleap-nn.
+            blob_index: Where to register a completed track job's output
+                file so it becomes fetchable as a `job.result` blob (item
+                1.10). Omit to leave `job.result` reporting `{blobs: {}}`
+                like before — e.g. a worker not running the blob HTTP
+                server has nowhere for a client to fetch the bytes from.
         """
         self.server = server
         self.store = store
         self.queue = queue
         self.log_dir = Path(log_dir)
         self.file_manager = file_manager
+        self.blob_index = blob_index
         self._builder = (
             command_builder if command_builder is not None else CommandBuilder()
         )
@@ -142,6 +158,7 @@ class JobMethods:
                 await self.store.update_state(job_id, "running")
                 await self._emit(job_id, "job.status", {"state": "running"})
 
+                self._materialize_config_contents(spec)
                 cmd = self._builder.build_command(spec)
                 log_path = self.log_dir / f"{job_id}.log"
                 process = await spawn_detached(
@@ -155,9 +172,20 @@ class JobMethods:
                 await tail_task  # one final read to flush lines written right before exit
 
                 if returncode == 0:
-                    await self.store.update_state(job_id, "completed", result={})
+                    blobs = await self._register_result_blobs(job_id, spec, log_path)
+                    await self.store.update_state(
+                        job_id, "completed", result={"blobs": blobs}
+                    )
+                    # job.result BEFORE job.status: completed — a client that
+                    # resolves its "wait for this job" promise as soon as it
+                    # sees the terminal status (the natural, simplest thing
+                    # for it to do) must already have the result in hand at
+                    # that point, or it has no further chance to see it: the
+                    # instant a client considers a job over, it typically
+                    # unsubscribes, so a job.result arriving a message later
+                    # would silently go nowhere.
+                    await self._emit(job_id, "job.result", {"blobs": blobs})
                     await self._emit(job_id, "job.status", {"state": "completed"})
-                    await self._emit(job_id, "job.result", {"blobs": {}})
                 else:
                     detail = f"exit code {returncode}"
                     await self.store.update_state(job_id, "failed", error=detail)
@@ -172,6 +200,40 @@ class JobMethods:
                 await self._emit(
                     job_id, "job.status", {"state": "failed", "detail": str(e)}
                 )
+
+    @staticmethod
+    def _materialize_config_contents(spec) -> None:
+        """Write `spec.config_contents` to temp files and populate
+        `spec.config_paths`, since `CommandBuilder` only ever reads
+        `config_paths` (it has no notion of inline config text).
+
+        The client sends training config as inline YAML strings
+        (`config_contents`) specifically so it doesn't need a separate
+        "upload the config file first" round trip — but nothing on this
+        (protocol v1) worker path ever materialized those into real files
+        for `CommandBuilder` to point sleap-nn at, an integration gap only
+        surfaced once a real training job was actually run end-to-end.
+        Mirrors the legacy `worker_class.py`'s already-proven behavior
+        (same temp-file-per-config + `path_mappings` text substitution),
+        which was never ported to this newer path.
+
+        A no-op for `TrackJobSpec` (no `config_contents` concept) and for
+        a `TrainJobSpec` that came with `config_paths` already set instead.
+        """
+        if not isinstance(spec, TrainJobSpec) or not spec.config_contents:
+            return
+
+        temp_paths: list[str] = []
+        for idx, content in enumerate(spec.config_contents):
+            for old_path, new_path in (spec.path_mappings or {}).items():
+                content = content.replace(old_path, new_path)
+            fd, temp_path = tempfile.mkstemp(
+                suffix=".yaml", prefix=f"job_config_{idx}_"
+            )
+            with os.fdopen(fd, "w") as f:
+                f.write(content)
+            temp_paths.append(temp_path)
+        spec.config_paths = temp_paths
 
     async def _tail_log(self, job_id: str, log_path: Path, process) -> None:
         """Poll a job's log file and emit each new line as a `job.log` event.
@@ -197,6 +259,74 @@ class JobMethods:
             if process.returncode is not None:
                 return
 
+    async def _register_result_blobs(self, job_id: str, spec, log_path: Path) -> dict:
+        """Register a completed track job's output file as a result blob.
+
+        Only track (inference) jobs produce a result worth fetching back —
+        a training job's "result" is a checkpoint left in its own run
+        directory, which the client doesn't need streamed to it the same
+        way (see the module's connectStore-side counterpart notes). Never
+        raises: a hashing/registration failure only means the client can't
+        fetch this job's blob, not that the job itself failed — it already
+        exited 0 by the time this runs.
+
+        Returns:
+            `{"predictions": {"sha256": ..., "size": ...}}` if a result
+            file was found and registered, else `{}` — the same shape
+            `job.result`'s `blobs` field has always had (spec §6.4).
+        """
+        if not isinstance(spec, TrackJobSpec) or self.blob_index is None:
+            return {}
+        try:
+            output_path = self._resolve_track_output_path(spec, log_path)
+            if output_path is None or not output_path.is_file():
+                return {}
+            sha256, size = await hash_file(output_path)
+            chunk_hashes = await compute_chunk_hashes(output_path)
+            await self.blob_index.register(sha256, str(output_path), size, chunk_hashes)
+            return {"predictions": {"sha256": sha256, "size": size}}
+        except Exception:
+            logging.exception(
+                f"[jobs] Job {job_id} completed but its result blob could not "
+                "be registered — job.result will report no blobs"
+            )
+            return {}
+
+    @staticmethod
+    def _resolve_track_output_path(
+        spec: TrackJobSpec, log_path: Path
+    ) -> Optional[Path]:
+        """Find a completed track job's output file.
+
+        Priority (mirrors the legacy `job_executor.py`'s proven behavior —
+        see its own docstring for the original wording this must keep
+        matching): (1) `spec.output_path`, if the caller set one explicitly;
+        (2) the path sleap-nn itself printed on completion ("Predictions
+        output path: ..."), scraped from the job's persisted log file rather
+        than a live stdout hook, since protocol v1 already writes the whole
+        log to disk; (3) the naming convention sleap-nn falls back to when
+        neither of the above applies.
+        """
+        if spec.output_path is not None:
+            return Path(spec.output_path)
+
+        captured = JobMethods._captured_output_path_from_log(log_path)
+        if captured is not None:
+            return Path(captured)
+
+        base = Path(spec.data_path)
+        return base.with_suffix(".predictions" + base.suffix)
+
+    @staticmethod
+    def _captured_output_path_from_log(log_path: Path) -> Optional[str]:
+        if not log_path.exists():
+            return None
+        with open(log_path, "r", errors="replace") as f:
+            for line in f:
+                if _OUTPUT_PATH_MARKER in line:
+                    return line.split(_OUTPUT_PATH_MARKER, 1)[1].strip()
+        return None
+
     async def _emit(self, job_id: str, topic: str, data: dict) -> None:
         seq = await self.store.append_event(job_id, topic, data)
         await self.server.events.publish(
@@ -221,7 +351,11 @@ class JobMethods:
         if record.state in TERMINAL_STATES:
             return {}
 
-        if record.pid is not None and is_alive(record.pid, record.process_started_at):
+        if (
+            record.pid is not None
+            and record.process_started_at is not None
+            and is_alive(record.pid, record.process_started_at)
+        ):
             if mode == "stop":
                 send_stop_signal(record.pid)
             else:

@@ -15,12 +15,17 @@ claimed). Only the client-proves-to-worker direction is implemented — see
 not point this at an untrusted network without pairing configured.
 """
 
+import asyncio
+import json
 import logging
 import secrets
-from typing import Any, Awaitable, Callable, Dict, Optional, Set
+from pathlib import Path
+from typing import Any, Awaitable, Callable, Dict, Optional, Protocol, Set
 
+import websockets.exceptions
 from websockets.asyncio.server import Server, ServerConnection, serve
 
+from sleap_rtc.protocol_v1.blobs import BlobIndex, VERIFY_CHUNK_SIZE
 from sleap_rtc.protocol_v1.envelope import (
     Event,
     EnvelopeError,
@@ -44,16 +49,68 @@ AGENT_NAME = "sleap-connect-worker"
 _UNAUTHENTICATED_METHODS = frozenset({"pair.claim", "auth.prove"})
 
 
-class Connection:
-    """Per-connection state: the websocket, auth status, and event subscriptions."""
+class TransportClosed(Exception):
+    """Raised by a `Transport.recv()` once the peer is gone.
+
+    The one signal every transport normalizes to, whether the underlying
+    close was clean or abrupt — the dispatch logic in this module (used by
+    every transport binding) only ever needs to know "this connection is
+    over now", never the transport-specific reason why.
+    """
+
+
+class Transport(Protocol):
+    """What `Connection`/`ProtocolV1Server` need from any transport binding.
+
+    `WsStreamTransport` (below) and `iroh_transport.IrohStreamTransport`
+    (item 2.2) are the two concrete implementations — a WebSocket already
+    frames each `.send()`/`.recv()` call as one discrete message, while
+    iroh's raw QUIC streams don't, so that framing is each adapter's own
+    problem to solve; this module's handshake/dispatch logic is written
+    once against this shape and never touches either transport's native
+    API directly.
+    """
+
+    async def send(self, data: str) -> None: ...
+
+    async def recv(self) -> str:
+        """Return the next frame, or raise `TransportClosed` once there
+        won't be one.
+        """
+        ...
+
+    async def close(self, code: int = 1000, reason: str = "") -> None: ...
+
+
+class WsStreamTransport:
+    """Adapts a `websockets` connection to the `Transport` shape."""
 
     def __init__(self, ws: ServerConnection):
-        """Wrap a websocket connection.
+        self._ws = ws
+
+    async def send(self, data: str) -> None:
+        await self._ws.send(data)
+
+    async def recv(self) -> str:
+        try:
+            return await self._ws.recv()
+        except websockets.exceptions.ConnectionClosed as e:
+            raise TransportClosed() from e
+
+    async def close(self, code: int = 1000, reason: str = "") -> None:
+        await self._ws.close(code=code, reason=reason)
+
+
+class Connection:
+    """Per-connection state: the transport, auth status, and event subscriptions."""
+
+    def __init__(self, transport: Transport):
+        """Wrap a transport (a WebSocket or an iroh stream).
 
         Args:
-            ws: The underlying `websockets` server connection.
+            transport: Anything satisfying the `Transport` shape.
         """
-        self.ws = ws
+        self.transport = transport
         self.subscribed_job_ids: Set[str] = set()
         # Populated by _do_hello; used by auth.py's auth_prove to verify a
         # signature against the nonce *we* sent and the node_id *the peer*
@@ -68,7 +125,7 @@ class Connection:
 
     async def send_event(self, event: Event) -> None:
         """Push an `event` frame to this connection."""
-        await self.ws.send(event.to_json())
+        await self.transport.send(event.to_json())
 
 
 class EventBus:
@@ -118,6 +175,8 @@ class ProtocolV1Server:
         proto_max: int = PROTOCOL_VERSION,
         agent_version: str = "0.0.0",
         agent_platform: str = "unknown",
+        blob_port: Optional[int] = None,
+        blob_index: Optional[BlobIndex] = None,
     ):
         """Initialize the server (does not start listening — see `serve`).
 
@@ -129,12 +188,23 @@ class ProtocolV1Server:
             proto_max: Highest protocol version this server accepts.
             agent_version: Reported in `hello.agent.version`.
             agent_platform: Reported in `hello.agent.platform`.
+            blob_port: Reported in `hello.blob_port` (spec §6.3) if this
+                worker is also running the blob HTTP server. `None` if not
+                (`job.result` blobs won't be fetchable either way).
+            blob_index: Same `BlobIndex` the blob HTTP server serves from —
+                item 2.4's iroh blob-range-read stream looks blobs up here
+                too, over a second BiStream per iroh connection (see
+                `_accept_iroh_blob_streams`). `None` disables that stream
+                (any open attempt gets `not_found`), independent of
+                `blob_port`/the HTTP path.
         """
         self.node_id = node_id
         self.proto_min = proto_min
         self.proto_max = proto_max
         self.agent_version = agent_version
         self.agent_platform = agent_platform
+        self.blob_port = blob_port
+        self.blob_index = blob_index
         self.events = EventBus()
         self._methods: Dict[str, MethodHandler] = {}
 
@@ -148,7 +218,7 @@ class ProtocolV1Server:
         self._methods[name] = handler
 
     async def serve(self, host: str, port: int) -> Server:
-        """Start listening for connections.
+        """Start listening for WebSocket connections.
 
         Args:
             host: Bind address.
@@ -158,14 +228,148 @@ class ProtocolV1Server:
             The running `websockets` `Server` (use as an async context
             manager, or call `.close()` / `.wait_closed()` on it).
         """
-        return await serve(self._handle_connection, host, port)
+        return await serve(self._handle_ws_connection, host, port)
 
-    async def _handle_connection(self, ws: ServerConnection) -> None:
-        conn = Connection(ws)
+    async def serve_iroh(self, endpoint) -> None:
+        """Accept iroh connections and run each through the same handshake
+        and method dispatch as the WebSocket transport (item 2.2).
+
+        Runs until `endpoint.accept_next()` reports the endpoint has been
+        closed (returns `None`) — call this from a background task, the
+        same way `serve`'s returned WS `Server` runs in the background.
+        Each connection is handled in its own task so one slow or
+        misbehaving client can't stop new connections from being accepted.
+
+        Args:
+            endpoint: A bound, online `iroh.Endpoint`.
+        """
+        while True:
+            incoming = await endpoint.accept_next()
+            if incoming is None:
+                return
+            asyncio.create_task(self._handle_iroh_incoming(incoming))
+
+    async def _handle_iroh_incoming(self, incoming) -> None:
+        # Deferred import: only sleap-rtc installs that actually use iroh
+        # need the dependency at all (see iroh_transport.py's own docstring).
+        from sleap_rtc.protocol_v1.iroh_transport import IrohStreamTransport
+
+        try:
+            accepting = await incoming.accept()
+            iroh_conn = await accepting.connect()
+        except Exception:
+            logging.exception("[protocol_v1] iroh handshake failed")
+            return
+
+        try:
+            # One control stream per connection — protocol v1's envelope
+            # frames all multiplex over this single stream, the same as one
+            # WebSocket connection carries every frame for that connection.
+            bi = await iroh_conn.accept_bi()
+        except Exception:
+            logging.exception("[protocol_v1] iroh failed to accept its control stream")
+            return
+
+        # Item 2.4: a second, independent accept loop on the SAME connection
+        # for blob-range-read streams — additional BiStreams the client may
+        # open later, separate from the control stream above. Backgrounded
+        # so it runs for the connection's whole lifetime without blocking
+        # (or being blocked by) the control-frame dispatch loop below.
+        asyncio.create_task(self._accept_iroh_blob_streams(iroh_conn))
+
+        await self._run_connection(IrohStreamTransport(iroh_conn, bi))
+
+    async def _accept_iroh_blob_streams(self, iroh_conn) -> None:
+        """Loop accepting additional BiStreams a client opens for blob range
+        reads (item 2.4) — separate from the one control stream
+        `_handle_iroh_incoming` already accepted for this same connection.
+        Ends (returns) once the connection itself is closed.
+        """
+        while True:
+            try:
+                bi = await iroh_conn.accept_bi()
+            except Exception:
+                return
+            asyncio.create_task(self._serve_iroh_blob_stream(bi))
+
+    async def _serve_iroh_blob_stream(self, bi) -> None:
+        """Serve one blob-range-read session: an open phase (`{sha256}` ->
+        blob metadata + chunk hashes), then a read loop (`{offset, length}`
+        -> bytes), until the client's `send.finish()` ends the loop.
+
+        Does zero chunk-alignment or verification itself — it serves
+        whatever literal `offset`/`length` it's asked for. That logic is
+        entirely the client's job (design doc §9); this only needs to agree
+        on the wire shape (design doc §6/§6.1).
+        """
+        # Deferred import for the same reason _handle_iroh_incoming's is:
+        # only iroh-using installs need this, and it avoids a module-level
+        # circular import (iroh_transport.py imports TransportClosed from
+        # this module).
+        from sleap_rtc.protocol_v1.iroh_transport import read_frame, write_frame
+
+        send, recv = bi.send(), bi.recv()
+        try:
+            open_req = await read_frame(recv)
+            if open_req is None:
+                return
+
+            record = (
+                self.blob_index.get_sync(json.loads(open_req)["sha256"])
+                if self.blob_index is not None
+                else None
+            )
+            if record is None or not Path(record.path).is_file():
+                await write_frame(send, json.dumps({"ok": False, "error": "not_found"}))
+                return
+
+            await write_frame(
+                send,
+                json.dumps(
+                    {
+                        "ok": True,
+                        "size": record.size,
+                        "chunkSize": VERIFY_CHUNK_SIZE,
+                        "chunkHashes": record.chunk_hashes,
+                    }
+                ),
+            )
+
+            with open(record.path, "rb") as f:
+                while True:
+                    req = await read_frame(recv)
+                    if req is None:
+                        return  # client is done reading (send.finish())
+                    r = json.loads(req)
+                    f.seek(r["offset"])
+                    chunk = f.read(r["length"])
+                    await write_frame(
+                        send, json.dumps({"ok": True, "size": len(chunk)})
+                    )
+                    await send.write_all(chunk)
+        finally:
+            await send.finish()
+
+    async def _handle_ws_connection(self, ws: ServerConnection) -> None:
+        await self._run_connection(WsStreamTransport(ws))
+
+    async def _run_connection(self, transport: Transport) -> None:
+        """Drive one connection through hello + frame dispatch until it closes.
+
+        Transport-agnostic: works identically whether `transport` wraps a
+        WebSocket or an iroh stream — every transport-specific detail (wire
+        framing, how a close is signaled) is that transport's own adapter's
+        job, not this method's.
+        """
+        conn = Connection(transport)
         try:
             if not await self._do_hello(conn):
                 return
-            async for raw in ws:
+            while True:
+                try:
+                    raw = await transport.recv()
+                except TransportClosed:
+                    return
                 await self._handle_frame(conn, raw)
         finally:
             self.events.unsubscribe_all(conn)
@@ -185,16 +389,19 @@ class ProtocolV1Server:
             True if the handshake succeeded and the connection should
             proceed to normal message handling; False if it was closed.
         """
-        ws = conn.ws
-        raw = await ws.recv()
+        transport = conn.transport
+        try:
+            raw = await transport.recv()
+        except TransportClosed:
+            return False
         try:
             frame = parse_envelope(raw)
         except EnvelopeError as e:
-            await ws.close(code=1002, reason=str(e))
+            await transport.close(code=1002, reason=str(e))
             return False
 
         if not isinstance(frame, Hello):
-            await ws.close(code=1002, reason="expected hello as the first frame")
+            await transport.close(code=1002, reason="expected hello as the first frame")
             return False
 
         client_min = frame.proto.get("min")
@@ -205,7 +412,7 @@ class ProtocolV1Server:
             or client_max < self.proto_min
             or client_min > self.proto_max
         ):
-            await ws.close(code=1002, reason="proto.mismatch")
+            await transport.close(code=1002, reason="proto.mismatch")
             return False
 
         conn.peer_node_id = frame.node_id
@@ -221,15 +428,16 @@ class ProtocolV1Server:
             },
             node_id=self.node_id,
             nonce=conn.own_nonce,
+            blob_port=self.blob_port,
         )
-        await ws.send(our_hello.to_json())
+        await transport.send(our_hello.to_json())
         return True
 
     async def _handle_frame(self, conn: Connection, raw: str) -> None:
         try:
             frame = parse_envelope(raw)
         except EnvelopeError as e:
-            logging.warning(f"[protocol_v1] Dropping unparseable frame: {e}")
+            logging.warning(f"[protocol_v1] Dropping unparsable frame: {e}")
             return
 
         if not isinstance(frame, Req):
@@ -243,7 +451,7 @@ class ProtocolV1Server:
             return
 
         res = await self._dispatch(frame, conn)
-        await conn.ws.send(res.to_json())
+        await conn.transport.send(res.to_json())
 
     async def _dispatch(self, req: Req, conn: Connection) -> Res:
         if req.method not in _UNAUTHENTICATED_METHODS and not conn.authenticated:

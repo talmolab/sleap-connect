@@ -8,14 +8,17 @@ requiring sleap-nn to be installed.
 """
 
 import asyncio
+import hashlib
 import sys
 import time
+from pathlib import Path
 
 import pytest
 
 from sleap_rtc.jobs.queue import JobQueue
-from sleap_rtc.jobs.spec import TrainJobSpec
+from sleap_rtc.jobs.spec import TrackJobSpec, TrainJobSpec
 from sleap_rtc.jobs.store import JobStore
+from sleap_rtc.protocol_v1.blobs import BlobIndex
 from sleap_rtc.protocol_v1.errors import JOB_NOT_FOUND, ProtocolError
 from sleap_rtc.protocol_v1.job_methods import JobMethods
 from sleap_rtc.protocol_v1.server import Connection, ProtocolV1Server
@@ -90,7 +93,7 @@ async def store(tmp_path):
         yield store
 
 
-def _make_methods(store, tmp_path, cmd, file_manager=None):
+def _make_methods(store, tmp_path, cmd, file_manager=None, blob_index=None):
     server = ProtocolV1Server(node_id="test-node")
     queue = JobQueue(max_concurrent=1)
     return JobMethods(
@@ -100,6 +103,7 @@ def _make_methods(store, tmp_path, cmd, file_manager=None):
         log_dir=tmp_path / "logs",
         file_manager=file_manager,
         command_builder=_FakeCommandBuilder(cmd),
+        blob_index=blob_index,
     )
 
 
@@ -147,6 +151,167 @@ class TestSubmitAndRunToCompletion:
             await methods.submit({"spec": {"type": "not-a-real-type"}}, conn=None)
 
         assert exc_info.value.code == "job.spec_invalid"
+
+
+class TestResultBlobs:
+    """Tests for registering a completed track job's output as a blob."""
+
+    def _track_spec(self, data_path):
+        return TrackJobSpec(data_path=str(data_path), model_paths=["/models/centroid"])
+
+    async def test_registers_the_blob_at_spec_output_path(self, store, tmp_path):
+        content = b"predicted labels"
+        output_path = tmp_path / "out.slp"
+        index = BlobIndex(tmp_path / "blobs.sqlite")
+        spec = TrackJobSpec(
+            data_path=str(tmp_path / "video.mp4"),
+            model_paths=["/models/centroid"],
+            output_path=str(output_path),
+        )
+        # Fake command: write the output file sleap-nn would have produced.
+        cmd = [
+            sys.executable,
+            "-c",
+            f"open({str(output_path)!r}, 'wb').write({content!r})",
+        ]
+        methods = _make_methods(store, tmp_path, cmd, blob_index=index)
+
+        result = await methods.submit({"spec": spec.to_dict()}, conn=None)
+        record = await _wait_for_terminal(methods, store, result["job_id"])
+
+        expected_sha256 = hashlib.sha256(content).hexdigest()
+        assert record.result == {
+            "blobs": {"predictions": {"sha256": expected_sha256, "size": len(content)}}
+        }
+        blob = await index.get(expected_sha256)
+        assert blob is not None
+        assert blob.path == str(output_path)
+        assert blob.size == len(content)
+
+        status = await methods.status({"job_id": result["job_id"]}, conn=None)
+        assert status["result"]["blobs"]["predictions"]["sha256"] == expected_sha256
+
+        events = await store.get_events_since(result["job_id"])
+        result_events = [e for e in events if e.topic == "job.result"]
+        assert len(result_events) == 1
+        assert (
+            result_events[0].data["blobs"]["predictions"]["sha256"] == expected_sha256
+        )
+
+    async def test_falls_back_to_the_captured_stdout_path(self, store, tmp_path):
+        content = b"captured-path predictions"
+        captured_path = tmp_path / "captured.slp"
+        index = BlobIndex(tmp_path / "blobs.sqlite")
+        spec = self._track_spec(tmp_path / "video.mp4")  # no output_path set
+        cmd = [
+            sys.executable,
+            "-c",
+            f"open({str(captured_path)!r}, 'wb').write({content!r}); "
+            f"print('Predictions output path: ' + {str(captured_path)!r})",
+        ]
+        methods = _make_methods(store, tmp_path, cmd, blob_index=index)
+
+        result = await methods.submit({"spec": spec.to_dict()}, conn=None)
+        await _wait_for_terminal(methods, store, result["job_id"])
+
+        expected_sha256 = hashlib.sha256(content).hexdigest()
+        blob = await index.get(expected_sha256)
+        assert blob is not None
+        assert blob.path == str(captured_path)
+
+    async def test_falls_back_to_the_naming_convention(self, store, tmp_path):
+        data_path = tmp_path / "video.slp"
+        content = b"convention-fallback predictions"
+        convention_path = tmp_path / "video.predictions.slp"
+        index = BlobIndex(tmp_path / "blobs.sqlite")
+        spec = self._track_spec(data_path)  # no output_path, nothing captured
+        cmd = [
+            sys.executable,
+            "-c",
+            f"open({str(convention_path)!r}, 'wb').write({content!r})",
+        ]
+        methods = _make_methods(store, tmp_path, cmd, blob_index=index)
+
+        result = await methods.submit({"spec": spec.to_dict()}, conn=None)
+        await _wait_for_terminal(methods, store, result["job_id"])
+
+        expected_sha256 = hashlib.sha256(content).hexdigest()
+        blob = await index.get(expected_sha256)
+        assert blob is not None
+        assert blob.path == str(convention_path)
+
+    async def test_no_blobs_when_the_output_file_never_materializes(
+        self, store, tmp_path
+    ):
+        index = BlobIndex(tmp_path / "blobs.sqlite")
+        spec = self._track_spec(tmp_path / "video.mp4")
+        methods = _make_methods(
+            store, tmp_path, [sys.executable, "-c", "pass"], blob_index=index
+        )
+
+        result = await methods.submit({"spec": spec.to_dict()}, conn=None)
+        record = await _wait_for_terminal(methods, store, result["job_id"])
+
+        assert record.state == "completed"
+        assert record.result == {"blobs": {}}
+
+    async def test_no_blobs_without_a_blob_index_configured(self, store, tmp_path):
+        output_path = tmp_path / "out.slp"
+        spec = TrackJobSpec(
+            data_path=str(tmp_path / "video.mp4"),
+            model_paths=["/models/centroid"],
+            output_path=str(output_path),
+        )
+        cmd = [sys.executable, "-c", f"open({str(output_path)!r}, 'wb').write(b'x')"]
+        methods = _make_methods(store, tmp_path, cmd)  # no blob_index
+
+        result = await methods.submit({"spec": spec.to_dict()}, conn=None)
+        record = await _wait_for_terminal(methods, store, result["job_id"])
+
+        assert record.result == {"blobs": {}}
+
+    async def test_train_jobs_never_register_a_result_blob(self, store, tmp_path, spec):
+        index = BlobIndex(tmp_path / "blobs.sqlite")
+        methods = _make_methods(
+            store, tmp_path, [sys.executable, "-c", "pass"], blob_index=index
+        )
+
+        result = await methods.submit({"spec": spec.to_dict()}, conn=None)
+        record = await _wait_for_terminal(methods, store, result["job_id"])
+
+        assert record.result == {"blobs": {}}
+
+    async def test_job_result_is_emitted_before_job_status_completed(
+        self, store, tmp_path
+    ):
+        # A client that resolves its "wait for this job" promise as soon as
+        # it sees the terminal job.status (the natural, simplest thing for
+        # it to do — see sleap-app's connectStore) must already have seen
+        # job.result by then, or it has no further chance to: the instant a
+        # client considers a job over it typically unsubscribes, so a
+        # job.result arriving a message later would silently go nowhere.
+        output_path = tmp_path / "out.slp"
+        index = BlobIndex(tmp_path / "blobs.sqlite")
+        spec = TrackJobSpec(
+            data_path=str(tmp_path / "video.mp4"),
+            model_paths=["/models/centroid"],
+            output_path=str(output_path),
+        )
+        cmd = [sys.executable, "-c", f"open({str(output_path)!r}, 'wb').write(b'x')"]
+        methods = _make_methods(store, tmp_path, cmd, blob_index=index)
+
+        result = await methods.submit({"spec": spec.to_dict()}, conn=None)
+        await _wait_for_terminal(methods, store, result["job_id"])
+
+        events = await store.get_events_since(result["job_id"])
+        topics_in_order = [e.topic for e in events]
+        result_idx = topics_in_order.index("job.result")
+        completed_idx = next(
+            i
+            for i, e in enumerate(events)
+            if e.topic == "job.status" and e.data.get("state") == "completed"
+        )
+        assert result_idx < completed_idx
 
 
 class TestStatusAndList:
@@ -232,6 +397,98 @@ class TestCancel:
         record = await store.get_job(job.job_id)
         assert record.state == "failed"
         assert "not running" in record.error
+
+    async def test_cancel_handles_a_pid_recorded_without_a_process_started_at(
+        self, store, tmp_path, spec
+    ):
+        """`set_process_info` always writes `pid` and `process_started_at`
+        together, so this combination shouldn't occur via any real code
+        path — but `cancel`'s liveness guard must not assume that. Without
+        also checking `process_started_at is not None`, `is_alive` would be
+        called with `None` and raise `TypeError` from
+        `abs(actual_started_at - started_at)`, unlike `reattach_all`'s
+        equivalent guard, which already checks both.
+        """
+        import os
+
+        methods = _make_methods(store, tmp_path, [sys.executable, "-c", "pass"])
+        job = await store.create_job("job-partial", spec)
+        await store.update_state(job.job_id, "running")
+        # Simulate the otherwise-unreachable inconsistency directly,
+        # bypassing set_process_info's atomic pid+process_started_at write.
+        await store._conn.execute(
+            "UPDATE jobs SET pid = ? WHERE job_id = ?", (os.getpid(), job.job_id)
+        )
+        await store._conn.commit()
+
+        await methods.cancel({"job_id": job.job_id, "mode": "cancel"}, conn=None)
+
+        record = await store.get_job(job.job_id)
+        assert record.state == "failed"
+
+
+class TestMaterializeConfigContents:
+    """Tests for `_materialize_config_contents`.
+
+    The client only ever sends training config as inline YAML strings
+    (`config_contents`), never as worker-local file paths — but
+    `CommandBuilder` only ever reads `config_paths`, an integration gap
+    that surfaced as `IndexError: list index out of range` (indexing an
+    empty `config_paths`) the first time a real training job ran end to
+    end. `_materialize_config_contents` writes each content string to a
+    temp file and populates `config_paths` from that, mirroring the
+    legacy `worker_class.py`'s already-proven behavior for this same
+    problem.
+    """
+
+    def test_writes_each_content_to_its_own_temp_file(self):
+        spec = TrainJobSpec(
+            config_contents=["centroid: yaml", "centered_instance: yaml"],
+        )
+
+        JobMethods._materialize_config_contents(spec)
+
+        assert len(spec.config_paths) == 2
+        assert Path(spec.config_paths[0]).read_text() == "centroid: yaml"
+        assert Path(spec.config_paths[1]).read_text() == "centered_instance: yaml"
+
+    def test_applies_path_mappings_to_the_content(self):
+        spec = TrainJobSpec(
+            config_contents=["data_config.train_labels_path=/local/labels.slp"],
+            path_mappings={"/local/labels.slp": "/worker/labels.slp"},
+        )
+
+        JobMethods._materialize_config_contents(spec)
+
+        written = Path(spec.config_paths[0]).read_text()
+        assert written == "data_config.train_labels_path=/worker/labels.slp"
+
+    def test_is_a_noop_when_config_paths_already_given(self):
+        spec = TrainJobSpec(config_paths=["/already/there.yaml"])
+
+        JobMethods._materialize_config_contents(spec)
+
+        assert spec.config_paths == ["/already/there.yaml"]
+
+    def test_is_a_noop_for_a_track_spec(self):
+        spec = TrackJobSpec(data_path="/x.slp", model_paths=["/m"])
+
+        JobMethods._materialize_config_contents(spec)  # must not raise
+
+        assert spec.data_path == "/x.slp"
+
+    def test_materialized_spec_builds_a_real_command_without_crashing(self):
+        # The actual bug this closes: build_train_command only ever read
+        # config_paths[config_index], and the client only ever sends
+        # config_contents — so this raised IndexError before the fix.
+        from sleap_rtc.jobs.builder import CommandBuilder
+
+        spec = TrainJobSpec(config_contents=["centroid: yaml"])
+
+        JobMethods._materialize_config_contents(spec)
+        cmd = CommandBuilder().build_command(spec)
+
+        assert cmd[:2] == ["sleap-nn", "train"]
 
 
 class TestSubscribe:
