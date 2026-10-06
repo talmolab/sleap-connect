@@ -144,7 +144,7 @@ class TestBlobHttpServer:
     async def test_range_with_neither_side_given_is_416(self, running_server, tmp_path):
         # "bytes=-" (both first-byte-pos and suffix-length empty) is
         # malformed per RFC 7233 — must be rejected the same as any other
-        # unparseable Range, not silently treated as "the whole file".
+        # unparsable Range, not silently treated as "the whole file".
         server, index = running_server
         content = bytes(range(256))
         f = tmp_path / "data.bin"

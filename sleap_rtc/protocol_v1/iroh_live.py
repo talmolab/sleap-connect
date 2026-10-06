@@ -9,7 +9,7 @@ embeds it in the printed ticket as an optional ``iroh`` section. A client
 that finds that section can dial the worker over iroh with no VPN, SSH
 tunnel or port-forward.
 
-The file is purely advisory: any problem reading it (missing, unparseable,
+The file is purely advisory: any problem reading it (missing, unparsable,
 for a different identity, or left behind by a `serve` that has since
 died) means `pair` prints exactly the ticket it printed before this
 feature existed.
