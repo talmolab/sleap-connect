@@ -483,7 +483,7 @@ class ProtocolV1Server:
         try:
             frame = parse_envelope(raw)
         except EnvelopeError as e:
-            logging.warning(f"[protocol_v1] Dropping unparseable frame: {e}")
+            logging.warning(f"[protocol_v1] Dropping unparsable frame: {e}")
             return
 
         if not isinstance(frame, Req):

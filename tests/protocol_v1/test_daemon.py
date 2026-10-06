@@ -211,7 +211,11 @@ class TestDaemonize:
         assert started.returncode != 0
         assert "exited during startup" in started.stderr
         # The child's own traceback is surfaced, not just "it failed".
-        assert "address already in use" in started.stderr.lower()
+        # The bind error's wording is the OS's own: POSIX says "address already
+        # in use", Windows (WSAEADDRINUSE, 10048) "only one usage of each
+        # socket address".
+        stderr = started.stderr.lower()
+        assert "address already in use" in stderr or "only one usage" in stderr
         assert daemon.read_running(tmp_path) is None
 
     def test_stop_with_nothing_running(self, tmp_path):

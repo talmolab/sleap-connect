@@ -229,7 +229,7 @@ class TestResultBlobs:
             sys.executable,
             "-c",
             f"open({str(captured_path)!r}, 'wb').write({content!r}); "
-            f"print('Predictions output path: {captured_path}')",
+            f"print('Predictions output path: ' + {str(captured_path)!r})",
         ]
         methods = _make_methods(store, tmp_path, cmd, blob_index=index)
 
@@ -1086,15 +1086,18 @@ class TestProgressLines:
         job_id = (await methods.submit({"spec": spec.to_dict()}, conn=None))["job_id"]
         await _wait_for_terminal(methods, store, job_id)
 
-        logs = [
-            e.data for e in await store.get_events_since(job_id) if e.topic == "job.log"
-        ]
+        events = [e for e in await store.get_events_since(job_id) if e.topic == "job.log"]
+        logs = [e.data for e in events]
         lines = [d["line"] for d in logs if not d.get("progress")]
         progress = [d["line"] for d in logs if d.get("progress")]
 
         assert lines == ["start", "Epoch 1: 100%|bar| 50/50", "done"]
-        # Redraws are visible while running, but nowhere near one per redraw.
-        assert 1 <= len(progress) <= 5
+        # Redraws are visible while running, but at most about one per
+        # throttle interval of the script's real run time (a slow CI runner
+        # stretches the nominal 2.5 s), and nowhere near one per redraw (50).
+        elapsed = events[-1].created_at - events[0].created_at
+        assert 1 <= len(progress) <= elapsed / job_methods_module._PROGRESS_EMIT_INTERVAL_SECS + 2
+        assert len(progress) < 50
         assert all(p.startswith("Epoch 1: ") and "\r" not in p for p in progress)
 
     async def test_ansi_control_sequences_are_stripped(self, store, spec, tmp_path):

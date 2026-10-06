@@ -221,7 +221,7 @@ class TestReattachAll:
         outcomes = await reattach_all(store)
 
         # Its exit code was recorded, so the caller can still tell whether it
-        # succeeded — reattach_all must not pre-emptively mark it failed.
+        # succeeded — reattach_all must not preemptively mark it failed.
         assert outcomes == {"job-1": "exited"}
         assert (await store.get_job("job-1")).state == "running"
         assert read_exit_code(tmp_path / "job-1.log") == 0

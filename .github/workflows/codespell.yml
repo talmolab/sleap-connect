@@ -25,5 +25,5 @@ jobs:
         uses: codespell-project/actions-codespell@v2
         with:
           skip: ".git*,*.css,openspec"
-          ignore_words_list: "doesnt"
+          ignore_words_list: "doesnt,bistream"
           check_hidden: true
