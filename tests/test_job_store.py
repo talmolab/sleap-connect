@@ -171,6 +171,77 @@ class TestEvents:
         assert [e.data["line"] for e in job2_events] == ["job2-a"]
 
 
+class TestDeleteJobs:
+    """Tests for `delete_jobs` — removing job + event rows, never files."""
+
+    async def test_deletes_the_job_record(self, store, spec):
+        await store.create_job("job-1", spec)
+
+        deleted = await store.delete_jobs(["job-1"])
+
+        assert deleted == ["job-1"]
+        assert await store.get_job("job-1") is None
+
+    async def test_deletes_the_jobs_events_too(self, store, spec):
+        await store.create_job("job-1", spec)
+        await store.append_event("job-1", "job.log", {"line": "a"})
+        await store.append_event("job-1", "job.log", {"line": "b"})
+
+        await store.delete_jobs(["job-1"])
+
+        # get_events_since would normally raise nothing even for an unknown
+        # job (it's just a SELECT), so check the underlying table directly
+        # to prove the rows are actually gone, not just unreachable.
+        cursor = await store._conn.execute(
+            "SELECT COUNT(*) FROM job_events WHERE job_id = ?", ("job-1",)
+        )
+        (count,) = await cursor.fetchone()
+        assert count == 0
+
+    async def test_deletes_several_jobs_in_one_call(self, store, spec):
+        await store.create_job("job-1", spec)
+        await store.create_job("job-2", spec)
+        await store.create_job("job-3", spec)
+
+        deleted = await store.delete_jobs(["job-1", "job-2"])
+
+        assert sorted(deleted) == ["job-1", "job-2"]
+        assert await store.get_job("job-1") is None
+        assert await store.get_job("job-2") is None
+        assert await store.get_job("job-3") is not None
+
+    async def test_pops_the_jobs_event_lock(self, store, spec):
+        await store.create_job("job-1", spec)
+        await store.append_event("job-1", "job.log", {"line": "a"})  # creates the lock
+        assert "job-1" in store._event_locks
+
+        await store.delete_jobs(["job-1"])
+
+        assert "job-1" not in store._event_locks
+
+    async def test_unknown_id_raises_and_deletes_nothing(self, store, spec):
+        await store.create_job("job-1", spec)
+
+        with pytest.raises(JobStoreError):
+            await store.delete_jobs(["job-1", "does-not-exist"])
+
+        # All-or-nothing: job-1 must survive a call that also named a
+        # nonexistent id.
+        assert await store.get_job("job-1") is not None
+
+    async def test_other_jobs_rows_and_events_are_untouched(self, store, spec):
+        await store.create_job("job-1", spec)
+        await store.create_job("job-2", spec)
+        await store.append_event("job-2", "job.log", {"line": "keep me"})
+
+        await store.delete_jobs(["job-1"])
+
+        remaining = await store.get_job("job-2")
+        assert remaining is not None
+        events = await store.get_events_since("job-2")
+        assert [e.data["line"] for e in events] == ["keep me"]
+
+
 class TestPersistence:
     """Tests that state survives across separate JobStore instances (reattach)."""
 

@@ -38,7 +38,12 @@ from sleap_rtc.jobs.spec import TrackJobSpec, TrainJobSpec, parse_job_spec
 from sleap_rtc.jobs.store import TERMINAL_STATES, JobRecord, JobStore
 from sleap_rtc.protocol_v1.blobs import BlobIndex, compute_chunk_hashes, hash_file
 from sleap_rtc.protocol_v1.envelope import Event
-from sleap_rtc.protocol_v1.errors import JOB_NOT_FOUND, JOB_SPEC_INVALID, ProtocolError
+from sleap_rtc.protocol_v1.errors import (
+    JOB_ACTIVE,
+    JOB_NOT_FOUND,
+    JOB_SPEC_INVALID,
+    ProtocolError,
+)
 from sleap_rtc.protocol_v1.metrics import JobMetricsConsumer, read_training_log_epochs
 from sleap_rtc.protocol_v1.server import Connection, ProtocolV1Server
 
@@ -166,6 +171,7 @@ class JobMethods:
         server.register("jobs.status", self.status)
         server.register("jobs.list", self.list_jobs)
         server.register("jobs.subscribe", self.subscribe)
+        server.register("jobs.delete", self.delete)
         if file_manager is not None:
             server.register("fs.mounts", self.fs_mounts)
             server.register("fs.list", self.fs_list)
@@ -914,6 +920,46 @@ class JobMethods:
                 Event(topic=ev.topic, seq=ev.seq, data=ev.data, job_id=job_id)
             )
         return {}
+
+    async def delete(self, params: dict, conn: Connection) -> dict:
+        """Handle `jobs.delete` — remove job records for finished runs.
+
+        Only the `jobs`/`job_events` rows are removed — nothing under
+        `job-runs/<id>` or the job's log file is touched, so a trained
+        model, logs, and predictions all stay on disk; a client that wants
+        those gone has to delete them itself (e.g. via `fs.*`/a mount), not
+        through this method.
+
+        All-or-nothing across `params["job_ids"]`: every id is checked
+        first, and if any is unknown (`JOB_NOT_FOUND`) or active
+        (`JOB_ACTIVE`), nothing is deleted. "Active" means this worker is
+        currently running it or about to (tracked in `self._tasks`, which
+        covers both "running" and "queued, waiting for a slot") — not
+        simply "state is queued", since a `queued` job left behind with no
+        tracked task (e.g. the worker restarted and nothing resumed it —
+        see `resume_reattached`, which only ever resumes a "running" or
+        "exited" job) can never finish on its own and is as dead as a
+        terminal one, so it's deletable like any other.
+        """
+        job_ids = params["job_ids"]
+        records = [await self._get_job_or_raise(job_id) for job_id in job_ids]
+        for record in records:
+            if self._is_job_active(record):
+                raise ProtocolError(
+                    JOB_ACTIVE, f"Job {record.job_id} is active and can't be deleted"
+                )
+
+        deleted = await self.store.delete_jobs(job_ids)
+        self.server.events.drop(job_ids)
+        return {"deleted": deleted}
+
+    def _is_job_active(self, record: JobRecord) -> bool:
+        """Whether `record` is currently running, or about to be, on this worker.
+
+        See `delete`'s docstring for why this isn't just "state is queued
+        or running".
+        """
+        return record.job_id in self._tasks or record.state == "running"
 
     async def fs_mounts(self, params: dict, conn: Connection) -> dict:
         """Handle `fs.mounts` — the configured, browsable mount roots."""

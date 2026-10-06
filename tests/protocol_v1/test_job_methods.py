@@ -595,6 +595,165 @@ class TestSubscribe:
         assert exc_info.value.code == JOB_NOT_FOUND
 
 
+class TestDelete:
+    """Tests for jobs.delete — removing job records, never files."""
+
+    async def test_deletes_rows_and_events_but_leaves_the_log_file(
+        self, store, tmp_path, spec
+    ):
+        methods = _make_methods(
+            store, tmp_path, [sys.executable, "-c", "print('line1')"]
+        )
+        job_id = (await methods.submit({"spec": spec.to_dict()}, conn=None))["job_id"]
+        await _wait_for_terminal(methods, store, job_id)
+        log_path = methods.log_dir / f"{job_id}.log"
+        assert log_path.exists()
+
+        result = await methods.delete({"job_ids": [job_id]}, conn=None)
+
+        assert result == {"deleted": [job_id]}
+        assert await store.get_job(job_id) is None
+        assert await store.get_events_since(job_id) == []
+        assert log_path.exists()  # files stay on disk
+
+    async def test_deleted_job_is_gone_from_status_list_and_subscribe(
+        self, store, tmp_path, spec
+    ):
+        methods = _make_methods(store, tmp_path, [sys.executable, "-c", "pass"])
+        job_id = (await methods.submit({"spec": spec.to_dict()}, conn=None))["job_id"]
+        other_id = (await methods.submit({"spec": spec.to_dict()}, conn=None))["job_id"]
+        await _wait_for_terminal(methods, store, job_id)
+        await _wait_for_terminal(methods, store, other_id)
+
+        await methods.delete({"job_ids": [job_id]}, conn=None)
+
+        with pytest.raises(ProtocolError) as exc_info:
+            await methods.status({"job_id": job_id}, conn=None)
+        assert exc_info.value.code == JOB_NOT_FOUND
+
+        listing = await methods.list_jobs({}, conn=None)
+        assert job_id not in {j["job_id"] for j in listing["jobs"]}
+        assert other_id in {j["job_id"] for j in listing["jobs"]}
+
+        with pytest.raises(ProtocolError) as exc_info:
+            await methods.subscribe({"job_id": job_id}, conn=Connection(_FakeWs()))
+        assert exc_info.value.code == JOB_NOT_FOUND
+
+    async def test_drops_subscribers_from_the_event_bus(self, store, tmp_path, spec):
+        methods = _make_methods(store, tmp_path, [sys.executable, "-c", "pass"])
+        job_id = (await methods.submit({"spec": spec.to_dict()}, conn=None))["job_id"]
+        await _wait_for_terminal(methods, store, job_id)
+        conn = Connection(_FakeWs())
+        await methods.subscribe({"job_id": job_id, "since_seq": 0}, conn)
+        assert job_id in methods.server.events._subscribers
+
+        await methods.delete({"job_ids": [job_id]}, conn=None)
+
+        assert job_id not in methods.server.events._subscribers
+        assert job_id not in conn.subscribed_job_ids
+
+    async def test_refuses_to_delete_a_running_job(self, store, tmp_path, spec):
+        methods = _make_methods(
+            store, tmp_path, [sys.executable, "-c", "import time; time.sleep(30)"]
+        )
+        job_id = (await methods.submit({"spec": spec.to_dict()}, conn=None))["job_id"]
+        await _wait_for_state(store, job_id, "running")
+
+        with pytest.raises(ProtocolError) as exc_info:
+            await methods.delete({"job_ids": [job_id]}, conn=None)
+
+        assert exc_info.value.code == "job.active"
+        assert await store.get_job(job_id) is not None  # nothing was deleted
+
+        await methods.cancel({"job_id": job_id, "mode": "cancel"}, conn=None)
+        await _wait_for_terminal(methods, store, job_id, timeout=5)
+
+    async def test_refuses_to_delete_a_job_queued_behind_a_running_one(
+        self, store, tmp_path, spec
+    ):
+        # Tracked in self._tasks (waiting on the queue slot), even though
+        # its store state is still "queued" — this is the "normal
+        # operation" case the docstring distinguishes from an orphan.
+        go = tmp_path / "go"
+        blocker = [
+            sys.executable,
+            "-c",
+            f"import os, time\nwhile not os.path.exists({str(go)!r}): time.sleep(0.05)",
+        ]
+        methods = _make_methods(store, tmp_path, blocker)
+        first = (await methods.submit({"spec": spec.to_dict()}, conn=None))["job_id"]
+        await _wait_for_state(store, first, "running")
+        methods._builder = _FakeCommandBuilder([sys.executable, "-c", "pass"])
+        second = (await methods.submit({"spec": spec.to_dict()}, conn=None))["job_id"]
+        await asyncio.sleep(0.1)
+        assert (await store.get_job(second)).state == "queued"
+
+        with pytest.raises(ProtocolError) as exc_info:
+            await methods.delete({"job_ids": [second]}, conn=None)
+
+        assert exc_info.value.code == "job.active"
+
+        go.touch()
+        await _wait_for_terminal(methods, store, first)
+        await _wait_for_terminal(methods, store, second)
+
+    async def test_an_orphaned_queued_job_with_no_tracked_task_is_deletable(
+        self, store, tmp_path, spec
+    ):
+        # Simulates a job left "queued" by a worker that crashed/restarted
+        # before ever spawning it: the fresh process's self._tasks has
+        # nothing for it (unlike the "queued behind a running job" case
+        # above), so it can never finish on its own.
+        methods = _make_methods(store, tmp_path, [sys.executable, "-c", "pass"])
+        job = await store.create_job("orphaned-job", spec)
+        assert job.job_id not in methods._tasks
+
+        result = await methods.delete({"job_ids": [job.job_id]}, conn=None)
+
+        assert result == {"deleted": [job.job_id]}
+        assert await store.get_job(job.job_id) is None
+
+    async def test_unknown_id_raises_not_found_and_deletes_nothing(
+        self, store, tmp_path, spec
+    ):
+        methods = _make_methods(store, tmp_path, [sys.executable, "-c", "pass"])
+        job_id = (await methods.submit({"spec": spec.to_dict()}, conn=None))["job_id"]
+        await _wait_for_terminal(methods, store, job_id)
+
+        with pytest.raises(ProtocolError) as exc_info:
+            await methods.delete({"job_ids": [job_id, "does-not-exist"]}, conn=None)
+
+        assert exc_info.value.code == JOB_NOT_FOUND
+        # All-or-nothing: the known-good id wasn't deleted either.
+        assert await store.get_job(job_id) is not None
+
+    async def test_all_or_nothing_when_one_of_several_is_active(
+        self, store, tmp_path, spec
+    ):
+        # A genuinely terminal job the delete call *would* remove on its
+        # own, created directly so it isn't gated behind the running job
+        # below by the queue's max_concurrent=1.
+        done = await store.create_job("already-done-job", spec)
+        await store.update_state(done.job_id, "completed", result={})
+
+        methods = _make_methods(
+            store, tmp_path, [sys.executable, "-c", "import time; time.sleep(30)"]
+        )
+        running_id = (await methods.submit({"spec": spec.to_dict()}, conn=None))[
+            "job_id"
+        ]
+        await _wait_for_state(store, running_id, "running")
+
+        with pytest.raises(ProtocolError) as exc_info:
+            await methods.delete({"job_ids": [done.job_id, running_id]}, conn=None)
+
+        assert exc_info.value.code == "job.active"
+        assert await store.get_job(done.job_id) is not None  # nothing was deleted
+
+        await methods.cancel({"job_id": running_id, "mode": "cancel"}, conn=None)
+        await _wait_for_terminal(methods, store, running_id, timeout=5)
+
+
 class TestFsMethods:
     """Tests for fs.mounts / fs.list delegating to a FileManager."""
 

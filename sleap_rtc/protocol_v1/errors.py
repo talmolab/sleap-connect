@@ -32,6 +32,7 @@ BLOB_HASH_MISMATCH = "blob.hash_mismatch"
 JOB_NOT_FOUND = "job.not_found"
 JOB_ALREADY_TERMINAL = "job.already_terminal"
 JOB_SPEC_INVALID = "job.spec_invalid"
+JOB_ACTIVE = "job.active"
 
 # Catch-all for an unexpected worker-side fault.
 INTERNAL = "internal"

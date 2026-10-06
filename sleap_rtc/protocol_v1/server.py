@@ -20,7 +20,7 @@ import json
 import logging
 import secrets
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Dict, Optional, Protocol, Set
+from typing import Any, Awaitable, Callable, Dict, Iterable, Optional, Protocol, Set
 
 import websockets.exceptions
 from websockets.asyncio.server import Server, ServerConnection, serve
@@ -154,6 +154,20 @@ class EventBus:
         for job_id in conn.subscribed_job_ids:
             self._subscribers.get(job_id, set()).discard(conn)
         conn.subscribed_job_ids.clear()
+
+    def drop(self, job_ids: Iterable[str]) -> None:
+        """Forget every subscriber tracked for these job ids.
+
+        For jobs that have just been deleted (`jobs.delete`): there will
+        never be another event to publish for them, so there's nothing to
+        gain from leaving a now-meaningless `job_id` entry (and the
+        connections it references) sitting in `_subscribers`.
+        """
+        for job_id in job_ids:
+            conns = self._subscribers.pop(job_id, None)
+            if conns:
+                for conn in conns:
+                    conn.subscribed_job_ids.discard(job_id)
 
     async def publish(self, job_id: str, event: Event) -> None:
         """Push an event to every connection currently subscribed to `job_id`."""
