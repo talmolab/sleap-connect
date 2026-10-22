@@ -44,6 +44,7 @@ from sleap_rtc.protocol_v1.errors import (
     JOB_SPEC_INVALID,
     ProtocolError,
 )
+from sleap_rtc.jobs.ports import choose_zmq_ports
 from sleap_rtc.protocol_v1.metrics import JobMetricsConsumer, read_training_log_epochs
 from sleap_rtc.protocol_v1.server import Connection, ProtocolV1Server
 
@@ -109,7 +110,7 @@ class JobMethods:
             file_manager: An existing `FileManager` instance, if `fs.mounts`
                 /`fs.list`/`fs.stat`/`fs.read` should be exposed. Omit to
                 leave those methods unregistered.
-            command_builder: An object with `build_command(spec) -> list[str]`.
+            command_builder: An object with `build_command(spec, zmq_ports=None) -> list[str]`.
                 Defaults to the real `CommandBuilder` (builds actual
                 ``sleap-nn`` invocations); tests inject a fake one so they
                 can exercise the full submit → spawn → tail → complete flow
@@ -156,6 +157,12 @@ class JobMethods:
         # between "running" and spawn): honored before spawning, or signalled
         # right after it if the request landed mid-spawn. mode: "stop"/"cancel".
         self._cancel_requested: Dict[str, str] = {}
+        # Running train jobs' metrics consumers, whose controller socket is
+        # how jobs.cancel mode "stop" reaches sleap-nn.
+        self._metrics_consumers: Dict[str, JobMetricsConsumer] = {}
+        # Running jobs a client asked to end ("stop"/"cancel"), so `_finish`
+        # records a nonzero exit as canceled rather than failed.
+        self._end_requested: Dict[str, str] = {}
         # Serializes the "are all of this run's siblings completed yet, and
         # has one of them already chained post-inference?" check-and-act in
         # `_chain_post_inference`, keyed by run id (or job id for a run-less
@@ -241,20 +248,25 @@ class JobMethods:
         finally:
             self._waiting.remove(job_id)
         try:
-            metrics_consumer = self._make_metrics_consumer(job_id, spec)
+            zmq_ports = self._choose_zmq_ports(spec)
+            metrics_consumer = self._make_metrics_consumer(job_id, spec, zmq_ports)
             try:
-                await self._run_job_inner(job_id, spec, metrics_consumer)
+                await self._run_job_inner(job_id, spec, metrics_consumer, zmq_ports)
             finally:
                 # Always torn down, including on an exception mid-run —
                 # ports are fixed (one job at a time per worker), so a
                 # leaked ZMQ bind here would break the *next* job too.
                 if metrics_consumer is not None:
-                    await metrics_consumer.stop()
+                    await self._stop_metrics_consumer(job_id, metrics_consumer)
         finally:
             self.queue.release()
 
     async def _run_job_inner(
-        self, job_id: str, spec, metrics_consumer: Optional[JobMetricsConsumer]
+        self,
+        job_id: str,
+        spec,
+        metrics_consumer: Optional[JobMetricsConsumer],
+        zmq_ports: Optional[Dict[str, int]] = None,
     ) -> None:
         try:
             if await self._honor_early_cancel(job_id):
@@ -280,7 +292,12 @@ class JobMethods:
                 return
             if await self._honor_early_cancel(job_id):
                 return
-            cmd = self._builder.build_command(spec)
+            if zmq_ports is not None:
+                # Before spawning, so a restarted worker can rebind them.
+                await self.store.set_zmq_ports(job_id, zmq_ports)
+                cmd = self._builder.build_command(spec, zmq_ports=zmq_ports)
+            else:
+                cmd = self._builder.build_command(spec)
             log_path = self.log_dir / f"{job_id}.log"
             if metrics_consumer is not None:
                 self._start_metrics_consumer(job_id, metrics_consumer)
@@ -288,10 +305,15 @@ class JobMethods:
                 cmd, job_id=job_id, store=self.store, log_path=log_path
             )
             late_cancel = self._cancel_requested.pop(job_id, None)
-            if late_cancel == "stop":
-                send_stop_signal(process.pid)
-            elif late_cancel is not None:
-                send_cancel_signal(process.pid)
+            if late_cancel is not None:
+                # Just spawned: sleap-nn can't have joined the controller
+                # socket yet, and nothing has trained, so a stop here is a
+                # signal like a cancel.
+                self._end_requested[job_id] = late_cancel
+                if late_cancel == "stop":
+                    send_stop_signal(process.pid)
+                else:
+                    send_cancel_signal(process.pid)
 
             tail_task = asyncio.create_task(
                 self._tail_log(job_id, log_path, lambda: process.returncode is None)
@@ -305,6 +327,7 @@ class JobMethods:
                 tail_task.cancel()
             await self._finish(job_id, spec, log_path, returncode)
         except Exception as e:
+            self._end_requested.pop(job_id, None)
             logging.exception(f"[jobs] Job {job_id} failed with an unexpected error")
             await self.store.update_state(job_id, "failed", error=str(e))
             await self._emit(
@@ -323,7 +346,13 @@ class JobMethods:
     async def _finish(
         self, job_id: str, spec, log_path: Path, returncode: Optional[int]
     ) -> None:
-        """Record a job's terminal state once its process has exited."""
+        """Record a job's terminal state once its process has exited.
+
+        A clean exit is "completed", including a run stopped early over ZMQ.
+        A nonzero exit is "canceled" if a client asked the job to end, else
+        "failed".
+        """
+        end_requested = self._end_requested.pop(job_id, None)
         if returncode == 0:
             blobs = await self._register_result_blobs(job_id, spec, log_path)
             result = {"blobs": blobs}
@@ -344,6 +373,16 @@ class JobMethods:
             # would silently go nowhere.
             await self._emit(job_id, "job.result", result)
             await self._emit(job_id, "job.status", {"state": "completed"})
+        elif end_requested is not None:
+            detail = (
+                "stopped early by request"
+                if end_requested == "stop"
+                else "canceled by request"
+            )
+            await self.store.update_state(job_id, "canceled", error=detail)
+            await self._emit(
+                job_id, "job.status", {"state": "canceled", "detail": detail}
+            )
         else:
             if returncode is None:
                 detail = (
@@ -534,7 +573,11 @@ class JobMethods:
                 # Epochs that finished while no worker was listening, before
                 # the live stream takes over again.
                 await self._backfill_epochs(job_id)
-                metrics_consumer = self._make_metrics_consumer(job_id, record.spec)
+                metrics_consumer = self._make_metrics_consumer(
+                    job_id,
+                    record.spec,
+                    record.zmq_ports or self._configured_zmq_ports(),
+                )
                 try:
                     if metrics_consumer is not None:
                         self._start_metrics_consumer(job_id, metrics_consumer)
@@ -546,7 +589,7 @@ class JobMethods:
                     )
                 finally:
                     if metrics_consumer is not None:
-                        await metrics_consumer.stop()
+                        await self._stop_metrics_consumer(job_id, metrics_consumer)
                 # Anything that slipped between the two (e.g. an epoch ending
                 # right as the live stream was rebinding).
                 await self._backfill_epochs(job_id)
@@ -644,12 +687,16 @@ class JobMethods:
             dest.write_bytes(raw)
             spec.labels_path = str(dest)
 
-    @staticmethod
     def _start_metrics_consumer(
-        job_id: str, metrics_consumer: JobMetricsConsumer
+        self, job_id: str, metrics_consumer: JobMetricsConsumer
     ) -> None:
         """Start a `JobMetricsConsumer`, degrading to "no metrics" instead of
         failing the whole job if its ZMQ sockets can't bind.
+
+        Once started it's registered for the job, so jobs.cancel mode "stop"
+        can reach sleap-nn over its controller socket. That includes a job
+        reattached after a worker restart: sleap-nn's SUB socket reconnects to
+        the rebound controller on its own.
 
         `job.metric`/`job.curve` forwarding is best-effort telemetry, not a
         training-correctness concern — a bind failure (e.g. a stale process
@@ -663,21 +710,46 @@ class JobMethods:
                 f"[jobs] Job {job_id} could not start metrics forwarding — "
                 "continuing without job.metric/job.curve"
             )
+            return
+        self._metrics_consumers[job_id] = metrics_consumer
 
-    def _make_metrics_consumer(self, job_id: str, spec) -> Optional[JobMetricsConsumer]:
-        """Build a `JobMetricsConsumer` for a training job, or None if metrics
-        forwarding isn't configured (`metrics_ports` omitted) or `spec` isn't
-        a `TrainJobSpec` (track/inference jobs have no epoch/loss stream).
+    async def _stop_metrics_consumer(
+        self, job_id: str, metrics_consumer: JobMetricsConsumer
+    ) -> None:
+        """Unregister and tear down a job's `JobMetricsConsumer`."""
+        self._metrics_consumers.pop(job_id, None)
+        await metrics_consumer.stop()
+
+    def _configured_zmq_ports(self) -> Dict[str, int]:
+        """The configured (default 9000/9001) ZMQ ports, every name filled in."""
+        return {**DEFAULT_ZMQ_PORTS, **(self.metrics_ports or {})}
+
+    def _choose_zmq_ports(self, spec) -> Optional[Dict[str, int]]:
+        """The ZMQ ports for a train job about to start: the configured ones
+        if free, else free OS-assigned ones (see `choose_zmq_ports`). None if
+        metrics forwarding is off or `spec` isn't a `TrainJobSpec`.
         """
         if self.metrics_ports is None or not isinstance(spec, TrainJobSpec):
             return None
+        return choose_zmq_ports(self._configured_zmq_ports())
+
+    def _make_metrics_consumer(
+        self, job_id: str, spec, zmq_ports: Optional[Dict[str, int]]
+    ) -> Optional[JobMetricsConsumer]:
+        """Build a `JobMetricsConsumer` for a training job on `zmq_ports`, or
+        None if metrics forwarding isn't configured (`metrics_ports` omitted)
+        or `spec` isn't a `TrainJobSpec` (track/inference jobs have no
+        epoch/loss stream).
+        """
+        if (
+            self.metrics_ports is None
+            or zmq_ports is None
+            or not isinstance(spec, TrainJobSpec)
+        ):
+            return None
         return JobMetricsConsumer(
-            control_port=self.metrics_ports.get(
-                "controller", DEFAULT_ZMQ_PORTS["controller"]
-            ),
-            publish_port=self.metrics_ports.get(
-                "publish", DEFAULT_ZMQ_PORTS["publish"]
-            ),
+            control_port=zmq_ports["controller"],
+            publish_port=zmq_ports["publish"],
             emit=lambda topic, data: self._emit(job_id, topic, data),
             total_epochs=spec.max_epochs,
         )
@@ -852,7 +924,15 @@ class JobMethods:
             and record.process_started_at is not None
             and is_alive(record.pid, record.process_started_at)
         ):
-            if mode == "stop":
+            self._end_requested[job_id] = mode
+            consumer = self._metrics_consumers.get(job_id)
+            if (
+                mode == "stop"
+                and consumer is not None
+                and consumer.request_training_stop()
+            ):
+                pass  # sleap-nn stops at its next batch end and exits cleanly
+            elif mode == "stop":
                 send_stop_signal(record.pid)
             else:
                 send_cancel_signal(record.pid)

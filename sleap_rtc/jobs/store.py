@@ -47,7 +47,8 @@ CREATE TABLE IF NOT EXISTS jobs (
     error TEXT,
     pid INTEGER,
     process_started_at REAL,
-    log_path TEXT
+    log_path TEXT,
+    zmq_ports_json TEXT
 );
 
 CREATE TABLE IF NOT EXISTS job_events (
@@ -60,6 +61,10 @@ CREATE TABLE IF NOT EXISTS job_events (
     FOREIGN KEY (job_id) REFERENCES jobs(job_id)
 );
 """
+
+# Columns added after the first release: (name, type). `connect` adds any
+# missing from an existing database, so an older jobs.sqlite keeps working.
+_ADDED_COLUMNS = (("zmq_ports_json", "TEXT"),)
 
 
 class JobStoreError(Exception):
@@ -89,6 +94,10 @@ class JobRecord:
             reattachment possible — a pipe's read end dies with whichever
             process originally spawned the child, but a file on disk can be
             tailed by a totally different (e.g. post-restart) process.
+        zmq_ports: The ZMQ ports a train job's sleap-nn was launched with
+            (``{"controller": ..., "publish": ...}``), so a restarted worker
+            rebinds the same ones. None for track jobs, jobs run without
+            metrics, and records from before this was stored.
     """
 
     job_id: str
@@ -101,6 +110,7 @@ class JobRecord:
     pid: Optional[int] = None
     process_started_at: Optional[float] = None
     log_path: Optional[str] = None
+    zmq_ports: Optional[Dict[str, int]] = None
 
 
 @dataclass
@@ -159,6 +169,13 @@ class JobStore:
         self._conn = await aiosqlite.connect(self._db_path)
         self._conn.row_factory = aiosqlite.Row
         await self._conn.executescript(_SCHEMA)
+        cursor = await self._conn.execute("PRAGMA table_info(jobs)")
+        existing = {row["name"] for row in await cursor.fetchall()}
+        for name, col_type in _ADDED_COLUMNS:
+            if name not in existing:
+                await self._conn.execute(
+                    f"ALTER TABLE jobs ADD COLUMN {name} {col_type}"
+                )
         await self._conn.commit()
 
     async def close(self) -> None:
@@ -324,6 +341,21 @@ class JobStore:
         assert record is not None
         return record
 
+    async def set_zmq_ports(self, job_id: str, ports: Dict[str, int]) -> None:
+        """Record the ZMQ ports a train job's sleap-nn is launched with.
+
+        Raises:
+            JobStoreError: If the job doesn't exist.
+        """
+        conn = self._require_conn()
+        cursor = await conn.execute(
+            "UPDATE jobs SET zmq_ports_json = ? WHERE job_id = ?",
+            (json.dumps(ports), job_id),
+        )
+        await conn.commit()
+        if cursor.rowcount == 0:
+            raise JobStoreError(f"No such job: {job_id!r}")
+
     async def append_event(self, job_id: str, topic: str, data: dict) -> int:
         """Append an event to a job's durable event log.
 
@@ -460,4 +492,7 @@ class JobStore:
             pid=row["pid"],
             process_started_at=row["process_started_at"],
             log_path=row["log_path"],
+            zmq_ports=(
+                json.loads(row["zmq_ports_json"]) if row["zmq_ports_json"] else None
+            ),
         )
