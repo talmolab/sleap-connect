@@ -1838,3 +1838,97 @@ class TestCancelBeforeSpawn:
         record = await _wait_for_terminal(methods, store, job_id)
         assert record.state == "canceled"
         assert not marker.exists()
+
+
+class TestQueueControl:
+    """Canceling a queued job takes effect right away, a failed model ends
+    the rest of its run, and job summaries say when a job started."""
+
+    @staticmethod
+    def _blocker(go):
+        return [
+            sys.executable,
+            "-c",
+            f"import os, time\nwhile not os.path.exists({str(go)!r}): time.sleep(0.05)",
+        ]
+
+    async def test_canceling_a_queued_job_ends_it_now_and_moves_the_line_up(
+        self, store, spec, tmp_path
+    ):
+        go = tmp_path / "go"
+        methods = _make_methods(store, tmp_path, self._blocker(go))
+        first = (await methods.submit({"spec": spec.to_dict()}, conn=None))["job_id"]
+        await _wait_for_state(store, first, "running")
+        second = (await methods.submit({"spec": spec.to_dict()}, conn=None))["job_id"]
+        third = (await methods.submit({"spec": spec.to_dict()}, conn=None))["job_id"]
+        await asyncio.sleep(0.1)
+        assert methods.queue_position(third) == 2
+
+        await methods.cancel({"job_id": second, "mode": "cancel"}, conn=None)
+
+        # Canceled while the first job is still running, not when its turn comes.
+        record = await store.get_job(second)
+        assert record.state == "canceled"
+        assert methods.queue_position(second) is None
+        assert methods.queue_position(third) == 1
+        events = await store.get_events_since(second)
+        assert [e.data["state"] for e in events if e.topic == "job.status"][-1] == "canceled"
+
+        go.touch()
+        await _wait_for_terminal(methods, store, first)
+        assert (await _wait_for_terminal(methods, store, third)).state == "completed"
+        assert (await store.get_job(second)).state == "canceled"
+
+    async def test_a_failed_model_cancels_the_rest_of_its_run_only(self, store, tmp_path):
+        go = tmp_path / "go"
+        run_a = {"id": "run-a", "index": 0, "count": 2}
+        run_a2 = {"id": "run-a", "index": 1, "count": 2}
+        run_b = {"id": "run-b", "index": 0, "count": 1}
+        # The first model waits for "go", then fails; everything else succeeds.
+        fail_after_go = [
+            sys.executable,
+            "-c",
+            f"import os, sys, time\nwhile not os.path.exists({str(go)!r}): time.sleep(0.05)\nsys.exit(2)",
+        ]
+        methods = _make_methods(store, tmp_path, fail_after_go)
+        a1 = (
+            await methods.submit(
+                {"spec": TrainJobSpec(config_path="/c.yaml", run=run_a).to_dict()}, conn=None
+            )
+        )["job_id"]
+        await _wait_for_state(store, a1, "running")
+        methods._builder = _FakeCommandBuilder([sys.executable, "-c", "pass"])
+        a2 = (
+            await methods.submit(
+                {"spec": TrainJobSpec(config_path="/c.yaml", run=run_a2).to_dict()}, conn=None
+            )
+        )["job_id"]
+        b1 = (
+            await methods.submit(
+                {"spec": TrainJobSpec(config_path="/c.yaml", run=run_b).to_dict()}, conn=None
+            )
+        )["job_id"]
+        await asyncio.sleep(0.1)
+
+        go.touch()
+        assert (await _wait_for_terminal(methods, store, a1)).state == "failed"
+        a2_record = await _wait_for_terminal(methods, store, a2)
+        assert a2_record.state == "canceled"
+        assert "earlier model of this run failed" in a2_record.error
+        assert (await _wait_for_terminal(methods, store, b1)).state == "completed"
+
+    async def test_job_summaries_say_when_a_job_started(self, store, spec, tmp_path):
+        go = tmp_path / "go"
+        methods = _make_methods(store, tmp_path, self._blocker(go))
+        first = (await methods.submit({"spec": spec.to_dict()}, conn=None))["job_id"]
+        await _wait_for_state(store, first, "running")
+        second = (await methods.submit({"spec": spec.to_dict()}, conn=None))["job_id"]
+        await asyncio.sleep(0.3)
+
+        listed = {j["job_id"]: j for j in (await methods.list_jobs({}, conn=None))["jobs"]}
+        assert isinstance(listed[first]["started_at"], float)
+        assert listed[second]["started_at"] is None
+
+        go.touch()
+        await _wait_for_terminal(methods, store, first)
+        await _wait_for_terminal(methods, store, second)
