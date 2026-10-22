@@ -255,8 +255,7 @@ class JobMethods:
                 # ports are fixed (one job at a time per worker), so a
                 # leaked ZMQ bind here would break the *next* job too.
                 if metrics_consumer is not None:
-                    self._metrics_consumers.pop(job_id, None)
-                    await metrics_consumer.stop()
+                    await self._stop_metrics_consumer(job_id, metrics_consumer)
         finally:
             self.queue.release()
 
@@ -289,10 +288,8 @@ class JobMethods:
                 return
             cmd = self._builder.build_command(spec)
             log_path = self.log_dir / f"{job_id}.log"
-            if metrics_consumer is not None and self._start_metrics_consumer(
-                job_id, metrics_consumer
-            ):
-                self._metrics_consumers[job_id] = metrics_consumer
+            if metrics_consumer is not None:
+                self._start_metrics_consumer(job_id, metrics_consumer)
             process = await spawn_detached(
                 cmd, job_id=job_id, store=self.store, log_path=log_path
             )
@@ -577,7 +574,7 @@ class JobMethods:
                     )
                 finally:
                     if metrics_consumer is not None:
-                        await metrics_consumer.stop()
+                        await self._stop_metrics_consumer(job_id, metrics_consumer)
                 # Anything that slipped between the two (e.g. an epoch ending
                 # right as the live stream was rebinding).
                 await self._backfill_epochs(job_id)
@@ -675,12 +672,16 @@ class JobMethods:
             dest.write_bytes(raw)
             spec.labels_path = str(dest)
 
-    @staticmethod
     def _start_metrics_consumer(
-        job_id: str, metrics_consumer: JobMetricsConsumer
-    ) -> bool:
+        self, job_id: str, metrics_consumer: JobMetricsConsumer
+    ) -> None:
         """Start a `JobMetricsConsumer`, degrading to "no metrics" instead of
         failing the whole job if its ZMQ sockets can't bind.
+
+        Once started it's registered for the job, so jobs.cancel mode "stop"
+        can reach sleap-nn over its controller socket. That includes a job
+        reattached after a worker restart: sleap-nn's SUB socket reconnects to
+        the rebound controller on its own.
 
         `job.metric`/`job.curve` forwarding is best-effort telemetry, not a
         training-correctness concern — a bind failure (e.g. a stale process
@@ -694,8 +695,15 @@ class JobMethods:
                 f"[jobs] Job {job_id} could not start metrics forwarding — "
                 "continuing without job.metric/job.curve"
             )
-            return False
-        return True
+            return
+        self._metrics_consumers[job_id] = metrics_consumer
+
+    async def _stop_metrics_consumer(
+        self, job_id: str, metrics_consumer: JobMetricsConsumer
+    ) -> None:
+        """Unregister and tear down a job's `JobMetricsConsumer`."""
+        self._metrics_consumers.pop(job_id, None)
+        await metrics_consumer.stop()
 
     def _make_metrics_consumer(self, job_id: str, spec) -> Optional[JobMetricsConsumer]:
         """Build a `JobMetricsConsumer` for a training job, or None if metrics

@@ -873,6 +873,42 @@ class TestStopEarly:
         record = await _wait_for_terminal(methods, store, job_id, timeout=10)
         assert record.state == "completed"
 
+    async def test_stop_reaches_a_job_reattached_after_a_worker_restart(
+        self, store, tmp_path, spec
+    ):
+        # sleap-nn outlives a worker restart; the new worker rebinds the
+        # controller socket and sleap-nn's SUB reconnects on its own, so stop
+        # still arrives over ZMQ (the fake exits 1 on SIGINT).
+        from sleap_rtc.jobs.process import reattach_all
+
+        ports = {
+            "controller": self._CONTROL_PORT + 2,
+            "publish": self._PUBLISH_PORT + 2,
+        }
+        cmd = self._fake_trainer_cmd(ports["controller"])
+        first = _make_methods(store, tmp_path, cmd, metrics_ports=ports)
+        job_id = (await first.submit({"spec": spec.to_dict()}, conn=None))["job_id"]
+        deadline = time.monotonic() + 10
+        while not any(
+            ev.topic == "job.log" for ev in await store.get_events_since(job_id, 0)
+        ):
+            assert time.monotonic() < deadline, "job never logged its first line"
+            await asyncio.sleep(0.05)
+        task = first._tasks[job_id]
+        task.cancel()  # the first worker goes away; the job keeps running
+        await asyncio.gather(task, return_exceptions=True)
+
+        outcomes = await reattach_all(store)
+        assert outcomes == {job_id: "reattached"}
+        second = _make_methods(store, tmp_path, cmd, metrics_ports=ports)
+        second.resume_reattached(outcomes)
+        await asyncio.sleep(1.0)  # SUB reconnect to the rebound controller
+
+        await second.cancel({"job_id": job_id, "mode": "stop"}, conn=None)
+
+        record = await _wait_for_terminal(second, store, job_id, timeout=10)
+        assert record.state == "completed"
+
     async def test_stop_without_a_control_socket_falls_back_and_records_canceled(
         self, store, tmp_path, spec
     ):
