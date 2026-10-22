@@ -821,6 +821,107 @@ class TestFsMethods:
         assert "fs.read" not in server._methods
 
 
+class TestStopEarly:
+    """jobs.cancel mode "stop" ends training the way local Stop Early does:
+    a ZMQ ``{"command": "stop"}`` on the job's controller socket, which
+    sleap-nn's TrainingControllerZMQ turns into ``trainer.should_stop`` so
+    the run finishes cleanly (exit 0, model saved). SIGINT made Lightning
+    exit 1, so the job was recorded as failed with no model.
+    """
+
+    _CONTROL_PORT = 19300
+    _PUBLISH_PORT = 19301
+
+    def _fake_trainer_cmd(self, control_port):
+        # Like sleap-nn: SUB-connect to the controller port and stop when
+        # told. SIGINT exits 1, as Lightning does, so a passing test proves
+        # the stop arrived over ZMQ, not as a signal.
+        script = (
+            "import json, signal, sys, zmq; "
+            "signal.signal(signal.SIGINT, lambda *a: sys.exit(1)); "
+            "ctx = zmq.Context(); "
+            "sock = ctx.socket(zmq.SUB); "
+            "sock.setsockopt_string(zmq.SUBSCRIBE, ''); "
+            f"sock.connect('tcp://127.0.0.1:{control_port}'); "
+            "print('training', flush=True)\n"
+            "while True:\n"
+            "    if sock.poll(100):\n"
+            "        if json.loads(sock.recv_string()).get('command') == 'stop':\n"
+            "            print('stopping early', flush=True); sys.exit(0)\n"
+        )
+        return [sys.executable, "-c", script]
+
+    async def test_stop_sends_zmq_stop_and_the_job_completes(
+        self, store, tmp_path, spec
+    ):
+        methods = _make_methods(
+            store,
+            tmp_path,
+            self._fake_trainer_cmd(self._CONTROL_PORT),
+            metrics_ports={
+                "controller": self._CONTROL_PORT,
+                "publish": self._PUBLISH_PORT,
+            },
+        )
+        result = await methods.submit({"spec": spec.to_dict()}, conn=None)
+        job_id = result["job_id"]
+        await _wait_for_state(store, job_id, "running")
+        await asyncio.sleep(0.5)  # ZMQ slow-joiner: let the SUB connect
+
+        await methods.cancel({"job_id": job_id, "mode": "stop"}, conn=None)
+
+        record = await _wait_for_terminal(methods, store, job_id, timeout=10)
+        assert record.state == "completed"
+
+    async def test_stop_without_a_control_socket_falls_back_and_records_canceled(
+        self, store, tmp_path, spec
+    ):
+        # No metrics_ports: nothing to send ZMQ on, so stop falls back to
+        # SIGINT. The job ends nonzero, but the user asked for it to end, so
+        # it's "canceled", not "failed".
+        methods = _make_methods(
+            store, tmp_path, [sys.executable, "-c", "import time; time.sleep(30)"]
+        )
+        result = await methods.submit({"spec": spec.to_dict()}, conn=None)
+        job_id = result["job_id"]
+        await _wait_for_state(store, job_id, "running")
+
+        await methods.cancel({"job_id": job_id, "mode": "stop"}, conn=None)
+
+        record = await _wait_for_terminal(methods, store, job_id, timeout=5)
+        assert record.state == "canceled"
+        assert "stopped" in record.error
+
+    async def test_cancel_of_a_running_job_records_canceled(
+        self, store, tmp_path, spec
+    ):
+        methods = _make_methods(
+            store, tmp_path, [sys.executable, "-c", "import time; time.sleep(30)"]
+        )
+        result = await methods.submit({"spec": spec.to_dict()}, conn=None)
+        job_id = result["job_id"]
+        await _wait_for_state(store, job_id, "running")
+
+        await methods.cancel({"job_id": job_id, "mode": "cancel"}, conn=None)
+
+        record = await _wait_for_terminal(methods, store, job_id, timeout=5)
+        assert record.state == "canceled"
+        events = await store.get_events_since(job_id)
+        statuses = [e.data for e in events if e.topic == "job.status"]
+        assert statuses[-1]["state"] == "canceled"
+
+    async def test_a_crash_with_no_stop_requested_is_still_failed(
+        self, store, tmp_path, spec
+    ):
+        methods = _make_methods(
+            store, tmp_path, [sys.executable, "-c", "import sys; sys.exit(3)"]
+        )
+        result = await methods.submit({"spec": spec.to_dict()}, conn=None)
+        record = await _wait_for_terminal(methods, store, result["job_id"])
+        assert record.state == "failed"
+        assert record.error == "exit code 3"
+
+
 class TestMetricsWiring:
     """End-to-end: a real ZMQ-publishing fake train job, through
     jobs.submit, emits job.metric events alongside the usual job.log/

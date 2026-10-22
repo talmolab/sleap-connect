@@ -156,6 +156,12 @@ class JobMethods:
         # between "running" and spawn): honored before spawning, or signalled
         # right after it if the request landed mid-spawn. mode: "stop"/"cancel".
         self._cancel_requested: Dict[str, str] = {}
+        # Running train jobs' metrics consumers, whose controller socket is
+        # how jobs.cancel mode "stop" reaches sleap-nn.
+        self._metrics_consumers: Dict[str, JobMetricsConsumer] = {}
+        # Running jobs a client asked to end ("stop"/"cancel"), so `_finish`
+        # records a nonzero exit as canceled rather than failed.
+        self._end_requested: Dict[str, str] = {}
         # Serializes the "are all of this run's siblings completed yet, and
         # has one of them already chained post-inference?" check-and-act in
         # `_chain_post_inference`, keyed by run id (or job id for a run-less
@@ -249,6 +255,7 @@ class JobMethods:
                 # ports are fixed (one job at a time per worker), so a
                 # leaked ZMQ bind here would break the *next* job too.
                 if metrics_consumer is not None:
+                    self._metrics_consumers.pop(job_id, None)
                     await metrics_consumer.stop()
         finally:
             self.queue.release()
@@ -282,16 +289,23 @@ class JobMethods:
                 return
             cmd = self._builder.build_command(spec)
             log_path = self.log_dir / f"{job_id}.log"
-            if metrics_consumer is not None:
-                self._start_metrics_consumer(job_id, metrics_consumer)
+            if metrics_consumer is not None and self._start_metrics_consumer(
+                job_id, metrics_consumer
+            ):
+                self._metrics_consumers[job_id] = metrics_consumer
             process = await spawn_detached(
                 cmd, job_id=job_id, store=self.store, log_path=log_path
             )
             late_cancel = self._cancel_requested.pop(job_id, None)
-            if late_cancel == "stop":
-                send_stop_signal(process.pid)
-            elif late_cancel is not None:
-                send_cancel_signal(process.pid)
+            if late_cancel is not None:
+                # Just spawned: sleap-nn can't have joined the controller
+                # socket yet, and nothing has trained, so a stop here is a
+                # signal like a cancel.
+                self._end_requested[job_id] = late_cancel
+                if late_cancel == "stop":
+                    send_stop_signal(process.pid)
+                else:
+                    send_cancel_signal(process.pid)
 
             tail_task = asyncio.create_task(
                 self._tail_log(job_id, log_path, lambda: process.returncode is None)
@@ -305,6 +319,7 @@ class JobMethods:
                 tail_task.cancel()
             await self._finish(job_id, spec, log_path, returncode)
         except Exception as e:
+            self._end_requested.pop(job_id, None)
             logging.exception(f"[jobs] Job {job_id} failed with an unexpected error")
             await self.store.update_state(job_id, "failed", error=str(e))
             await self._emit(
@@ -323,7 +338,13 @@ class JobMethods:
     async def _finish(
         self, job_id: str, spec, log_path: Path, returncode: Optional[int]
     ) -> None:
-        """Record a job's terminal state once its process has exited."""
+        """Record a job's terminal state once its process has exited.
+
+        A clean exit is "completed", including a run stopped early over ZMQ.
+        A nonzero exit is "canceled" if a client asked the job to end, else
+        "failed".
+        """
+        end_requested = self._end_requested.pop(job_id, None)
         if returncode == 0:
             blobs = await self._register_result_blobs(job_id, spec, log_path)
             result = {"blobs": blobs}
@@ -344,6 +365,16 @@ class JobMethods:
             # would silently go nowhere.
             await self._emit(job_id, "job.result", result)
             await self._emit(job_id, "job.status", {"state": "completed"})
+        elif end_requested is not None:
+            detail = (
+                "stopped early by request"
+                if end_requested == "stop"
+                else "canceled by request"
+            )
+            await self.store.update_state(job_id, "canceled", error=detail)
+            await self._emit(
+                job_id, "job.status", {"state": "canceled", "detail": detail}
+            )
         else:
             if returncode is None:
                 detail = (
@@ -647,7 +678,7 @@ class JobMethods:
     @staticmethod
     def _start_metrics_consumer(
         job_id: str, metrics_consumer: JobMetricsConsumer
-    ) -> None:
+    ) -> bool:
         """Start a `JobMetricsConsumer`, degrading to "no metrics" instead of
         failing the whole job if its ZMQ sockets can't bind.
 
@@ -663,6 +694,8 @@ class JobMethods:
                 f"[jobs] Job {job_id} could not start metrics forwarding — "
                 "continuing without job.metric/job.curve"
             )
+            return False
+        return True
 
     def _make_metrics_consumer(self, job_id: str, spec) -> Optional[JobMetricsConsumer]:
         """Build a `JobMetricsConsumer` for a training job, or None if metrics
@@ -852,7 +885,15 @@ class JobMethods:
             and record.process_started_at is not None
             and is_alive(record.pid, record.process_started_at)
         ):
-            if mode == "stop":
+            self._end_requested[job_id] = mode
+            consumer = self._metrics_consumers.get(job_id)
+            if (
+                mode == "stop"
+                and consumer is not None
+                and consumer.request_training_stop()
+            ):
+                pass  # sleap-nn stops at its next batch end and exits cleanly
+            elif mode == "stop":
                 send_stop_signal(record.pid)
             else:
                 send_cancel_signal(record.pid)

@@ -225,6 +225,21 @@ class JobMetricsConsumer:
         self._reporter.start_progress_listener_task(_SinkChannel(self._on_raw_message))
         self._emit_task = asyncio.create_task(self._emit_loop())
 
+    def request_training_stop(self) -> bool:
+        """Ask sleap-nn to stop training early, as local Stop Early does.
+
+        Publishes ``{"command": "stop"}`` on the controller socket, which
+        sleap-nn's ``TrainingControllerZMQ`` turns into
+        ``trainer.should_stop`` at the next batch end, so the run finishes
+        cleanly (exit 0, model saved). Returns False if the control socket
+        isn't up (never started, or its bind failed), so the caller can
+        fall back to a signal.
+        """
+        if self._reporter.ctrl_socket is None:
+            return False
+        self._reporter.send_control_message(json.dumps({"command": "stop"}))
+        return True
+
     async def stop(self) -> None:
         """Stop the emit loop and tear down the ZMQ sockets.
 
