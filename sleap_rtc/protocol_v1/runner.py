@@ -12,10 +12,10 @@ import importlib.metadata
 import logging
 import sys
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from http.server import ThreadingHTTPServer
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from websockets.asyncio.server import Server
 
@@ -112,6 +112,8 @@ class WorkerServer:
     iroh_endpoint: Optional[Any] = None
     _iroh_serve_task: Optional[asyncio.Task] = None
     _iroh_live_task: Optional[asyncio.Task] = None
+    # Jobs a previous worker left waiting, queued again at startup.
+    requeued_job_ids: List[str] = field(default_factory=list)
 
     async def close(self) -> None:
         """Stop listening and close the job store."""
@@ -303,6 +305,8 @@ async def start_worker_server(
         raise
 
     job_methods.resume_reattached(reattach_outcomes)
+    # After the reattached jobs take the slot, so these wait behind them.
+    requeued = await job_methods.resume_queued()
 
     return WorkerServer(
         server=server,
@@ -318,6 +322,7 @@ async def start_worker_server(
         ws_server=ws_server,
         data_dir=data_dir,
         reattach_outcomes=reattach_outcomes,
+        requeued_job_ids=requeued,
         iroh_endpoint=iroh_endpoint,
         _iroh_serve_task=iroh_serve_task,
         _iroh_live_task=iroh_live_task,

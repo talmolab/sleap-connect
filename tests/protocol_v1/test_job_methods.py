@@ -1932,3 +1932,65 @@ class TestQueueControl:
         go.touch()
         await _wait_for_terminal(methods, store, first)
         await _wait_for_terminal(methods, store, second)
+
+
+class TestResumeQueued:
+    """Jobs still waiting when the worker went away are queued again, in
+    submission order, by the next worker, rather than sitting "queued" forever."""
+
+    async def _restart_with_one_running_two_queued(self, store, spec, tmp_path):
+        from sleap_rtc.jobs.process import reattach_all
+
+        go = tmp_path / "go"
+        blocker = [
+            sys.executable,
+            "-c",
+            f"import os, time\nwhile not os.path.exists({str(go)!r}): time.sleep(0.05)",
+        ]
+        first = _make_methods(store, tmp_path, blocker)
+        running = (await first.submit({"spec": spec.to_dict()}, conn=None))["job_id"]
+        await _wait_for_state(store, running, "running")
+        q1 = (await first.submit({"spec": spec.to_dict()}, conn=None))["job_id"]
+        q2 = (await first.submit({"spec": spec.to_dict()}, conn=None))["job_id"]
+        await asyncio.sleep(0.1)
+        # The first worker goes away: its tasks die, the running process lives on.
+        tasks = list(first._tasks.values())
+        for t in tasks:
+            t.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        assert (await store.get_job(q1)).state == "queued"
+
+        outcomes = await reattach_all(store)
+        second = _make_methods(store, tmp_path, [sys.executable, "-c", "pass"])
+        second.resume_reattached(outcomes)
+        await second.resume_queued()
+        return second, go, running, q1, q2
+
+    async def test_queued_jobs_run_again_in_order_after_the_reattached_one(
+        self, store, spec, tmp_path
+    ):
+        second, go, running, q1, q2 = await self._restart_with_one_running_two_queued(
+            store, spec, tmp_path
+        )
+        await asyncio.sleep(0.2)
+        # Still behind the reattached job, in their original order.
+        assert (await store.get_job(q1)).state == "queued"
+        assert second.queue_position(q1) == 1
+        assert second.queue_position(q2) == 2
+
+        go.touch()
+        await _wait_for_terminal(second, store, running)
+        assert (await _wait_for_terminal(second, store, q1)).state == "completed"
+        assert (await _wait_for_terminal(second, store, q2)).state == "completed"
+
+    async def test_a_requeued_job_can_be_canceled(self, store, spec, tmp_path):
+        second, go, running, q1, q2 = await self._restart_with_one_running_two_queued(
+            store, spec, tmp_path
+        )
+        await asyncio.sleep(0.2)
+        await second.cancel({"job_id": q1, "mode": "cancel"}, conn=None)
+        assert (await store.get_job(q1)).state == "canceled"
+        assert second.queue_position(q2) == 1
+        go.touch()
+        await _wait_for_terminal(second, store, running)
+        assert (await _wait_for_terminal(second, store, q2)).state == "completed"

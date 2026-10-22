@@ -595,6 +595,37 @@ class JobMethods:
             if outcome in ("reattached", "exited"):
                 self._tasks[job_id] = asyncio.create_task(self._run_reattached(job_id))
 
+    async def resume_queued(self) -> List[str]:
+        """Queue again the jobs a previous worker left waiting.
+
+        The queue itself lives in memory (a task per job waiting for the slot),
+        so a restart loses it while the jobs' records stay "queued" in the
+        store: without this they'd never run, and a cancel couldn't find them.
+        Re-queues them in submission order. Call after `resume_reattached`, so
+        a job still running from before keeps the slot and these wait behind
+        it.
+
+        Returns:
+            The re-queued job ids, in queue order.
+        """
+        waiting = sorted(
+            (
+                r
+                for r in await self.store.list_jobs()
+                if r.state == "queued" and r.job_id not in self._tasks
+            ),
+            key=lambda r: r.created_at,
+        )
+        for record in waiting:
+            self._tasks[record.job_id] = asyncio.create_task(
+                self._run_job(record.job_id, record.spec)
+            )
+        if waiting:
+            logging.info(
+                f"[jobs] Re-queued {len(waiting)} job(s) left waiting by a previous worker"
+            )
+        return [r.job_id for r in waiting]
+
     async def _run_reattached(self, job_id: str) -> None:
         try:
             # Holds the queue slot like any running job, so a new submission
