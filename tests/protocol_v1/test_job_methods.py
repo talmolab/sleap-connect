@@ -35,7 +35,7 @@ class _FakeCommandBuilder:
     def __init__(self, cmd):
         self._cmd = cmd
 
-    def build_command(self, spec):
+    def build_command(self, spec, zmq_ports=None):
         return self._cmd
 
 
@@ -832,6 +832,18 @@ class TestStopEarly:
     _CONTROL_PORT = 19300
     _PUBLISH_PORT = 19301
 
+    class _PortsBuilder:
+        """Builds the fake trainer on the controller port the job was given,
+        as the real builder passes it to sleap-nn."""
+
+        def __init__(self, make_cmd):
+            self._make_cmd = make_cmd
+            self.ports = None
+
+        def build_command(self, spec, zmq_ports=None):
+            self.ports = zmq_ports
+            return self._make_cmd(zmq_ports["controller"])
+
     def _fake_trainer_cmd(self, control_port):
         # Like sleap-nn: SUB-connect to the controller port and stop when
         # told. SIGINT exits 1, as Lightning does, so a passing test proves
@@ -908,6 +920,38 @@ class TestStopEarly:
 
         record = await _wait_for_terminal(second, store, job_id, timeout=10)
         assert record.state == "completed"
+
+    async def test_busy_default_ports_move_the_job_to_free_ones(
+        self, store, tmp_path, spec
+    ):
+        # Something else (e.g. local training) holds the default controller
+        # port: the job gets free ports instead, sleap-nn is launched on them,
+        # they're saved on the job, and Stop still reaches it over ZMQ.
+        ports = {"controller": self._CONTROL_PORT + 4, "publish": self._PUBLISH_PORT + 4}
+        ctx = zmq.Context()
+        blocker = ctx.socket(zmq.PUB)
+        blocker.bind(f"tcp://127.0.0.1:{ports['controller']}")
+        try:
+            builder = self._PortsBuilder(self._fake_trainer_cmd)
+            methods = _make_methods(store, tmp_path, None, metrics_ports=ports)
+            methods._builder = builder
+            job_id = (await methods.submit({"spec": spec.to_dict()}, conn=None))[
+                "job_id"
+            ]
+            await _wait_for_state(store, job_id, "running")
+            await asyncio.sleep(0.5)  # ZMQ slow-joiner
+
+            assert builder.ports is not None
+            assert set(builder.ports.values()).isdisjoint(ports.values())
+            assert (await store.get_job(job_id)).zmq_ports == builder.ports
+
+            await methods.cancel({"job_id": job_id, "mode": "stop"}, conn=None)
+            record = await _wait_for_terminal(methods, store, job_id, timeout=10)
+            assert record.state == "completed"
+        finally:
+            blocker.setsockopt(zmq.LINGER, 0)
+            blocker.close()
+            ctx.term()
 
     async def test_stop_without_a_control_socket_falls_back_and_records_canceled(
         self, store, tmp_path, spec
@@ -1035,7 +1079,7 @@ class TestMetricsWiring:
         # No metrics_ports passed — the default used by every other test in
         # this file. Must not raise or bind anything.
         methods = _make_methods(store, tmp_path, [sys.executable, "-c", "pass"])
-        assert methods._make_metrics_consumer("job-1", spec) is None
+        assert methods._choose_zmq_ports(spec) is None
 
     async def test_job_still_completes_when_metrics_port_is_already_bound(
         self, store, tmp_path, spec
@@ -1271,7 +1315,7 @@ class _CkptAwareBuilder:
     def __init__(self, script):
         self._script = script
 
-    def build_command(self, spec):
+    def build_command(self, spec, zmq_ports=None):
         return [sys.executable, "-c", self._script(spec.ckpt_dir)]
 
 
@@ -1351,7 +1395,7 @@ class _TrainThenTrackBuilder:
     def __init__(self, train_script=_write_run):
         self._train_script = train_script
 
-    def build_command(self, spec):
+    def build_command(self, spec, zmq_ports=None):
         if isinstance(spec, TrainJobSpec):
             return [sys.executable, "-c", self._train_script(spec.ckpt_dir)]
         return [sys.executable, "-c", "pass"]

@@ -261,3 +261,48 @@ class TestPersistence:
         assert record is not None
         assert record.state == "running"
         assert [e.data["line"] for e in events] == ["hello"]
+
+
+class TestZmqPorts:
+    async def test_set_zmq_ports_round_trips(self, store, spec):
+        await store.create_job("job-p", spec)
+        await store.set_zmq_ports("job-p", {"controller": 9100, "publish": 9101})
+        record = await store.get_job("job-p")
+        assert record.zmq_ports == {"controller": 9100, "publish": 9101}
+
+    async def test_zmq_ports_default_to_none(self, store, spec):
+        await store.create_job("job-q", spec)
+        assert (await store.get_job("job-q")).zmq_ports is None
+
+    async def test_set_zmq_ports_on_unknown_job_raises(self, store):
+        with pytest.raises(JobStoreError):
+            await store.set_zmq_ports("nope", {"controller": 1, "publish": 2})
+
+    async def test_an_older_database_gains_the_column(self, tmp_path, spec):
+        # A jobs.sqlite from before zmq_ports existed keeps working.
+        import sqlite3
+
+        db = tmp_path / "old.sqlite"
+        conn = sqlite3.connect(db)
+        conn.executescript("""
+            CREATE TABLE jobs (
+                job_id TEXT PRIMARY KEY, spec_json TEXT NOT NULL,
+                state TEXT NOT NULL, created_at REAL NOT NULL,
+                updated_at REAL NOT NULL, result_json TEXT, error TEXT,
+                pid INTEGER, process_started_at REAL, log_path TEXT
+            );
+            """)
+        conn.execute(
+            "INSERT INTO jobs (job_id, spec_json, state, created_at, updated_at)"
+            " VALUES (?, ?, 'completed', 0, 0)",
+            ("old-job", spec.to_json()),
+        )
+        conn.commit()
+        conn.close()
+
+        async with JobStore(db) as store:
+            old = await store.get_job("old-job")
+            assert old.zmq_ports is None
+            await store.create_job("new-job", spec)
+            await store.set_zmq_ports("new-job", {"controller": 9200, "publish": 9201})
+            assert (await store.get_job("new-job")).zmq_ports["publish"] == 9201

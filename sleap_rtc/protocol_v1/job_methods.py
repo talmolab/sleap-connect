@@ -44,6 +44,7 @@ from sleap_rtc.protocol_v1.errors import (
     JOB_SPEC_INVALID,
     ProtocolError,
 )
+from sleap_rtc.jobs.ports import choose_zmq_ports
 from sleap_rtc.protocol_v1.metrics import JobMetricsConsumer, read_training_log_epochs
 from sleap_rtc.protocol_v1.server import Connection, ProtocolV1Server
 
@@ -109,7 +110,7 @@ class JobMethods:
             file_manager: An existing `FileManager` instance, if `fs.mounts`
                 /`fs.list`/`fs.stat`/`fs.read` should be exposed. Omit to
                 leave those methods unregistered.
-            command_builder: An object with `build_command(spec) -> list[str]`.
+            command_builder: An object with `build_command(spec, zmq_ports=None) -> list[str]`.
                 Defaults to the real `CommandBuilder` (builds actual
                 ``sleap-nn`` invocations); tests inject a fake one so they
                 can exercise the full submit → spawn → tail → complete flow
@@ -247,9 +248,10 @@ class JobMethods:
         finally:
             self._waiting.remove(job_id)
         try:
-            metrics_consumer = self._make_metrics_consumer(job_id, spec)
+            zmq_ports = self._choose_zmq_ports(spec)
+            metrics_consumer = self._make_metrics_consumer(job_id, spec, zmq_ports)
             try:
-                await self._run_job_inner(job_id, spec, metrics_consumer)
+                await self._run_job_inner(job_id, spec, metrics_consumer, zmq_ports)
             finally:
                 # Always torn down, including on an exception mid-run —
                 # ports are fixed (one job at a time per worker), so a
@@ -260,7 +262,11 @@ class JobMethods:
             self.queue.release()
 
     async def _run_job_inner(
-        self, job_id: str, spec, metrics_consumer: Optional[JobMetricsConsumer]
+        self,
+        job_id: str,
+        spec,
+        metrics_consumer: Optional[JobMetricsConsumer],
+        zmq_ports: Optional[Dict[str, int]] = None,
     ) -> None:
         try:
             if await self._honor_early_cancel(job_id):
@@ -286,7 +292,12 @@ class JobMethods:
                 return
             if await self._honor_early_cancel(job_id):
                 return
-            cmd = self._builder.build_command(spec)
+            if zmq_ports is not None:
+                # Before spawning, so a restarted worker can rebind them.
+                await self.store.set_zmq_ports(job_id, zmq_ports)
+                cmd = self._builder.build_command(spec, zmq_ports=zmq_ports)
+            else:
+                cmd = self._builder.build_command(spec)
             log_path = self.log_dir / f"{job_id}.log"
             if metrics_consumer is not None:
                 self._start_metrics_consumer(job_id, metrics_consumer)
@@ -562,7 +573,11 @@ class JobMethods:
                 # Epochs that finished while no worker was listening, before
                 # the live stream takes over again.
                 await self._backfill_epochs(job_id)
-                metrics_consumer = self._make_metrics_consumer(job_id, record.spec)
+                metrics_consumer = self._make_metrics_consumer(
+                    job_id,
+                    record.spec,
+                    record.zmq_ports or self._configured_zmq_ports(),
+                )
                 try:
                     if metrics_consumer is not None:
                         self._start_metrics_consumer(job_id, metrics_consumer)
@@ -705,20 +720,36 @@ class JobMethods:
         self._metrics_consumers.pop(job_id, None)
         await metrics_consumer.stop()
 
-    def _make_metrics_consumer(self, job_id: str, spec) -> Optional[JobMetricsConsumer]:
-        """Build a `JobMetricsConsumer` for a training job, or None if metrics
-        forwarding isn't configured (`metrics_ports` omitted) or `spec` isn't
-        a `TrainJobSpec` (track/inference jobs have no epoch/loss stream).
+    def _configured_zmq_ports(self) -> Dict[str, int]:
+        """The configured (default 9000/9001) ZMQ ports, every name filled in."""
+        return {**DEFAULT_ZMQ_PORTS, **(self.metrics_ports or {})}
+
+    def _choose_zmq_ports(self, spec) -> Optional[Dict[str, int]]:
+        """The ZMQ ports for a train job about to start: the configured ones
+        if free, else free OS-assigned ones (see `choose_zmq_ports`). None if
+        metrics forwarding is off or `spec` isn't a `TrainJobSpec`.
         """
         if self.metrics_ports is None or not isinstance(spec, TrainJobSpec):
             return None
+        return choose_zmq_ports(self._configured_zmq_ports())
+
+    def _make_metrics_consumer(
+        self, job_id: str, spec, zmq_ports: Optional[Dict[str, int]]
+    ) -> Optional[JobMetricsConsumer]:
+        """Build a `JobMetricsConsumer` for a training job on `zmq_ports`, or
+        None if metrics forwarding isn't configured (`metrics_ports` omitted)
+        or `spec` isn't a `TrainJobSpec` (track/inference jobs have no
+        epoch/loss stream).
+        """
+        if (
+            self.metrics_ports is None
+            or zmq_ports is None
+            or not isinstance(spec, TrainJobSpec)
+        ):
+            return None
         return JobMetricsConsumer(
-            control_port=self.metrics_ports.get(
-                "controller", DEFAULT_ZMQ_PORTS["controller"]
-            ),
-            publish_port=self.metrics_ports.get(
-                "publish", DEFAULT_ZMQ_PORTS["publish"]
-            ),
+            control_port=zmq_ports["controller"],
+            publish_port=zmq_ports["publish"],
             emit=lambda topic, data: self._emit(job_id, topic, data),
             total_epochs=spec.max_epochs,
         )
