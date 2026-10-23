@@ -460,7 +460,10 @@ asyncio.run(main())  # exits with that task still pending, like serve shutting d
             assert psutil.Process(pid).status() != psutil.STATUS_ZOMBIE
             assert not (tmp_path / "j1.exit").exists()
         finally:
+            # Kill the job and its child (cross-platform: no killpg on Windows).
             try:
-                os.killpg(pid, signal.SIGKILL)
-            except ProcessLookupError:
+                job = psutil.Process(pid)
+                for proc in [*job.children(recursive=True), job]:
+                    proc.kill()
+            except psutil.NoSuchProcess:
                 pass
