@@ -25,6 +25,7 @@ from sleap_rtc.protocol_v1.errors import (
     AUTH_PAIRING_EXPIRED,
     AUTH_REQUIRED,
     AUTH_UNTRUSTED,
+    CLIENTS_BAD_NAME,
     ProtocolError,
 )
 from sleap_rtc.protocol_v1.identity import WorkerIdentity
@@ -59,6 +60,7 @@ class AuthMethods:
         server.register("pair.claim", self.pair_claim)
         server.register("auth.prove", self.auth_prove)
         server.register("clients.list", self.clients_list)
+        server.register("clients.rename", self.clients_rename)
         server.on_disconnect(self._record_disconnect)
 
     async def pair_claim(self, params: dict, conn: Connection) -> dict:
@@ -95,6 +97,19 @@ class AuthMethods:
                 for d in self.trust_store.list_devices()
             ]
         }
+
+    async def clients_rename(self, params: dict, conn: Connection) -> dict:
+        """Handle `clients.rename` — set the caller's own device name now.
+
+        A device also reports its name with every hello; this applies a
+        rename without waiting for the next connection. Only ever the
+        caller's own entry.
+        """
+        name = params.get("name")
+        if not isinstance(name, str) or not name.strip():
+            raise ProtocolError(CLIENTS_BAD_NAME, "name must be a non-empty string")
+        self.trust_store.record_seen(conn.peer_node_id, {"device_name": name})
+        return {}
 
     def _record_disconnect(self, conn: Connection) -> None:
         """Last seen = when a paired device last connected or disconnected."""

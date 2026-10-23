@@ -213,7 +213,12 @@ class TestClientsList:
         await ws.send(
             Hello(
                 proto={"min": 1, "max": 1},
-                agent={"name": "sleap-app", "version": "0.1.2", "platform": "tauri", "device_name": name},
+                agent={
+                    "name": "sleap-app",
+                    "version": "0.1.2",
+                    "platform": "tauri",
+                    "device_name": name,
+                },
                 node_id=node_id,
                 nonce="client-nonce",
             ).to_json()
@@ -266,4 +271,23 @@ class TestClientsList:
         ws, _ = await _hello(port, node_id)
         reply = await _call(ws, 1, "clients.list")
         assert reply.error["code"] == "auth.required"
+        await ws.close()
+
+    async def test_clients_rename_sets_only_your_own_name(
+        self, running_server, identity, trust_store, pending_pairings
+    ):
+        _server, port = running_server
+        _priv, node_id = _client_identity()
+        ticket = pending_pairings.create(identity.node_id, [f"ws://127.0.0.1:{port}"])
+        ws, _ = await self._hello_named(port, node_id, "Old name")
+        await _call(ws, 1, "pair.claim", {"secret": ticket.secret, "node_id": node_id})
+        trust_store.add_trusted("other", {"device_name": "Other"})
+
+        reply = await _call(ws, 2, "clients.rename", {"name": "Lab iMac"})
+        bad = await _call(ws, 3, "clients.rename", {"name": "  "})
+
+        assert reply.result == {}
+        assert bad.error["code"] == "clients.bad_name"
+        names = {d.node_id: d.name for d in trust_store.list_devices()}
+        assert names == {node_id: "Lab iMac", "other": "Other"}
         await ws.close()
