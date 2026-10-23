@@ -48,14 +48,23 @@ class TestTrustStore:
 class TestPairedDevices:
     """What's recorded about each paired device, and the old JSON import."""
 
-    AGENT = {"name": "sleap-app", "version": "0.1.2", "platform": "tauri", "device_name": "Lab iMac"}
+    AGENT = {
+        "name": "sleap-app",
+        "version": "0.1.2",
+        "platform": "tauri",
+        "device_name": "Lab iMac",
+    }
 
     def test_pairing_records_name_platform_version_and_times(self, tmp_path):
         store = TrustStore(tmp_path / "devices.sqlite")
         store.add_trusted("node-1", self.AGENT)
 
         [device] = store.list_devices()
-        assert (device.name, device.platform, device.app_version) == ("Lab iMac", "tauri", "0.1.2")
+        assert (device.name, device.platform, device.app_version) == (
+            "Lab iMac",
+            "tauri",
+            "0.1.2",
+        )
         assert device.paired_at is not None and device.last_seen_at is not None
 
     def test_seen_updates_last_seen_and_reported_fields_only(self, tmp_path):
@@ -63,7 +72,9 @@ class TestPairedDevices:
         store.add_trusted("node-1", self.AGENT)
         [before] = store.list_devices()
 
-        store.record_seen("node-1", {"version": "0.1.3", "platform": "tauri"})  # no name sent
+        store.record_seen(
+            "node-1", {"version": "0.1.3", "platform": "tauri"}
+        )  # no name sent
         [after] = store.list_devices()
         assert after.name == "Lab iMac"  # kept
         assert after.app_version == "0.1.3"
@@ -99,3 +110,53 @@ class TestPairedDevices:
         store.add_trusted("newer")
         store.record_seen("newer")
         assert [d.node_id for d in store.list_devices()][0] == "newer"
+
+
+class TestRemove:
+    def test_remove_unpairs_only_those_devices(self, tmp_path):
+        store = TrustStore(tmp_path / "devices.sqlite")
+        for n in ("a", "b", "c"):
+            store.add_trusted(n)
+        assert store.remove(["a", "c", "unknown"]) == 2
+        assert store.list_trusted() == {"b"}
+
+    def test_remove_all(self, tmp_path):
+        store = TrustStore(tmp_path / "devices.sqlite")
+        store.add_trusted("a")
+        store.add_trusted("b")
+        assert store.remove_all() == 2
+        assert store.list_trusted() == set()
+
+
+class TestIsTrustedCached:
+    def test_sees_changes_made_by_another_process(self, tmp_path):
+        path = tmp_path / "devices.sqlite"
+        worker = TrustStore(path)
+        cli = TrustStore(path)
+        cli.add_trusted("a")
+        assert worker.is_trusted_cached("a") is True
+        cli.remove(["a"])
+        assert worker.is_trusted_cached("a") is False
+        cli.add_trusted("a")
+        assert worker.is_trusted_cached("a") is True
+
+    def test_rereads_only_when_the_file_changed(self, tmp_path, monkeypatch):
+        store = TrustStore(tmp_path / "devices.sqlite")
+        store.add_trusted("a")
+        reads = []
+        real = store.list_trusted
+        monkeypatch.setattr(store, "list_trusted", lambda: reads.append(1) or real())
+        for _ in range(100):
+            assert store.is_trusted_cached("a")
+        assert len(reads) == 1
+
+    def test_fails_closed_when_the_store_is_unreadable(self, tmp_path):
+        path = tmp_path / "devices.sqlite"
+        store = TrustStore(path)
+        store.add_trusted("a")
+        assert store.is_trusted_cached("a") is True
+        path.unlink()
+        assert store.is_trusted_cached("a") is False
+
+    def test_none_is_never_trusted(self, tmp_path):
+        assert TrustStore(tmp_path / "devices.sqlite").is_trusted_cached(None) is False

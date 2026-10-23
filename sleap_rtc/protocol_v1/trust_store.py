@@ -8,7 +8,9 @@ version, when it paired and was last seen). No accounts, no rooms.
 
 Stored in SQLite and read on every call, not cached: `sleap-rtc clients`
 (another process) sees what a running worker recorded, and a change made
-from the CLI applies to the running worker right away.
+from the CLI applies to the running worker right away. The one exception is
+`is_trusted_cached`, the per-request/per-event access check, which keeps the
+paired node_ids in memory and re-reads them only when the file has changed.
 """
 
 import json
@@ -19,7 +21,7 @@ import time
 from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Optional, Set, Union
+from typing import Iterable, List, Optional, Set, Tuple, Union
 
 DEFAULT_TRUST_STORE_PATH = Path.home() / ".sleap-rtc" / "protocol_v1_devices.sqlite"
 
@@ -104,6 +106,10 @@ class TrustStore:
                 first time, so existing pairings keep working.
         """
         self._path = Path(path)
+        # `is_trusted_cached`'s copy of the paired node_ids, and the file
+        # state (mtime, size, inode) it was read at.
+        self._cached_ids: Set[str] = set()
+        self._cached_at: Optional[Tuple[int, int, int]] = None
         self._path.parent.mkdir(parents=True, exist_ok=True)
         with closing(self._connect()) as db, db:
             db.executescript(_SCHEMA)
@@ -140,6 +146,46 @@ class TrustStore:
                 "SELECT 1 FROM paired_devices WHERE node_id = ?", (node_id,)
             ).fetchone()
         return row is not None
+
+    def is_trusted_cached(self, node_id: Optional[str]) -> bool:
+        """`is_trusted`, for checks made on every request and pushed event.
+
+        Keeps the paired node_ids in memory and re-reads them only when the
+        file changed (a pair, rename, remove or last-seen update, from this
+        process or the CLI), so the usual cost is one `stat`. The file is
+        stat'ed *before* it's read, so a change that lands mid-read is
+        picked up next time. Fails closed: if the store can't be read, no
+        device is trusted.
+        """
+        if node_id is None:
+            return False
+        try:
+            st = os.stat(self._path)
+            key = (st.st_mtime_ns, st.st_size, st.st_ino)
+            if key != self._cached_at:
+                self._cached_ids = self.list_trusted()
+                self._cached_at = key
+        except (OSError, sqlite3.Error):
+            self._cached_at = None
+            return False
+        return node_id in self._cached_ids
+
+    def remove(self, node_ids: Iterable[str]) -> int:
+        """Unpair these devices. Returns how many were paired.
+
+        A removed device's live connections are refused on their next
+        request or pushed event (see `is_trusted_cached`).
+        """
+        ids = list(node_ids)
+        with closing(self._connect()) as db, db:
+            return db.executemany(
+                "DELETE FROM paired_devices WHERE node_id = ?", [(n,) for n in ids]
+            ).rowcount
+
+    def remove_all(self) -> int:
+        """Unpair every device. Returns how many there were."""
+        with closing(self._connect()) as db, db:
+            return db.execute("DELETE FROM paired_devices").rowcount
 
     def add_trusted(self, node_id: str, agent: Optional[dict] = None) -> None:
         """Pair `node_id` (idempotent), recording what its hello reported."""

@@ -61,7 +61,12 @@ class AuthMethods:
         server.register("auth.prove", self.auth_prove)
         server.register("clients.list", self.clients_list)
         server.register("clients.rename", self.clients_rename)
+        server.register("clients.leave", self.clients_leave)
         server.on_disconnect(self._record_disconnect)
+        # Unpairing takes effect on a device's next request or pushed event.
+        server.set_access_check(
+            lambda conn: self.trust_store.is_trusted_cached(conn.peer_node_id)
+        )
 
     async def pair_claim(self, params: dict, conn: Connection) -> dict:
         """Handle `pair.claim` — first-contact trust via a one-time secret.
@@ -110,6 +115,19 @@ class AuthMethods:
             raise ProtocolError(CLIENTS_BAD_NAME, "name must be a non-empty string")
         self.trust_store.record_seen(conn.peer_node_id, {"device_name": name})
         return {}
+
+    async def clients_leave(self, params: dict, conn: Connection) -> dict:
+        """Handle `clients.leave` — the caller unpairs itself ("Forget" in the app).
+
+        Only ever the caller's own entry; other devices are removed on the
+        worker (`sleap-rtc clients remove`). This connection closes after the
+        reply; the device's other connections (other tabs) are refused on
+        their next request or event.
+        """
+        removed = self.trust_store.remove([conn.peer_node_id]) > 0
+        conn.authenticated = False
+        conn.close_after_reply = True
+        return {"removed": removed}
 
     def _record_disconnect(self, conn: Connection) -> None:
         """Last seen = when a paired device last connected or disconnected."""

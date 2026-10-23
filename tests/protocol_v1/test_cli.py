@@ -186,7 +186,9 @@ class TestClientsCommand:
             "node-aaaaaaaaaaaa1",
             {"device_name": "Lab iMac", "platform": "tauri", "version": "0.1.2"},
         )
-        store.add_trusted("node-bbbbbbbbbbbb2", {"device_name": "Chrome on macOS", "platform": "web"})
+        store.add_trusted(
+            "node-bbbbbbbbbbbb2", {"device_name": "Chrome on macOS", "platform": "web"}
+        )
 
         result = CliRunner().invoke(clients, ["--data-dir", str(tmp_path)])
 
@@ -200,3 +202,87 @@ class TestClientsCommand:
 
         result = CliRunner().invoke(clients, ["--data-dir", str(tmp_path)])
         assert "No paired devices yet" in result.output
+
+
+class TestClientsRemove:
+    def _store(self, tmp_path):
+        from sleap_rtc.protocol_v1.runner import open_trust_store
+
+        store = open_trust_store(tmp_path)
+        store.add_trusted("aaaa1111", {"device_name": "Rig 1", "platform": "tauri"})
+        store.add_trusted("aaaa2222", {"device_name": "Rig 2", "platform": "web"})
+        store.add_trusted("bbbb3333", {"device_name": "Lab iMac", "platform": "tauri"})
+        store.add_trusted("cccc4444")  # unnamed, from the old allowlist
+        return store
+
+    def _run(self, tmp_path, *args, input=None):
+        from sleap_rtc.protocol_v1.cli import clients
+
+        return CliRunner().invoke(
+            clients, ["remove", *args, "--data-dir", str(tmp_path)], input=input
+        )
+
+    def test_by_name_any_case_after_confirming(self, tmp_path):
+        store = self._store(tmp_path)
+        result = self._run(tmp_path, "lab imac", input="y\n")
+        assert result.exit_code == 0, result.output
+        assert 'Removed "Lab iMac"' in result.output
+        assert "bbbb3333" not in store.list_trusted()
+
+    def test_declining_removes_nothing(self, tmp_path):
+        store = self._store(tmp_path)
+        result = self._run(tmp_path, "Rig 1", input="n\n")
+        assert "Nothing removed." in result.output
+        assert len(store.list_trusted()) == 4
+
+    def test_by_id_prefix_with_yes(self, tmp_path):
+        store = self._store(tmp_path)
+        result = self._run(tmp_path, "cccc", "--yes")
+        assert result.exit_code == 0, result.output
+        assert 'Removed "(unnamed)"' in result.output
+        assert "cccc4444" not in store.list_trusted()
+
+    def test_ambiguous_prefix_lists_matches_and_removes_nothing(self, tmp_path):
+        store = self._store(tmp_path)
+        result = self._run(tmp_path, "aaaa", "--yes")
+        assert result.exit_code != 0
+        assert "matches 2 devices" in result.output
+        assert "Rig 1" in result.output and "Rig 2" in result.output
+        assert len(store.list_trusted()) == 4
+
+    def test_unknown_target(self, tmp_path):
+        self._store(tmp_path)
+        result = self._run(tmp_path, "nope", "--yes")
+        assert result.exit_code != 0
+        assert 'No paired device matches "nope"' in result.output
+
+    def test_all_removes_devices_and_unused_pairing_codes(self, tmp_path):
+        from sleap_rtc.protocol_v1.pairing import PendingPairings
+        from sleap_rtc.protocol_v1.runner import pairing_path
+
+        store = self._store(tmp_path)
+        ticket = PendingPairings(path=pairing_path(tmp_path)).create("worker", [])
+        result = self._run(tmp_path, "--all", input="y\n")
+        assert result.exit_code == 0, result.output
+        assert (
+            "Remove ALL 4 paired devices and invalidate 1 unused pairing code?"
+            in result.output
+        )
+        assert "Removed 4 devices; invalidated 1 pairing code." in result.output
+        assert store.list_trusted() == set()
+        assert (
+            PendingPairings(path=pairing_path(tmp_path)).claim(ticket.secret) is False
+        )
+
+    def test_needs_a_target_or_all(self, tmp_path):
+        self._store(tmp_path)
+        assert self._run(tmp_path).exit_code != 0
+        assert self._run(tmp_path, "Rig 1", "--all").exit_code != 0
+
+    def test_listing_still_works_without_a_subcommand(self, tmp_path):
+        from sleap_rtc.protocol_v1.cli import clients
+
+        self._store(tmp_path)
+        result = CliRunner().invoke(clients, ["--data-dir", str(tmp_path)])
+        assert result.exit_code == 0, result.output
+        assert "4 paired devices." in result.output

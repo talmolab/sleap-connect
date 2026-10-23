@@ -95,3 +95,11 @@ class TestFileBackedPendingPairings:
 
         assert pairings.claim(ticket.secret) is True
         assert not (tmp_path / "pending.json").exists()
+
+    def test_clear_invalidates_outstanding_codes_across_processes(self, tmp_path):
+        path = tmp_path / "pairing_tickets.json"
+        serve = PendingPairings(path=path)
+        ticket = serve.create("worker", [])
+        cli = PendingPairings(path=path)
+        assert cli.clear() == 1
+        assert serve.claim(ticket.secret) is False

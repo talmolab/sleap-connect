@@ -291,3 +291,122 @@ class TestClientsList:
         names = {d.node_id: d.name for d in trust_store.list_devices()}
         assert names == {node_id: "Lab iMac", "other": "Other"}
         await ws.close()
+
+
+async def _paired(port, identity, pending_pairings, node_id):
+    """Connect and pair `node_id` via a fresh one-time ticket."""
+    ticket = pending_pairings.create(identity.node_id, [f"ws://127.0.0.1:{port}"])
+    ws, _ = await _hello(port, node_id)
+    reply = await _call(
+        ws, 1, "pair.claim", {"secret": ticket.secret, "node_id": node_id}
+    )
+    assert reply.result == {}
+    return ws
+
+
+async def _closed(ws) -> bool:
+    try:
+        await asyncio.wait_for(ws.recv(), timeout=2)
+    except websockets.ConnectionClosed:
+        return True
+    return False
+
+
+class TestUnpairing:
+    """Removing a device cuts it off at its next request or pushed event."""
+
+    async def test_removed_device_is_refused_and_disconnected_on_next_request(
+        self, running_server, identity, trust_store, pending_pairings
+    ):
+        _server, port = running_server
+        _priv, node_id = _client_identity()
+        ws = await _paired(port, identity, pending_pairings, node_id)
+        assert (await _call(ws, 2, "test.echo", {"x": 1})).result == {
+            "echoed": {"x": 1}
+        }
+
+        # As `sleap-rtc clients remove` would, from another process.
+        TrustStore(trust_store._path).remove([node_id])
+
+        reply = await _call(ws, 3, "test.echo", {"x": 1})
+        assert reply.error["code"] == "auth.untrusted"
+        assert await _closed(ws)
+
+    async def test_removed_device_gets_no_more_events_and_is_disconnected(
+        self, running_server, identity, trust_store, pending_pairings
+    ):
+        server_obj, port = running_server
+
+        async def subscribe(params, conn):
+            server_obj.events.subscribe("job_1", conn)
+            return {}
+
+        server_obj.register("test.subscribe", subscribe)
+        _priv, node_id = _client_identity()
+        ws = await _paired(port, identity, pending_pairings, node_id)
+        await _call(ws, 2, "test.subscribe")
+
+        from sleap_rtc.protocol_v1.envelope import Event
+
+        await server_obj.events.publish(
+            "job_1", Event(topic="job.log", seq=1, job_id="job_1", data={})
+        )
+        assert parse_envelope(await ws.recv()).seq == 1
+
+        trust_store.remove([node_id])
+        await server_obj.events.publish(
+            "job_1", Event(topic="job.log", seq=2, job_id="job_1", data={})
+        )
+        assert await _closed(ws)
+
+    async def test_other_devices_are_unaffected(
+        self, running_server, identity, trust_store, pending_pairings
+    ):
+        _server, port = running_server
+        _p1, kept = _client_identity()
+        _p2, removed = _client_identity()
+        ws_kept = await _paired(port, identity, pending_pairings, kept)
+        ws_removed = await _paired(port, identity, pending_pairings, removed)
+
+        trust_store.remove([removed])
+
+        assert (await _call(ws_kept, 2, "test.echo", {})).result == {"echoed": {}}
+        assert (await _call(ws_removed, 2, "test.echo", {})).error[
+            "code"
+        ] == "auth.untrusted"
+        await ws_kept.close()
+
+    async def test_clients_leave_unpairs_the_caller_and_its_other_connections(
+        self, running_server, identity, trust_store, pending_pairings
+    ):
+        _server, port = running_server
+        priv, node_id = _client_identity()
+        ws_tab1 = await _paired(port, identity, pending_pairings, node_id)
+        # A second tab of the same app: same key, re-authenticated with auth.prove.
+        ws_tab2, server_hello = await _hello(port, node_id)
+        sig = sign_nonce(priv, server_hello.nonce)
+        assert (await _call(ws_tab2, 1, "auth.prove", {"sig": sig})).result == {}
+
+        reply = await _call(ws_tab1, 2, "clients.leave")
+        assert reply.result == {"removed": True}
+        assert await _closed(ws_tab1)
+        assert trust_store.is_trusted(node_id) is False
+
+        assert (await _call(ws_tab2, 2, "test.echo", {})).error[
+            "code"
+        ] == "auth.untrusted"
+        assert await _closed(ws_tab2)
+
+    async def test_a_removed_device_can_pair_again(
+        self, running_server, identity, trust_store, pending_pairings
+    ):
+        _server, port = running_server
+        _priv, node_id = _client_identity()
+        ws = await _paired(port, identity, pending_pairings, node_id)
+        trust_store.remove([node_id])
+        await _call(ws, 2, "test.echo", {})
+        await _closed(ws)
+
+        ws2 = await _paired(port, identity, pending_pairings, node_id)
+        assert (await _call(ws2, 2, "test.echo", {})).result == {"echoed": {}}
+        await ws2.close()
