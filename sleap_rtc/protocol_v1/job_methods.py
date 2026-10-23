@@ -163,6 +163,8 @@ class JobMethods:
         # Running jobs a client asked to end ("stop"/"cancel"), so `_finish`
         # records a nonzero exit as canceled rather than failed.
         self._end_requested: Dict[str, str] = {}
+        # Jobs `reattach_all` found lost in a restart (see `resume_queued`).
+        self._lost_at_restart: List[str] = []
         # Serializes the "are all of this run's siblings completed yet, and
         # has one of them already chained post-inference?" check-and-act in
         # `_chain_post_inference`, keyed by run id (or job id for a run-less
@@ -338,10 +340,49 @@ class JobMethods:
         """End a job as canceled if a cancel arrived before its process exists."""
         if self._cancel_requested.pop(job_id, None) is None:
             return False
-        detail = "canceled before it started"
+        await self._record_canceled(job_id, "canceled before it started")
+        return True
+
+    async def _record_canceled(self, job_id: str, detail: str) -> None:
         await self.store.update_state(job_id, "canceled", error=detail)
         await self._emit(job_id, "job.status", {"state": "canceled", "detail": detail})
+
+    async def _cancel_waiting(self, job_id: str, detail: str) -> bool:
+        """End a job still waiting for a slot, now rather than when its turn
+        comes: its task is canceled out of the queue (so it never runs and
+        the jobs behind it move up) and it's recorded as canceled.
+
+        Returns False if the job isn't waiting (running, or already gone).
+        """
+        if job_id not in self._waiting:
+            return False
+        task = self._tasks.get(job_id)
+        if task is not None:
+            task.cancel()
+            # Let it leave the queue (and _tasks) before recording the state.
+            await asyncio.gather(task, return_exceptions=True)
+        self._cancel_requested.pop(job_id, None)
+        await self._record_canceled(job_id, detail)
         return True
+
+    async def _cancel_rest_of_run(self, job_id: str, spec) -> None:
+        """After a model fails, cancel the jobs of its run still waiting: a
+        top-down run is no use without every model, so there's no point in
+        training the rest (and the jobs behind them get the worker sooner).
+        """
+        run_id = (getattr(spec, "run", None) or {}).get("id")
+        if not run_id:
+            return
+        for record in await self.store.list_jobs():
+            if record.job_id == job_id or record.state != "queued":
+                continue
+            if (getattr(record.spec, "run", None) or {}).get("id") != run_id:
+                continue
+            detail = "canceled: an earlier model of this run failed"
+            if not await self._cancel_waiting(record.job_id, detail):
+                if record.job_id not in self._tasks:
+                    # Left waiting by a previous worker, not queued again yet.
+                    await self._record_canceled(record.job_id, detail)
 
     async def _finish(
         self, job_id: str, spec, log_path: Path, returncode: Optional[int]
@@ -395,6 +436,7 @@ class JobMethods:
             await self._emit(
                 job_id, "job.status", {"state": "failed", "detail": detail}
             )
+            await self._cancel_rest_of_run(job_id, spec)
 
     def _job_dir(self, job_id: str) -> Path:
         return self.runs_dir / job_id
@@ -556,6 +598,53 @@ class JobMethods:
         for job_id, outcome in reattach_outcomes.items():
             if outcome in ("reattached", "exited"):
                 self._tasks[job_id] = asyncio.create_task(self._run_reattached(job_id))
+        # Lost in the restart (marked failed): `resume_queued` ends the rest
+        # of their runs before queueing anything again.
+        self._lost_at_restart = [
+            job_id
+            for job_id, outcome in reattach_outcomes.items()
+            if outcome == "marked_failed"
+        ]
+
+    async def resume_queued(self) -> List[str]:
+        """Queue again the jobs a previous worker left waiting.
+
+        The queue itself lives in memory (a task per job waiting for the slot),
+        so a restart loses it while the jobs' records stay "queued" in the
+        store: without this they'd never run, and a cancel couldn't find them.
+        Re-queues them in submission order. Call after `resume_reattached`, so
+        a job still running from before keeps the slot and these wait behind
+        it.
+
+        A job lost in the restart (`resume_reattached` saw it marked failed)
+        counts as its run failing: the rest of that run is canceled first,
+        not queued again.
+
+        Returns:
+            The re-queued job ids, in queue order.
+        """
+        for job_id in self._lost_at_restart:
+            record = await self.store.get_job(job_id)
+            if record is not None:
+                await self._cancel_rest_of_run(job_id, record.spec)
+        self._lost_at_restart = []
+        waiting = sorted(
+            (
+                r
+                for r in await self.store.list_jobs()
+                if r.state == "queued" and r.job_id not in self._tasks
+            ),
+            key=lambda r: r.created_at,
+        )
+        for record in waiting:
+            self._tasks[record.job_id] = asyncio.create_task(
+                self._run_job(record.job_id, record.spec)
+            )
+        if waiting:
+            logging.info(
+                f"[jobs] Re-queued {len(waiting)} job(s) left waiting by a previous worker"
+            )
+        return [r.job_id for r in waiting]
 
     async def _run_reattached(self, job_id: str) -> None:
         try:
@@ -936,8 +1025,10 @@ class JobMethods:
                 send_stop_signal(record.pid)
             else:
                 send_cancel_signal(record.pid)
+        elif await self._cancel_waiting(job_id, "canceled before it started"):
+            pass  # was waiting in the queue: ended now, the line moves up
         elif job_id in self._tasks:
-            # Ours, but its process doesn't exist yet (queued, or about to
+            # Ours, past the queue but its process doesn't exist yet (about to
             # spawn): make sure it never starts, or is signalled on start.
             self._cancel_requested[job_id] = mode
         else:
@@ -975,6 +1066,10 @@ class JobMethods:
                     "state": r.state,
                     "created_at": r.created_at,
                     "updated_at": r.updated_at,
+                    # When the job's process started (None while queued), so a
+                    # client can say "started 5 min ago" rather than counting
+                    # from submission.
+                    "started_at": r.process_started_at,
                     "error": r.error,
                     "queue_position": self.queue_position(r.job_id),
                     # The trained model's folder name (sleap-nn run name, e.g.
@@ -1127,6 +1222,7 @@ def _record_to_dict(record: JobRecord) -> dict:
         "state": record.state,
         "created_at": record.created_at,
         "updated_at": record.updated_at,
+        "started_at": record.process_started_at,
         "result": record.result,
         "error": record.error,
     }

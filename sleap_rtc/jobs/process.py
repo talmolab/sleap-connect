@@ -38,9 +38,9 @@ import sys
 from pathlib import Path
 from typing import Dict, Optional, Sequence, Union
 
+import subprocess
+
 import psutil
-from asyncio import create_subprocess_exec
-from asyncio.subprocess import STDOUT, Process
 
 from sleap_rtc.jobs.store import JobStore
 
@@ -62,6 +62,48 @@ _background_tasks: set = set()
 _START_TIME_TOLERANCE_SECS = 2.0
 
 _EXIT_CODE_WRAPPER = Path(__file__).with_name("_exit_code_wrapper.py")
+
+
+# How often `JobProcess.wait` checks whether the job has exited.
+_POLL_INTERVAL_SECS = 0.2
+
+
+class JobProcess:
+    """A spawned job, watched by polling rather than through asyncio.
+
+    asyncio's subprocess transport kills a child that's still running when
+    the transport is torn down, which on Linux happens when the worker's
+    process exits: every `serve` restart killed the job's wrapper (leaving
+    sleap-nn running orphaned, and the next worker finding the job "lost").
+    A plain `subprocess.Popen` never kills its child, so the job outlives the
+    worker and is reattached by the next one, as intended.
+
+    Offers the part of `asyncio.subprocess.Process` the worker uses: `pid`,
+    `returncode`, `await wait()` and `kill()`.
+    """
+
+    def __init__(self, popen: subprocess.Popen):
+        self._popen = popen
+
+    @property
+    def pid(self) -> int:
+        return self._popen.pid
+
+    @property
+    def returncode(self) -> Optional[int]:
+        """The exit code once the job has exited, else None."""
+        return self._popen.poll()
+
+    async def wait(self) -> int:
+        """Wait for the job to exit and return its exit code."""
+        while self._popen.poll() is None:
+            await asyncio.sleep(_POLL_INTERVAL_SECS)
+        return self._popen.returncode
+
+    def kill(self) -> None:
+        """Kill the job's top process and reap it, so no zombie is left."""
+        self._popen.kill()
+        self._popen.wait()
 
 
 def exit_code_path(log_path: Union[str, Path]) -> Path:
@@ -87,7 +129,7 @@ async def spawn_detached(
     log_path: Union[str, Path],
     cwd: Optional[str] = None,
     env: Optional[dict] = None,
-) -> Process:
+) -> JobProcess:
     """Spawn a job's subprocess, detached, and record it in the job store.
 
     The subprocess is started in its own session (`start_new_session=True`
@@ -118,7 +160,7 @@ async def spawn_detached(
         env: Environment variables for the subprocess.
 
     Returns:
-        The spawned `asyncio.subprocess.Process`.
+        The spawned job (`JobProcess`).
     """
     log_path = Path(log_path)
     log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -126,17 +168,16 @@ async def spawn_detached(
     exit_path.unlink(missing_ok=True)
 
     with open(log_path, "ab", buffering=0) as log_file:
-        process = await create_subprocess_exec(
-            sys.executable,
-            str(_EXIT_CODE_WRAPPER),
-            str(exit_path),
-            "--",
-            *cmd,
-            stdout=log_file,
-            stderr=STDOUT,
-            cwd=cwd,
-            env=env,
-            start_new_session=True,
+        # Popen, not asyncio's subprocess support: see `JobProcess`.
+        process = JobProcess(
+            subprocess.Popen(
+                [sys.executable, str(_EXIT_CODE_WRAPPER), str(exit_path), "--", *cmd],
+                stdout=log_file,
+                stderr=subprocess.STDOUT,
+                cwd=cwd,
+                env=env,
+                start_new_session=True,
+            )
         )
     # `log_file` is closed here in the parent, but the child received its own
     # dup'd file descriptor at spawn time (standard POSIX/Windows subprocess
@@ -187,6 +228,10 @@ def is_alive(pid: int, started_at: float) -> bool:
     try:
         proc = psutil.Process(pid)
         actual_started_at = proc.create_time()
+        # An exited process nobody has reaped yet (no longer this worker's
+        # child, and a container's init may never reap it) has finished.
+        if proc.status() == psutil.STATUS_ZOMBIE:
+            return False
     except (psutil.NoSuchProcess, psutil.AccessDenied):
         return False
 

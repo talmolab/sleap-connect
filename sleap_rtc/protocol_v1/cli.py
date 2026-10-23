@@ -277,6 +277,13 @@ async def _serve_async(
             for job_id, outcome in worker.reattach_outcomes.items():
                 click.echo(f"  {job_id}: {outcome}")
 
+        if worker.requeued_job_ids:
+            n = len(worker.requeued_job_ids)
+            click.echo("")
+            click.echo(
+                f"Re-queued {n} job{'s' if n != 1 else ''} left waiting by the previous run."
+            )
+
         if not worker.trust_store.list_trusted():
             click.echo("")
             click.echo(
