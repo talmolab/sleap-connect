@@ -212,9 +212,13 @@ class JobMethods:
         except Exception as e:
             raise ProtocolError(JOB_SPEC_INVALID, f"Invalid job spec: {e}") from e
 
-        return {"job_id": await self._submit_spec(spec)}
+        return {
+            "job_id": await self._submit_spec(
+                spec, submitted_by=getattr(conn, "peer_node_id", None)
+            )
+        }
 
-    async def _submit_spec(self, spec) -> str:
+    async def _submit_spec(self, spec, submitted_by: Optional[str] = None) -> str:
         """Create a job record and start running it in the background.
 
         The common path behind both a client's `jobs.submit` and worker-
@@ -223,9 +227,12 @@ class JobMethods:
         queue, and emits the usual `job.status`/`job.log`/`job.result`
         events — so a chained job is indistinguishable from one a client
         submitted directly, including showing up in `jobs.list`.
+
+        `submitted_by` is the paired device behind it: the caller for
+        `jobs.submit`, the training job's submitter for chained inference.
         """
         job_id = generate_job_id()
-        await self.store.create_job(job_id, spec)
+        await self.store.create_job(job_id, spec, submitted_by=submitted_by)
         self._tasks[job_id] = asyncio.create_task(self._run_job(job_id, spec))
         return job_id
 
@@ -492,6 +499,8 @@ class JobMethods:
         ready to chain yet, nothing to chain, or another sibling already
         did).
         """
+        parent = await self.store.get_job(job_id)
+        submitted_by = parent.submitted_by if parent is not None else None
         run = spec.run or {}
         run_id = run.get("id")
         count = (run.get("count") if run_id else None) or 1
@@ -553,7 +562,9 @@ class JobMethods:
                             },
                         }
                     )
-                    chained_job_ids.append(await self._submit_spec(track_spec))
+                    chained_job_ids.append(
+                        await self._submit_spec(track_spec, submitted_by=submitted_by)
+                    )
                 except Exception as e:
                     logging.exception(
                         f"[jobs] post-inference chaining for run {run_id or job_id} "
@@ -1070,6 +1081,9 @@ class JobMethods:
                     # client can say "started 5 min ago" rather than counting
                     # from submission.
                     "started_at": r.process_started_at,
+                    # The paired device that submitted it (its node_id; see
+                    # clients.list for the name).
+                    "submitted_by": r.submitted_by,
                     "error": r.error,
                     "queue_position": self.queue_position(r.job_id),
                     # The trained model's folder name (sleap-nn run name, e.g.

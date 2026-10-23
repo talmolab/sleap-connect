@@ -65,8 +65,23 @@ def identity_path(data_dir: Path) -> Path:
 
 
 def trust_store_path(data_dir: Path) -> Path:
-    """Where the trusted-client allowlist lives under `data_dir`."""
+    """Where the old trusted-client allowlist (JSON) lived under `data_dir`.
+
+    Imported into `devices_path` on first open; see `open_trust_store`.
+    """
     return data_dir / "trusted_clients.json"
+
+
+def devices_path(data_dir: Path) -> Path:
+    """Where the paired-device record (the trust store) lives under `data_dir`."""
+    return data_dir / "devices.sqlite"
+
+
+def open_trust_store(data_dir: Path) -> TrustStore:
+    """The worker's paired devices, importing an old JSON allowlist once."""
+    return TrustStore(
+        devices_path(data_dir), legacy_json_path=trust_store_path(data_dir)
+    )
 
 
 def pairing_path(data_dir: Path) -> Path:
@@ -198,7 +213,7 @@ async def start_worker_server(
         blob_port = 0 if port == 0 else port + DEFAULT_BLOB_PORT_OFFSET
 
     identity = WorkerIdentity(identity_path(data_dir))
-    trust_store = TrustStore(trust_store_path(data_dir))
+    trust_store = open_trust_store(data_dir)
     pending_pairings = PendingPairings(path=pairing_path(data_dir))
 
     store = JobStore(job_store_path(data_dir))

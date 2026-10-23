@@ -2025,3 +2025,18 @@ class TestResumeQueued:
         assert record.state == "canceled"
         assert "earlier model of this run failed" in record.error
         assert (await _wait_for_terminal(methods, store, other.job_id)).state == "completed"
+
+
+class TestSubmittedBy:
+    async def test_a_job_records_the_device_that_submitted_it(self, store, spec, tmp_path):
+        class _Conn:
+            peer_node_id = "device-abc"
+            authenticated = True
+
+        methods = _make_methods(store, tmp_path, [sys.executable, "-c", "pass"])
+        job_id = (await methods.submit({"spec": spec.to_dict()}, conn=_Conn()))["job_id"]
+        await _wait_for_terminal(methods, store, job_id)
+
+        assert (await store.get_job(job_id)).submitted_by == "device-abc"
+        listed = {j["job_id"]: j for j in (await methods.list_jobs({}, conn=None))["jobs"]}
+        assert listed[job_id]["submitted_by"] == "device-abc"

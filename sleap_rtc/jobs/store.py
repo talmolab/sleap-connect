@@ -64,7 +64,7 @@ CREATE TABLE IF NOT EXISTS job_events (
 
 # Columns added after the first release: (name, type). `connect` adds any
 # missing from an existing database, so an older jobs.sqlite keeps working.
-_ADDED_COLUMNS = (("zmq_ports_json", "TEXT"),)
+_ADDED_COLUMNS = (("zmq_ports_json", "TEXT"), ("submitted_by", "TEXT"))
 
 
 class JobStoreError(Exception):
@@ -94,6 +94,9 @@ class JobRecord:
             reattachment possible — a pipe's read end dies with whichever
             process originally spawned the child, but a file on disk can be
             tailed by a totally different (e.g. post-restart) process.
+        submitted_by: The node_id of the paired device that submitted the
+            job (see the trust store for its name), or None for jobs from
+            before this was recorded.
         zmq_ports: The ZMQ ports a train job's sleap-nn was launched with
             (``{"controller": ..., "publish": ...}``), so a restarted worker
             rebinds the same ones. None for track jobs, jobs run without
@@ -111,6 +114,7 @@ class JobRecord:
     process_started_at: Optional[float] = None
     log_path: Optional[str] = None
     zmq_ports: Optional[Dict[str, int]] = None
+    submitted_by: Optional[str] = None
 
 
 @dataclass
@@ -196,12 +200,15 @@ class JobStore:
             raise JobStoreError("JobStore is not connected — call connect() first")
         return self._conn
 
-    async def create_job(self, job_id: str, spec: JobSpec) -> JobRecord:
+    async def create_job(
+        self, job_id: str, spec: JobSpec, submitted_by: Optional[str] = None
+    ) -> JobRecord:
         """Create a new job record in the "queued" state.
 
         Args:
             job_id: Worker-assigned job identifier. Must be unique.
             spec: The job's TrainJobSpec or TrackJobSpec.
+            submitted_by: The node_id of the paired device that submitted it.
 
         Returns:
             The created JobRecord.
@@ -214,10 +221,11 @@ class JobStore:
         try:
             await conn.execute(
                 """
-                INSERT INTO jobs (job_id, spec_json, state, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?)
+                INSERT INTO jobs
+                    (job_id, spec_json, state, created_at, updated_at, submitted_by)
+                VALUES (?, ?, ?, ?, ?, ?)
                 """,
-                (job_id, spec.to_json(), "queued", now, now),
+                (job_id, spec.to_json(), "queued", now, now, submitted_by),
             )
             await conn.commit()
         except aiosqlite.IntegrityError as e:
@@ -495,4 +503,5 @@ class JobStore:
             zmq_ports=(
                 json.loads(row["zmq_ports_json"]) if row["zmq_ports_json"] else None
             ),
+            submitted_by=row["submitted_by"],
         )

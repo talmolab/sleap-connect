@@ -34,6 +34,9 @@ JOB_ALREADY_TERMINAL = "job.already_terminal"
 JOB_SPEC_INVALID = "job.spec_invalid"
 JOB_ACTIVE = "job.active"
 
+# clients.*
+CLIENTS_BAD_NAME = "clients.bad_name"
+
 # Catch-all for an unexpected worker-side fault.
 INTERNAL = "internal"
 
