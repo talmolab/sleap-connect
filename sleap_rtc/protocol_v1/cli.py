@@ -418,20 +418,43 @@ def _ago(ts: Optional[float]) -> str:
     return "just now"
 
 
-@click.command(name="clients")
-@click.option(
+_DATA_DIR_OPTION = click.option(
     "--data-dir",
-    default=str(DEFAULT_DATA_DIR),
-    show_default=True,
-    help="Worker data directory (same as 'serve').",
+    default=None,
+    help=f"Worker data directory (same as 'serve'). [default: {DEFAULT_DATA_DIR}]",
 )
-def clients(data_dir: str):
+
+
+def _platform_label(d) -> str:
+    label = {"tauri": "desktop", "web": "browser"}.get(
+        d.platform or "", d.platform or "—"
+    )
+    return f"{label} {d.app_version}" if d.app_version else label
+
+
+def _describe(d) -> str:
+    """One line for a device in prompts: name, app, last seen, short ID."""
+    return (
+        f'"{d.name or "(unnamed)"}" ({_platform_label(d)}, '
+        f"last seen {_ago(d.last_seen_at)}, ID {d.node_id[:12]})"
+    )
+
+
+@click.group(name="clients", invoke_without_command=True)
+@_DATA_DIR_OPTION
+@click.pass_context
+def clients(ctx: click.Context, data_dir: Optional[str]):
     """List the devices paired with this worker: who can use it.
 
     Each device's name (as its app reports it), platform and app version,
     when it paired and when it was last seen (connected or disconnected).
-    Works whether or not 'sleap-rtc serve' is running.
+    Works whether or not 'sleap-rtc serve' is running. To unpair devices,
+    see 'sleap-rtc clients remove --help'.
     """
+    ctx.obj = {"data_dir": data_dir}
+    if ctx.invoked_subcommand is not None:
+        return
+    data_dir = Path(data_dir or DEFAULT_DATA_DIR).expanduser()
     data_dir = Path(data_dir).expanduser()
     if not (devices_path(data_dir).exists() or trust_store_path(data_dir).exists()):
         click.echo("No paired devices yet. Pair one with 'sleap-rtc pair'.")
@@ -441,16 +464,10 @@ def clients(data_dir: str):
         click.echo("No paired devices yet. Pair one with 'sleap-rtc pair'.")
         return
 
-    def platform(d) -> str:
-        label = {"tauri": "desktop", "web": "browser"}.get(
-            d.platform or "", d.platform or "—"
-        )
-        return f"{label} {d.app_version}" if d.app_version else label
-
     rows = [
         (
             d.name or "(unnamed)",
-            platform(d),
+            _platform_label(d),
             _ago(d.paired_at) if d.paired_at else "—",
             _ago(d.last_seen_at),
             d.node_id[:12],
@@ -464,6 +481,106 @@ def clients(data_dir: str):
     for r in rows:
         click.echo(line.format(*r))
     click.echo(f"\n{len(devices)} paired device{'s' if len(devices) != 1 else ''}.")
+
+
+@clients.command(name="remove")
+@click.argument("targets", nargs=-1)
+@click.option(
+    "--all",
+    "remove_all",
+    is_flag=True,
+    help="Unpair every device and invalidate every unused pairing code.",
+)
+@click.option("--yes", "-y", is_flag=True, help="Don't ask for confirmation.")
+@_DATA_DIR_OPTION
+@click.pass_context
+def clients_remove(
+    ctx: click.Context,
+    targets: tuple,
+    remove_all: bool,
+    yes: bool,
+    data_dir: Optional[str],
+):
+    """Unpair devices, by name or ID prefix (as 'sleap-rtc clients' shows).
+
+    A removed device can't use this worker any more: if it's connected
+    right now, its next request or job update is refused and it's
+    disconnected. Jobs it submitted keep running. It can pair again with a
+    new code from 'sleap-rtc pair'. Works whether or not 'sleap-rtc serve'
+    is running.
+
+    \b
+    Examples:
+      sleap-rtc clients remove "Rig 4"
+      sleap-rtc clients remove 7HV7KAOR
+      sleap-rtc clients remove --all
+    """
+    data_dir_path = Path(
+        data_dir or (ctx.obj or {}).get("data_dir") or DEFAULT_DATA_DIR
+    ).expanduser()
+    if remove_all == bool(targets):
+        raise click.UsageError("Name the devices to remove, or pass --all.")
+    store = open_trust_store(data_dir_path)
+    devices = store.list_devices()
+
+    if remove_all:
+        from sleap_rtc.protocol_v1.pairing import PendingPairings
+
+        pairings = PendingPairings(path=pairing_path(data_dir_path))
+        n_codes = pairings.pending_count()
+        if not devices and not n_codes:
+            click.echo("No paired devices and no unused pairing codes.")
+            return
+        prompt = (
+            f"Remove ALL {len(devices)} paired device{'s' if len(devices) != 1 else ''}"
+            f" and invalidate {n_codes} unused pairing code{'s' if n_codes != 1 else ''}?"
+        )
+        if not yes and not click.confirm(prompt, default=False):
+            click.echo("Nothing removed.")
+            return
+        n_devices = store.remove_all()
+        n_codes = pairings.clear()
+        click.echo(
+            f"Removed {n_devices} device{'s' if n_devices != 1 else ''}; invalidated "
+            f"{n_codes} pairing code{'s' if n_codes != 1 else ''}. "
+            "Pair again with 'sleap-rtc pair'."
+        )
+        return
+
+    chosen = []
+    for target in targets:
+        matches = _match_devices(devices, target)
+        if not matches:
+            raise click.ClickException(
+                f"No paired device matches \"{target}\". See 'sleap-rtc clients'."
+            )
+        if len(matches) > 1:
+            listing = "\n".join(f"  {_describe(d)}" for d in matches)
+            raise click.ClickException(
+                f'"{target}" matches {len(matches)} devices:\n{listing}\n'
+                "Use the full name or a longer ID prefix."
+            )
+        if matches[0] not in chosen:
+            chosen.append(matches[0])
+
+    if not yes:
+        listing = "\n".join(f"  {_describe(d)}" for d in chosen)
+        if not click.confirm(
+            f"Remove {len(chosen)} device(s)?\n{listing}\n", default=False
+        ):
+            click.echo("Nothing removed.")
+            return
+    store.remove([d.node_id for d in chosen])
+    for d in chosen:
+        click.echo(f'Removed "{d.name or "(unnamed)"}" ({d.node_id[:12]}).')
+
+
+def _match_devices(devices, target: str) -> list:
+    """Devices whose name is `target` (any case), else whose ID starts with it."""
+    by_name = [d for d in devices if d.name and d.name.casefold() == target.casefold()]
+    if by_name:
+        return by_name
+    return [d for d in devices if d.node_id.startswith(target)]
 
 
 def print_doctor_section(data_dir: Path = DEFAULT_DATA_DIR) -> bool:

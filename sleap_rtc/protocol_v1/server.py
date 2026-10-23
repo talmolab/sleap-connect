@@ -47,6 +47,7 @@ from sleap_rtc.protocol_v1.envelope import (
 )
 from sleap_rtc.protocol_v1.errors import (
     AUTH_REQUIRED,
+    AUTH_UNTRUSTED,
     INTERNAL,
     PROTO_UNKNOWN_METHOD,
     ProtocolError,
@@ -141,6 +142,9 @@ class Connection:
         # Until then, only those two methods may be dispatched — see
         # ProtocolV1Server._dispatch.
         self.authenticated: bool = False
+        # Set when this connection must close once its current reply is
+        # sent: its device was unpaired (removed on the worker, or left).
+        self.close_after_reply: bool = False
 
     async def send_event(self, event: Event) -> None:
         """Push an `event` frame to this connection."""
@@ -150,9 +154,22 @@ class Connection:
 class EventBus:
     """Fan-out of per-job `event` frames to whichever connections subscribed."""
 
-    def __init__(self):
-        """Initialize with no subscribers."""
+    def __init__(
+        self,
+        may_send: Optional[Callable[[Connection], bool]] = None,
+        on_refused: Optional[Callable[[Connection], Awaitable[None]]] = None,
+    ):
+        """Initialize with no subscribers.
+
+        Args:
+            may_send: Checked before every event pushed to a connection
+                (the server's access check). `None` sends to everyone.
+            on_refused: Called (instead of sending) for a connection
+                `may_send` refuses — the server closes it.
+        """
         self._subscribers: Dict[str, Set[Connection]] = {}
+        self._may_send = may_send
+        self._on_refused = on_refused
 
     def subscribe(self, job_id: str, conn: Connection) -> None:
         """Subscribe a connection to a job's events."""
@@ -182,6 +199,11 @@ class EventBus:
     async def publish(self, job_id: str, event: Event) -> None:
         """Push an event to every connection currently subscribed to `job_id`."""
         for conn in list(self._subscribers.get(job_id, ())):
+            if self._may_send is not None and not self._may_send(conn):
+                self.unsubscribe_all(conn)
+                if self._on_refused is not None:
+                    await self._on_refused(conn)
+                continue
             try:
                 await conn.send_event(event)
             except Exception:
@@ -249,9 +271,42 @@ class ProtocolV1Server:
         self.blob_port = blob_port
         self.blob_index = blob_index
         self._sign_nonce = sign_nonce
-        self.events = EventBus()
+        self._access_check: Optional[Callable[[Connection], bool]] = None
+        self.events = EventBus(
+            may_send=self._still_allowed, on_refused=self._close_unpaired
+        )
         self._methods: Dict[str, MethodHandler] = {}
         self._disconnect_hooks: List[Callable[["Connection"], None]] = []
+
+    def set_access_check(self, check: Callable[[Connection], bool]) -> None:
+        """Re-check an authenticated connection before every request and event.
+
+        `check(conn)` returning False means the connection's device is no
+        longer allowed (e.g. it was unpaired): the request is refused with
+        `auth.untrusted`, or the event isn't sent, and the connection is
+        closed. Called often, so it must be cheap.
+        """
+        self._access_check = check
+
+    def _still_allowed(self, conn: Connection) -> bool:
+        if self._access_check is None:
+            return True
+        try:
+            return self._access_check(conn)
+        except Exception:
+            logging.exception("[server] access check failed; refusing")
+            return False
+
+    async def _close_unpaired(self, conn: Connection) -> None:
+        """Close a connection whose device is no longer paired."""
+        conn.authenticated = False
+        self.events.unsubscribe_all(conn)
+        try:
+            await conn.transport.close(code=4001, reason=AUTH_UNTRUSTED)
+        except Exception:
+            logging.debug(
+                "[server] close of an unpaired connection failed", exc_info=True
+            )
 
     def on_disconnect(self, hook: Callable[["Connection"], None]) -> None:
         """Call `hook(conn)` when a connection closes (after it's done)."""
@@ -518,10 +573,20 @@ class ProtocolV1Server:
 
         res = await self._dispatch(frame, conn)
         await conn.transport.send(res.to_json())
+        if conn.close_after_reply:
+            await self._close_unpaired(conn)
 
     async def _dispatch(self, req: Req, conn: Connection) -> Res:
         if req.method not in _UNAUTHENTICATED_METHODS and not conn.authenticated:
             return Res.err(req.id, AUTH_REQUIRED, "Connection is not authenticated")
+        if conn.authenticated and not self._still_allowed(conn):
+            conn.authenticated = False
+            conn.close_after_reply = True
+            return Res.err(
+                req.id,
+                AUTH_UNTRUSTED,
+                "This device is no longer paired with this worker",
+            )
 
         handler = self._methods.get(req.method)
         if handler is None:

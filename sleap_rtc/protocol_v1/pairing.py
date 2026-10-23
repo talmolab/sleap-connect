@@ -148,6 +148,24 @@ class PendingPairings:
             return False
         return time.time() <= expires_at
 
+    def pending_count(self) -> int:
+        """How many pairing secrets are outstanding (unexpired, unclaimed)."""
+        if self._path is not None:
+            self._secrets = self._load()
+        self._prune_expired()
+        return len(self._secrets)
+
+    def clear(self) -> int:
+        """Invalidate every outstanding pairing secret. Returns how many were valid."""
+        if self._path is not None:
+            self._secrets = self._load()
+        self._prune_expired()
+        n = len(self._secrets)
+        self._secrets = {}
+        if self._path is not None:
+            self._save()
+        return n
+
     def _prune_expired(self) -> None:
         now = time.time()
         self._secrets = {s: e for s, e in self._secrets.items() if e >= now}
