@@ -413,3 +413,54 @@ class TestExitCodeRecording:
         send_stop_signal(process.pid)
         assert await process.wait() == 7
         assert read_exit_code(log) == 7
+
+
+class TestJobOutlivesTheWorkerProcess:
+    """A real restart: the worker *process* exits with a task still waiting on
+    the job. A job launched through asyncio's subprocess support was killed
+    then on Linux (the transport kills a still-running child when it's torn
+    down), so every `serve` restart left sleap-nn orphaned and the next worker
+    found the job "lost". The job must outlive the worker."""
+
+    def test_job_still_running_after_the_spawning_worker_exits(self, tmp_path):
+        import subprocess
+
+        import psutil
+
+        worker = f"""
+import asyncio, sys
+from pathlib import Path
+from sleap_rtc.jobs.process import spawn_detached
+from sleap_rtc.jobs.spec import TrainJobSpec
+from sleap_rtc.jobs.store import JobStore
+
+async def main():
+    async with JobStore(Path({str(tmp_path / 'jobs.sqlite')!r})) as store:
+        await store.create_job("j1", TrainJobSpec(config_path="/c.yaml"))
+        proc = await spawn_detached(
+            [sys.executable, "-c", "import time; time.sleep(30)"],
+            job_id="j1", store=store, log_path={str(tmp_path / 'j1.log')!r},
+        )
+        print(proc.pid, flush=True)
+        asyncio.create_task(proc.wait())  # like serve: a task waits on the job
+        await asyncio.sleep(0.5)
+
+asyncio.run(main())  # exits with that task still pending, like serve shutting down
+"""
+        # The job logs to its own file, so it doesn't hold this pipe open.
+        out = subprocess.run(
+            [sys.executable, "-c", worker], capture_output=True, text=True, timeout=30
+        )
+        pid = int(out.stdout.strip().splitlines()[-1])
+        try:
+            import time
+
+            time.sleep(0.5)
+            assert psutil.pid_exists(pid), "the job's process died with the worker"
+            assert psutil.Process(pid).status() != psutil.STATUS_ZOMBIE
+            assert not (tmp_path / "j1.exit").exists()
+        finally:
+            try:
+                os.killpg(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass

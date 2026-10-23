@@ -1994,3 +1994,34 @@ class TestResumeQueued:
         go.touch()
         await _wait_for_terminal(second, store, running)
         assert (await _wait_for_terminal(second, store, q2)).state == "completed"
+
+    async def test_a_job_lost_in_the_restart_cancels_the_rest_of_its_run(
+        self, store, tmp_path
+    ):
+        # The running model's process didn't survive (marked failed by
+        # reattach_all): its run's waiting models aren't re-queued; another
+        # run's are.
+        from sleap_rtc.jobs.process import reattach_all
+
+        lost = await store.create_job(
+            "job-lost", TrainJobSpec(config_path="/c.yaml", run={"id": "run-a", "index": 0, "count": 2})
+        )
+        await store.update_state(lost.job_id, "running")  # no live process behind it
+        sibling = await store.create_job(
+            "job-sib", TrainJobSpec(config_path="/c.yaml", run={"id": "run-a", "index": 1, "count": 2})
+        )
+        other = await store.create_job(
+            "job-other", TrainJobSpec(config_path="/c.yaml", run={"id": "run-b", "index": 0, "count": 1})
+        )
+
+        outcomes = await reattach_all(store)
+        assert outcomes == {"job-lost": "marked_failed"}
+        methods = _make_methods(store, tmp_path, [sys.executable, "-c", "pass"])
+        methods.resume_reattached(outcomes)
+        requeued = await methods.resume_queued()
+
+        assert requeued == [other.job_id]
+        record = await store.get_job(sibling.job_id)
+        assert record.state == "canceled"
+        assert "earlier model of this run failed" in record.error
+        assert (await _wait_for_terminal(methods, store, other.job_id)).state == "completed"

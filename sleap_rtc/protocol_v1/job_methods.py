@@ -163,6 +163,8 @@ class JobMethods:
         # Running jobs a client asked to end ("stop"/"cancel"), so `_finish`
         # records a nonzero exit as canceled rather than failed.
         self._end_requested: Dict[str, str] = {}
+        # Jobs `reattach_all` found lost in a restart (see `resume_queued`).
+        self._lost_at_restart: List[str] = []
         # Serializes the "are all of this run's siblings completed yet, and
         # has one of them already chained post-inference?" check-and-act in
         # `_chain_post_inference`, keyed by run id (or job id for a run-less
@@ -376,9 +378,11 @@ class JobMethods:
                 continue
             if (getattr(record.spec, "run", None) or {}).get("id") != run_id:
                 continue
-            await self._cancel_waiting(
-                record.job_id, "canceled: an earlier model of this run failed"
-            )
+            detail = "canceled: an earlier model of this run failed"
+            if not await self._cancel_waiting(record.job_id, detail):
+                if record.job_id not in self._tasks:
+                    # Left waiting by a previous worker, not queued again yet.
+                    await self._record_canceled(record.job_id, detail)
 
     async def _finish(
         self, job_id: str, spec, log_path: Path, returncode: Optional[int]
@@ -594,6 +598,13 @@ class JobMethods:
         for job_id, outcome in reattach_outcomes.items():
             if outcome in ("reattached", "exited"):
                 self._tasks[job_id] = asyncio.create_task(self._run_reattached(job_id))
+        # Lost in the restart (marked failed): `resume_queued` ends the rest
+        # of their runs before queueing anything again.
+        self._lost_at_restart = [
+            job_id
+            for job_id, outcome in reattach_outcomes.items()
+            if outcome == "marked_failed"
+        ]
 
     async def resume_queued(self) -> List[str]:
         """Queue again the jobs a previous worker left waiting.
@@ -605,9 +616,18 @@ class JobMethods:
         a job still running from before keeps the slot and these wait behind
         it.
 
+        A job lost in the restart (`resume_reattached` saw it marked failed)
+        counts as its run failing: the rest of that run is canceled first,
+        not queued again.
+
         Returns:
             The re-queued job ids, in queue order.
         """
+        for job_id in self._lost_at_restart:
+            record = await self.store.get_job(job_id)
+            if record is not None:
+                await self._cancel_rest_of_run(job_id, record.spec)
+        self._lost_at_restart = []
         waiting = sorted(
             (
                 r
