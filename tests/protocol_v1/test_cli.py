@@ -20,7 +20,7 @@ from sleap_rtc.protocol_v1.cli import (
 )
 from sleap_rtc.protocol_v1.pair_code import decode_pair_code
 from sleap_rtc.protocol_v1.pairing import PendingPairings
-from sleap_rtc.protocol_v1.runner import identity_path, trust_store_path
+from sleap_rtc.protocol_v1.runner import identity_path
 
 
 class TestParseMount:
@@ -136,9 +136,9 @@ class TestDoctorSection:
         assert identity.node_id in captured.out
 
     def test_reports_paired_client_count(self, tmp_path, capsys):
-        from sleap_rtc.protocol_v1.trust_store import TrustStore
+        from sleap_rtc.protocol_v1.runner import open_trust_store
 
-        TrustStore(trust_store_path(tmp_path)).add_trusted("some-node-id")
+        open_trust_store(tmp_path).add_trusted("some-node-id")
 
         print_doctor_section(data_dir=tmp_path)
 
@@ -174,3 +174,29 @@ class TestStatusSection:
 
         captured = capsys.readouterr()
         assert "job-1: queued" in captured.out
+
+
+class TestClientsCommand:
+    def test_lists_paired_devices(self, tmp_path):
+        from sleap_rtc.protocol_v1.cli import clients
+        from sleap_rtc.protocol_v1.runner import open_trust_store
+
+        store = open_trust_store(tmp_path)
+        store.add_trusted(
+            "node-aaaaaaaaaaaa1",
+            {"device_name": "Lab iMac", "platform": "tauri", "version": "0.1.2"},
+        )
+        store.add_trusted("node-bbbbbbbbbbbb2", {"device_name": "Chrome on macOS", "platform": "web"})
+
+        result = CliRunner().invoke(clients, ["--data-dir", str(tmp_path)])
+
+        assert result.exit_code == 0, result.output
+        assert "Lab iMac" in result.output and "desktop 0.1.2" in result.output
+        assert "Chrome on macOS" in result.output and "browser" in result.output
+        assert "2 paired devices." in result.output
+
+    def test_no_devices_yet(self, tmp_path):
+        from sleap_rtc.protocol_v1.cli import clients
+
+        result = CliRunner().invoke(clients, ["--data-dir", str(tmp_path)])
+        assert "No paired devices yet" in result.output

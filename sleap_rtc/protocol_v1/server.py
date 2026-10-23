@@ -20,7 +20,17 @@ import json
 import logging
 import secrets
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Dict, Iterable, Optional, Protocol, Set
+from typing import (
+    Any,
+    Awaitable,
+    Callable,
+    Dict,
+    Iterable,
+    List,
+    Optional,
+    Protocol,
+    Set,
+)
 
 import websockets.exceptions
 from websockets.asyncio.server import Server, ServerConnection, serve
@@ -241,6 +251,11 @@ class ProtocolV1Server:
         self._sign_nonce = sign_nonce
         self.events = EventBus()
         self._methods: Dict[str, MethodHandler] = {}
+        self._disconnect_hooks: List[Callable[["Connection"], None]] = []
+
+    def on_disconnect(self, hook: Callable[["Connection"], None]) -> None:
+        """Call `hook(conn)` when a connection closes (after it's done)."""
+        self._disconnect_hooks.append(hook)
 
     def register(self, name: str, handler: MethodHandler) -> None:
         """Register a method handler.
@@ -413,6 +428,11 @@ class ProtocolV1Server:
                 await self._handle_frame(conn, raw)
         finally:
             self.events.unsubscribe_all(conn)
+            for hook in self._disconnect_hooks:
+                try:
+                    hook(conn)
+                except Exception:
+                    logging.exception("[server] disconnect hook failed")
 
     async def _do_hello(self, conn: Connection) -> bool:
         """Exchange `hello` frames and check protocol-version compatibility.

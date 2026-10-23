@@ -6,6 +6,8 @@ a real ProtocolV1Server — the whole point is verifying real signatures
 against a real nonce exchanged over a real connection.
 """
 
+import asyncio
+
 import pytest
 import websockets
 
@@ -200,4 +202,68 @@ class TestAuthProve:
         reply = await _call(ws, 1, "auth.prove", {"sig": sig})
 
         assert reply.error["code"] == "auth.untrusted"
+        await ws.close()
+
+
+class TestClientsList:
+    """clients.list and what pairing/reconnecting records about a device."""
+
+    async def _hello_named(self, port, node_id, name):
+        ws = await websockets.connect(f"ws://127.0.0.1:{port}")
+        await ws.send(
+            Hello(
+                proto={"min": 1, "max": 1},
+                agent={"name": "sleap-app", "version": "0.1.2", "platform": "tauri", "device_name": name},
+                node_id=node_id,
+                nonce="client-nonce",
+            ).to_json()
+        )
+        server_hello = parse_envelope(await ws.recv())
+        return ws, server_hello
+
+    async def test_pairing_records_the_device_and_clients_list_marks_you(
+        self, running_server, identity, trust_store, pending_pairings
+    ):
+        _server, port = running_server
+        _priv, node_id = _client_identity()
+        ticket = pending_pairings.create(identity.node_id, [f"ws://127.0.0.1:{port}"])
+        ws, _ = await self._hello_named(port, node_id, "Lab iMac")
+        await _call(ws, 1, "pair.claim", {"secret": ticket.secret, "node_id": node_id})
+        trust_store.add_trusted("someone-else")
+
+        reply = await _call(ws, 2, "clients.list")
+
+        by_id = {c["node_id"]: c for c in reply.result["clients"]}
+        assert by_id[node_id]["name"] == "Lab iMac"
+        assert by_id[node_id]["platform"] == "tauri"
+        assert by_id[node_id]["you"] is True
+        assert by_id["someone-else"]["you"] is False
+        await ws.close()
+
+    async def test_reconnecting_updates_the_name_and_disconnecting_last_seen(
+        self, running_server, trust_store
+    ):
+        _server, port = running_server
+        priv, node_id = _client_identity()
+        trust_store.add_trusted(node_id)
+        ws, server_hello = await self._hello_named(port, node_id, "New name")
+        sig = sign_nonce(priv, server_hello.nonce)
+        await _call(ws, 1, "auth.prove", {"sig": sig})
+        [device] = trust_store.list_devices()
+        assert device.name == "New name"
+        seen_while_connected = device.last_seen_at
+
+        await ws.close()
+        for _ in range(50):
+            if trust_store.list_devices()[0].last_seen_at > seen_while_connected:
+                break
+            await asyncio.sleep(0.02)
+        assert trust_store.list_devices()[0].last_seen_at > seen_while_connected
+
+    async def test_clients_list_needs_authentication(self, running_server):
+        _server, port = running_server
+        _priv, node_id = _client_identity()
+        ws, _ = await _hello(port, node_id)
+        reply = await _call(ws, 1, "clients.list")
+        assert reply.error["code"] == "auth.required"
         await ws.close()

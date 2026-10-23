@@ -20,6 +20,7 @@ import signal
 import sys
 import textwrap
 from pathlib import Path
+import time
 from typing import Optional
 
 import click
@@ -29,7 +30,9 @@ from sleap_rtc.protocol_v1 import daemon
 from sleap_rtc.protocol_v1.runner import (
     DEFAULT_DATA_DIR,
     DEFAULT_PORT,
+    devices_path,
     identity_path,
+    open_trust_store,
     pairing_path,
     start_worker_server,
     trust_store_path,
@@ -403,6 +406,66 @@ def pair(addrs: tuple, ttl: int, data_dir: str, as_json: bool):
     click.echo(f"Expires in {ttl} seconds.")
 
 
+def _ago(ts: Optional[float]) -> str:
+    """How long ago Unix time `ts` was ("5 min ago"), or "never" if None."""
+    if ts is None:
+        return "never"
+    secs = max(0, int(time.time() - ts))
+    for unit, size in (("day", 86400), ("hr", 3600), ("min", 60)):
+        if secs >= size:
+            n = secs // size
+            return f"{n} {unit}{'s' if n != 1 and unit == 'day' else ''} ago"
+    return "just now"
+
+
+@click.command(name="clients")
+@click.option(
+    "--data-dir",
+    default=str(DEFAULT_DATA_DIR),
+    show_default=True,
+    help="Worker data directory (same as 'serve').",
+)
+def clients(data_dir: str):
+    """List the devices paired with this worker: who can use it.
+
+    Each device's name (as its app reports it), platform and app version,
+    when it paired and when it was last seen (connected or disconnected).
+    Works whether or not 'sleap-rtc serve' is running.
+    """
+    data_dir = Path(data_dir).expanduser()
+    if not (devices_path(data_dir).exists() or trust_store_path(data_dir).exists()):
+        click.echo("No paired devices yet. Pair one with 'sleap-rtc pair'.")
+        return
+    devices = open_trust_store(data_dir).list_devices()
+    if not devices:
+        click.echo("No paired devices yet. Pair one with 'sleap-rtc pair'.")
+        return
+
+    def platform(d) -> str:
+        label = {"tauri": "desktop", "web": "browser"}.get(
+            d.platform or "", d.platform or "—"
+        )
+        return f"{label} {d.app_version}" if d.app_version else label
+
+    rows = [
+        (
+            d.name or "(unnamed)",
+            platform(d),
+            _ago(d.paired_at) if d.paired_at else "—",
+            _ago(d.last_seen_at),
+            d.node_id[:12],
+        )
+        for d in devices
+    ]
+    headers = ("Device", "App", "Paired", "Last seen", "ID")
+    widths = [max(len(h), *(len(r[i]) for r in rows)) for i, h in enumerate(headers)]
+    line = "  ".join(f"{{:<{w}}}" for w in widths)
+    click.echo(click.style(line.format(*headers), bold=True))
+    for r in rows:
+        click.echo(line.format(*r))
+    click.echo(f"\n{len(devices)} paired device{'s' if len(devices) != 1 else ''}.")
+
+
 def print_doctor_section(data_dir: Path = DEFAULT_DATA_DIR) -> bool:
     """Print a "Protocol v1 Worker" section for the `doctor` command.
 
@@ -438,12 +501,9 @@ def print_doctor_section(data_dir: Path = DEFAULT_DATA_DIR) -> bool:
             f"(created on first 'sleap-rtc serve' or 'sleap-rtc pair')"
         )
 
-    trust_path = trust_store_path(data_dir)
-    if trust_path.exists():
-        from sleap_rtc.protocol_v1.trust_store import TrustStore
-
-        n = len(TrustStore(trust_path).list_trusted())
-        click.echo(f"  Paired clients: {n}")
+    if devices_path(data_dir).exists() or trust_store_path(data_dir).exists():
+        n = len(open_trust_store(data_dir).list_trusted())
+        click.echo(f"  Paired clients: {n} (see 'sleap-rtc clients')")
     else:
         click.echo("  Paired clients: 0 (no trust store yet)")
 
@@ -465,7 +525,6 @@ def print_status_section(data_dir: Path = DEFAULT_DATA_DIR) -> None:
         return
 
     from sleap_rtc.protocol_v1.identity import WorkerIdentity
-    from sleap_rtc.protocol_v1.trust_store import TrustStore
 
     identity = WorkerIdentity(id_path)
     click.echo(f"  node_id: {identity.node_id}")
@@ -476,8 +535,8 @@ def print_status_section(data_dir: Path = DEFAULT_DATA_DIR) -> None:
     else:
         click.echo(f"  Worker: running (pid {running.pid})")
 
-    trust_path = trust_store_path(data_dir)
-    n_trusted = len(TrustStore(trust_path).list_trusted()) if trust_path.exists() else 0
+    has_store = devices_path(data_dir).exists() or trust_store_path(data_dir).exists()
+    n_trusted = len(open_trust_store(data_dir).list_trusted()) if has_store else 0
     click.echo(f"  Paired clients: {n_trusted}")
 
     store_path = data_dir / "jobs.sqlite"

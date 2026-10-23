@@ -58,6 +58,8 @@ class AuthMethods:
 
         server.register("pair.claim", self.pair_claim)
         server.register("auth.prove", self.auth_prove)
+        server.register("clients.list", self.clients_list)
+        server.on_disconnect(self._record_disconnect)
 
     async def pair_claim(self, params: dict, conn: Connection) -> dict:
         """Handle `pair.claim` — first-contact trust via a one-time secret.
@@ -75,10 +77,29 @@ class AuthMethods:
                 AUTH_PAIRING_EXPIRED, "Pairing secret is invalid or already used"
             )
 
-        self.trust_store.add_trusted(node_id)
+        self.trust_store.add_trusted(node_id, conn.peer_agent)
         conn.peer_node_id = node_id
         conn.authenticated = True
         return {}
+
+    async def clients_list(self, params: dict, conn: Connection) -> dict:
+        """Handle `clients.list` — every device paired with this worker.
+
+        Who can use this worker: each device's reported name, platform and
+        app version, when it paired and was last seen, and `you` on the
+        caller's own entry. Read-only; devices are removed on the worker.
+        """
+        return {
+            "clients": [
+                {**d.to_dict(), "you": d.node_id == conn.peer_node_id}
+                for d in self.trust_store.list_devices()
+            ]
+        }
+
+    def _record_disconnect(self, conn: Connection) -> None:
+        """Last seen = when a paired device last connected or disconnected."""
+        if conn.authenticated and conn.peer_node_id is not None:
+            self.trust_store.record_seen(conn.peer_node_id)
 
     async def auth_prove(self, params: dict, conn: Connection) -> dict:
         """Handle `auth.prove` — an already-paired client re-proving its identity.
@@ -106,4 +127,5 @@ class AuthMethods:
             )
 
         conn.authenticated = True
+        self.trust_store.record_seen(conn.peer_node_id, conn.peer_agent)
         return {}
