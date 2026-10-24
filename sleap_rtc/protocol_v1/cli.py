@@ -50,6 +50,15 @@ from sleap_rtc.protocol_v1.shared_folders import (
 IROH_ONLINE_TIMEOUT_SECS = 10.0
 
 
+def _can_ask() -> bool:
+    """Whether someone is at a terminal to answer a y/N prompt.
+
+    Both ends: a script or test that captures output may still leave stdin
+    attached to a console (e.g. on Windows).
+    """
+    return sys.stdin.isatty() and sys.stdout.isatty()
+
+
 def _share_folder(
     shared: SharedFolders,
     path: Path,
@@ -213,7 +222,7 @@ def serve(
     # Ask here, in the user's terminal — before a --daemonize child (which
     # has none) is spawned; the child then finds the answers already saved.
     shared = open_shared_folders(data_dir_path)
-    interactive = sys.stdin.isatty() and ready_file is None
+    interactive = _can_ask() and ready_file is None
     _share_folder(shared, serve_folder_path, yes=yes, interactive=interactive)
     for raw in mounts:
         path, label = parse_mount(raw)
@@ -803,8 +812,8 @@ def add_folder(folder: str, label: Optional[str], yes: bool, data_dir: Optional[
     if already is not None:
         click.echo(f'Already shared (as part of "{already.label}": {already.path}).')
         return
-    if not _share_folder(shared, path, label, yes=yes, interactive=sys.stdin.isatty()):
-        if sys.stdin.isatty():
+    if not _share_folder(shared, path, label, yes=yes, interactive=_can_ask()):
+        if _can_ask():
             click.echo("Not shared.")
         else:
             raise click.ClickException(
