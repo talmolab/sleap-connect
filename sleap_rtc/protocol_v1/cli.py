@@ -25,29 +25,70 @@ from typing import Optional
 
 import click
 
-from sleap_rtc.config import MountConfig
 from sleap_rtc.protocol_v1 import daemon
 from sleap_rtc.protocol_v1.runner import (
     DEFAULT_DATA_DIR,
     DEFAULT_PORT,
     devices_path,
     identity_path,
+    open_shared_folders,
     open_trust_store,
     pairing_path,
     start_worker_server,
     trust_store_path,
 )
-from sleap_rtc.worker.file_manager import FileManager
+from sleap_rtc.protocol_v1.shared_folders import (
+    SharedFolderFileManager,
+    SharedFolders,
+    is_broad,
+    parse_mount,
+    resolve_folder,
+)
 
 # How long `serve` waits at startup for its iroh endpoint to reach a home
 # relay, so the first `pair` ticket is dialable from outside the LAN.
 IROH_ONLINE_TIMEOUT_SECS = 10.0
 
 
-def _parse_mount(raw: str) -> MountConfig:
-    """Parse a `--mount` value: "PATH" or "PATH:LABEL"."""
-    path, sep, label = raw.partition(":")
-    return MountConfig(path=path, label=label if sep else Path(path).name or path)
+def _share_folder(
+    shared: SharedFolders,
+    path: Path,
+    label: Optional[str] = None,
+    *,
+    yes: bool,
+    interactive: bool,
+) -> bool:
+    """Share `path` after confirming (y/N). True if it's shared now.
+
+    A folder already shared (itself or inside a shared folder) needs no
+    confirmation. Without a terminal to ask on, it's left unshared unless
+    `yes`.
+    """
+    if shared.find(path) is not None:
+        return True
+    if not path.is_dir():
+        raise click.ClickException(f"Not a folder: {path}")
+    if not yes:
+        if not interactive:
+            return False
+        click.echo(
+            f"Share {click.style(str(path), bold=True)} with devices paired to this worker?"
+        )
+        click.echo(
+            "  They can browse it, and their training/inference jobs can read and write inside it."
+        )
+        if is_broad(path):
+            click.echo(
+                click.style(
+                    "  This is your whole home folder (or more). Consider sharing just "
+                    "your data folder instead.",
+                    fg="yellow",
+                )
+            )
+        if not click.confirm("Share this folder?", default=True):
+            return False
+    shared.add(path, label)
+    return True
 
 
 @click.command(name="serve")
@@ -71,9 +112,21 @@ def _parse_mount(raw: str) -> MountConfig:
     "--mount",
     "mounts",
     multiple=True,
-    help="A directory clients may browse (fs.mounts/fs.list), as PATH or "
-    "PATH:LABEL. Repeatable. fs.mounts/fs.list are always available even "
-    "with none given — they just report an empty mount list.",
+    help="Also share this folder (PATH or PATH:LABEL; relative paths are "
+    "fine), like 'sleap-rtc add-folder'. Repeatable. Asked once, then "
+    "remembered.",
+)
+@click.option(
+    "--yes",
+    "-y",
+    is_flag=True,
+    help="Share the folder 'serve' starts in (and any --mount) without asking.",
+)
+@click.option(
+    "--serve-folder",
+    default=None,
+    hidden=True,
+    help="Internal: the folder the user ran 'serve --daemonize' in.",
 )
 @click.option(
     "--iroh/--no-iroh",
@@ -119,6 +172,8 @@ def serve(
     blob_port: Optional[int],
     data_dir: str,
     mounts: tuple,
+    yes: bool,
+    serve_folder: Optional[str],
     iroh: bool,
     metrics: bool,
     daemonize: bool,
@@ -139,16 +194,32 @@ def serve(
 
     Only one worker can run per --data-dir at a time.
 
+    The folder you start it in is shared with paired devices — asked the
+    first time (y/N), then remembered. Run it in your data folder. Share
+    more with --mount or 'sleap-rtc add-folder'.
+
     Examples:
-        sleap-rtc serve --port 9631 --mount /data/videos:lab-data
+        cd /data/project && sleap-rtc serve
         sleap-rtc serve --daemonize --mount /data/videos:lab-data
         sleap-rtc serve --stop
     """
-    data_dir_path = Path(data_dir)
+    data_dir_path = Path(data_dir).expanduser()
 
     if stop:
         _stop(data_dir_path)
         return
+
+    serve_folder_path = Path(serve_folder) if serve_folder else Path.cwd().resolve()
+    # Ask here, in the user's terminal — before a --daemonize child (which
+    # has none) is spawned; the child then finds the answers already saved.
+    shared = open_shared_folders(data_dir_path)
+    interactive = sys.stdin.isatty() and ready_file is None
+    _share_folder(shared, serve_folder_path, yes=yes, interactive=interactive)
+    for raw in mounts:
+        path, label = parse_mount(raw)
+        _share_folder(
+            shared, resolve_folder(path), label, yes=yes, interactive=interactive
+        )
 
     if daemonize:
         _daemonize(
@@ -157,7 +228,8 @@ def serve(
                 port=port,
                 blob_port=blob_port,
                 data_dir=data_dir_path,
-                mounts=mounts,
+                mounts=(),
+                serve_folder=serve_folder_path,
                 iroh=iroh,
                 metrics=metrics,
             ),
@@ -176,7 +248,7 @@ def serve(
                 port,
                 blob_port,
                 data_dir_path,
-                mounts,
+                serve_folder_path,
                 iroh,
                 metrics,
                 ready_file=Path(ready_file) if ready_file else None,
@@ -238,7 +310,7 @@ async def _serve_async(
     port: int,
     blob_port: Optional[int],
     data_dir: Path,
-    mounts: tuple = (),
+    serve_folder: Optional[Path] = None,
     enable_iroh: bool = True,
     enable_metrics: bool = True,
     ready_file: Optional[Path] = None,
@@ -251,7 +323,9 @@ async def _serve_async(
             signal.SIGTERM, asyncio.current_task().cancel
         )
 
-    file_manager = FileManager(mounts=[_parse_mount(m) for m in mounts])
+    file_manager = SharedFolderFileManager(
+        open_shared_folders(data_dir), data_dir, serve_folder
+    )
     worker = await start_worker_server(
         host=host,
         port=port,
@@ -287,12 +361,16 @@ async def _serve_async(
                 f"Re-queued {n} job{'s' if n != 1 else ''} left waiting by the previous run."
             )
 
-        if not worker.trust_store.list_trusted():
-            click.echo("")
+        _print_shared_folders(file_manager)
+
+        n_devices = len(worker.trust_store.list_trusted())
+        click.echo("")
+        if n_devices:
+            click.echo(f"Paired devices: {n_devices} (see 'sleap-rtc clients')")
+        else:
             click.echo(
                 click.style(
-                    "No paired clients yet — run 'sleap-rtc pair' to generate a "
-                    "pairing ticket.",
+                    "No paired devices yet — run 'sleap-rtc pair' to get a pairing code.",
                     fg="yellow",
                 )
             )
@@ -404,6 +482,29 @@ def pair(addrs: tuple, ttl: int, data_dir: str, as_json: bool):
     click.echo("")
     click.echo("In SLEAP: Connect → Pair a worker → paste the code")
     click.echo(f"Expires in {ttl} seconds.")
+
+
+def _print_shared_folders(file_manager: SharedFolderFileManager) -> None:
+    """The startup "what can paired devices see" section."""
+    mounts = file_manager.get_mounts()
+    click.echo("")
+    if not mounts:
+        click.echo(
+            click.style(
+                "No shared folders — paired devices can't browse files on this "
+                "worker. Share one with 'sleap-rtc add-folder <folder>', or run "
+                "'serve' in your data folder.",
+                fg="yellow",
+            )
+        )
+        return
+    click.echo(
+        click.style("Shared folders", bold=True)
+        + " — paired devices can browse these, and their jobs can read and write inside them:"
+    )
+    width = max(len(m["label"]) for m in mounts)
+    for m in mounts:
+        click.echo(f"  {m['label']:<{width}}  {m['path']}")
 
 
 def _ago(ts: Optional[float]) -> str:
@@ -676,3 +777,83 @@ async def _print_recent_jobs(store_path: Path, limit: int = 5) -> None:
     click.echo(f"  Recent jobs (showing up to {limit}):")
     for record in jobs[:limit]:
         click.echo(f"    {record.job_id}: {record.state}")
+
+
+def _data_dir(data_dir: Optional[str]) -> Path:
+    return Path(data_dir or DEFAULT_DATA_DIR).expanduser()
+
+
+@click.command(name="add-folder")
+@click.argument("folder", default=".", required=False)
+@click.option(
+    "--label", default=None, help="Display name (default: the folder's name)."
+)
+@click.option("--yes", "-y", is_flag=True, help="Don't ask for confirmation.")
+@_DATA_DIR_OPTION
+def add_folder(folder: str, label: Optional[str], yes: bool, data_dir: Optional[str]):
+    """Share a folder with the devices paired to this worker.
+
+    They can browse it, and their training/inference jobs can read and write
+    inside it. FOLDER may be relative (default: the current folder). A
+    running worker picks it up right away.
+    """
+    path = resolve_folder(folder)
+    shared = open_shared_folders(_data_dir(data_dir))
+    already = shared.find(path)
+    if already is not None:
+        click.echo(f'Already shared (as part of "{already.label}": {already.path}).')
+        return
+    if not _share_folder(shared, path, label, yes=yes, interactive=sys.stdin.isatty()):
+        if sys.stdin.isatty():
+            click.echo("Not shared.")
+        else:
+            raise click.ClickException(
+                "Not shared: pass --yes to share without a prompt."
+            )
+        return
+    added = shared.find(path)
+    click.echo(f'Shared {added.path} as "{added.label}".')
+
+
+@click.command(name="remove-folder")
+@click.argument("folder")
+@_DATA_DIR_OPTION
+def remove_folder(folder: str, data_dir: Optional[str]):
+    """Stop sharing a folder (by path or label, as 'sleap-rtc folders' shows).
+
+    Paired devices can no longer browse it; a running worker applies this
+    right away.
+    """
+    removed = open_shared_folders(_data_dir(data_dir)).remove(folder)
+    if removed is None:
+        raise click.ClickException(
+            f"No shared folder matches \"{folder}\". See 'sleap-rtc folders'."
+        )
+    click.echo(f'Stopped sharing "{removed.label}" ({removed.path}).')
+
+
+@click.command(name="folders")
+@_DATA_DIR_OPTION
+def folders(data_dir: Optional[str]):
+    """List the folders shared with the devices paired to this worker."""
+    shared = open_shared_folders(_data_dir(data_dir)).list()
+    if not shared:
+        click.echo(
+            "No shared folders. Run 'sleap-rtc serve' in your data folder, or "
+            "'sleap-rtc add-folder <folder>'."
+        )
+        return
+    rows = [
+        (
+            f.label,
+            f.path + ("" if Path(f.path).is_dir() else "  (missing)"),
+            _ago(f.added_at),
+        )
+        for f in shared
+    ]
+    headers = ("Label", "Path", "Shared")
+    widths = [max(len(h), *(len(r[i]) for r in rows)) for i, h in enumerate(headers)]
+    line = "  ".join(f"{{:<{w}}}" for w in widths)
+    click.echo(click.style(line.format(*headers), bold=True))
+    for r in rows:
+        click.echo(line.format(*r))

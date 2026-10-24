@@ -159,6 +159,20 @@ class TestServeArgv:
         )
         assert "--blob-port" not in argv
 
+    def test_passes_the_folder_serve_was_started_in(self, tmp_path):
+        argv = daemon.serve_argv(
+            host="0.0.0.0",
+            port=9000,
+            blob_port=None,
+            data_dir=tmp_path,
+            mounts=(),
+            iroh=True,
+            metrics=False,
+            serve_folder=tmp_path / "project",
+        )
+        i = argv.index("--serve-folder")
+        assert argv[i + 1] == str(tmp_path / "project")
+
 
 class TestDaemonize:
     """End-to-end, against a real detached `serve` child."""

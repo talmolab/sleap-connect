@@ -119,7 +119,7 @@ class TestFileManagerWiring:
             )
 
             assert reply.error is None
-            assert reply.result == {"mounts": []}
+            assert reply.result == {"mounts": [], "serve_folder": None}
         finally:
             await worker.close()
 
@@ -146,7 +146,8 @@ class TestFileManagerWiring:
             )
 
             assert reply.result == {
-                "mounts": [{"path": str(mount_dir), "label": "data"}]
+                "mounts": [{"path": str(mount_dir), "label": "data"}],
+                "serve_folder": None,
             }
         finally:
             await worker.close()

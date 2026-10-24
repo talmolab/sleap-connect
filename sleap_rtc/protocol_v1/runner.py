@@ -41,6 +41,7 @@ from sleap_rtc.protocol_v1.job_methods import JobMethods
 from sleap_rtc.protocol_v1.pairing import PendingPairings
 from sleap_rtc.protocol_v1.server import ProtocolV1Server
 from sleap_rtc.protocol_v1.worker_info import WorkerInfoMethods
+from sleap_rtc.protocol_v1.shared_folders import SharedFolders
 from sleap_rtc.protocol_v1.trust_store import TrustStore
 
 DEFAULT_DATA_DIR = Path.home() / ".sleap-rtc" / "protocol_v1"
@@ -82,6 +83,16 @@ def open_trust_store(data_dir: Path) -> TrustStore:
     return TrustStore(
         devices_path(data_dir), legacy_json_path=trust_store_path(data_dir)
     )
+
+
+def shared_folders_path(data_dir: Path) -> Path:
+    """Where the list of folders shared with paired devices lives under `data_dir`."""
+    return data_dir / "shared_folders.json"
+
+
+def open_shared_folders(data_dir: Path) -> SharedFolders:
+    """The worker's shared-folder list (see `shared_folders.py`)."""
+    return SharedFolders(shared_folders_path(data_dir))
 
 
 def pairing_path(data_dir: Path) -> Path:
