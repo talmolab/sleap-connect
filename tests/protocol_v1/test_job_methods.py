@@ -765,7 +765,10 @@ class TestFsMethods:
 
         result = await methods.fs_mounts({}, conn=None)
 
-        assert result == {"mounts": [{"path": "/data", "label": "Data"}]}
+        assert result == {
+            "mounts": [{"path": "/data", "label": "Data"}],
+            "serve_folder": None,
+        }
 
     async def test_fs_list_delegates_to_file_manager(self, store, tmp_path):
         listing = {"entries": [{"name": "a.slp", "type": "file"}], "total_count": 1}

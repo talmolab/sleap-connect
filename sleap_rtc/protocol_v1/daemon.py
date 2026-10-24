@@ -165,6 +165,7 @@ def serve_argv(
     mounts: Sequence[str],
     iroh: bool,
     metrics: bool,
+    serve_folder: Optional[Path] = None,
 ) -> List[str]:
     """Build the `serve` arguments that reproduce these options in a child."""
     argv = ["serve", "--host", host, "--port", str(port), "--data-dir", str(data_dir)]
@@ -172,6 +173,8 @@ def serve_argv(
         argv += ["--blob-port", str(blob_port)]
     for mount in mounts:
         argv += ["--mount", mount]
+    if serve_folder is not None:
+        argv += ["--serve-folder", str(serve_folder)]
     argv.append("--iroh" if iroh else "--no-iroh")
     argv.append("--metrics" if metrics else "--no-metrics")
     return argv

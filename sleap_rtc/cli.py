@@ -3922,13 +3922,19 @@ def resolve_paths_deprecated(ctx, **kwargs):
 # Protocol v1 Worker Commands (items 1.5/1.6 — pairing/jobs, no signaling)
 # =============================================================================
 
+from sleap_rtc.protocol_v1.cli import add_folder as protocol_v1_add_folder
 from sleap_rtc.protocol_v1.cli import clients as protocol_v1_clients
+from sleap_rtc.protocol_v1.cli import folders as protocol_v1_folders
+from sleap_rtc.protocol_v1.cli import remove_folder as protocol_v1_remove_folder
 from sleap_rtc.protocol_v1.cli import pair as protocol_v1_pair
 from sleap_rtc.protocol_v1.cli import serve as protocol_v1_serve
 
 cli.add_command(protocol_v1_serve)
 cli.add_command(protocol_v1_pair)
 cli.add_command(protocol_v1_clients)
+cli.add_command(protocol_v1_add_folder)
+cli.add_command(protocol_v1_remove_folder)
+cli.add_command(protocol_v1_folders)
 
 
 if __name__ == "__main__":

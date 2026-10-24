@@ -93,6 +93,11 @@ def _detect_hardware() -> Dict[str, Any]:
     return {**_detect_gpus(), "sleap_nn_version": _detect_sleap_nn_version()}
 
 
+# What this worker supports beyond the base protocol, for clients to check
+# before relying on it (`worker.info.features`). Later stages add entries.
+FEATURES = ["shared_folders"]
+
+
 class WorkerInfoMethods:
     """Registers `worker.info` on a server."""
 
@@ -113,4 +118,8 @@ class WorkerInfoMethods:
         async with self._lock:
             if self._hardware is None:
                 self._hardware = await asyncio.to_thread(_detect_hardware)
-        return {**self._hardware, "busy": self._queue.running > 0}
+        return {
+            **self._hardware,
+            "busy": self._queue.running > 0,
+            "features": list(FEATURES),
+        }

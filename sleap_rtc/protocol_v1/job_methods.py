@@ -1151,8 +1151,16 @@ class JobMethods:
         return record.job_id in self._tasks or record.state == "running"
 
     async def fs_mounts(self, params: dict, conn: Connection) -> dict:
-        """Handle `fs.mounts` — the configured, browsable mount roots."""
-        return {"mounts": self.file_manager.get_mounts()}
+        """Handle `fs.mounts` — the shared folders (browsable roots).
+
+        Also `serve_folder`: the folder `sleap-rtc serve` started in, when
+        it's shared (else null) — where the app puts outputs it has no
+        better folder for.
+        """
+        return {
+            "mounts": self.file_manager.get_mounts(),
+            "serve_folder": getattr(self.file_manager, "serve_folder", None),
+        }
 
     async def fs_list(self, params: dict, conn: Connection) -> dict:
         """Handle `fs.list` — directory listing, scoped to configured mounts."""
