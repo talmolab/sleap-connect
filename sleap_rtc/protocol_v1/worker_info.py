@@ -95,7 +95,7 @@ def _detect_hardware() -> Dict[str, Any]:
 
 # What this worker supports beyond the base protocol, for clients to check
 # before relying on it (`worker.info.features`). Later stages add entries.
-FEATURES = ["shared_folders", "path_checks"]
+FEATURES = ["shared_folders", "path_checks", "sleap_outputs"]
 
 
 class WorkerInfoMethods:

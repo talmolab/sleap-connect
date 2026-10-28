@@ -220,47 +220,50 @@ class TestResultBlobs:
             result_events[0].data["blobs"]["predictions"]["sha256"] == expected_sha256
         )
 
-    async def test_falls_back_to_the_captured_stdout_path(self, store, tmp_path):
-        content = b"captured-path predictions"
-        captured_path = tmp_path / "captured.slp"
+    async def test_predictions_go_in_a_predictions_folder_next_to_the_labels(
+        self, store, tmp_path, monkeypatch
+    ):
+        # The worker picks SLEAP's path when the client gives none; pin the
+        # timestamped name so the fake command can write there.
+        data_path = tmp_path / "project" / "labels.slp"
+        data_path.parent.mkdir()
+        expected = (
+            data_path.parent
+            / "predictions"
+            / "labels.slp.251028_103000.predictions.slp"
+        )
+        monkeypatch.setattr(job_methods_module, "predictions_path", lambda _d: expected)
+        content = b"sleap-style predictions"
         index = BlobIndex(tmp_path / "blobs.sqlite")
-        spec = self._track_spec(tmp_path / "video.mp4")  # no output_path set
         cmd = [
             sys.executable,
             "-c",
-            f"open({str(captured_path)!r}, 'wb').write({content!r}); "
-            f"print('Predictions output path: ' + {str(captured_path)!r})",
+            f"open({str(expected)!r}, 'wb').write({content!r})",
         ]
         methods = _make_methods(store, tmp_path, cmd, blob_index=index)
 
-        result = await methods.submit({"spec": spec.to_dict()}, conn=None)
+        result = await methods.submit(
+            {"spec": self._track_spec(data_path).to_dict()}, conn=None
+        )
         await _wait_for_terminal(methods, store, result["job_id"])
 
-        expected_sha256 = hashlib.sha256(content).hexdigest()
-        blob = await index.get(expected_sha256)
-        assert blob is not None
-        assert blob.path == str(captured_path)
+        blob = await index.get(hashlib.sha256(content).hexdigest())
+        assert blob is not None and blob.path == str(expected)
 
-    async def test_falls_back_to_the_naming_convention(self, store, tmp_path):
-        data_path = tmp_path / "video.slp"
-        content = b"convention-fallback predictions"
-        convention_path = tmp_path / "video.predictions.slp"
-        index = BlobIndex(tmp_path / "blobs.sqlite")
-        spec = self._track_spec(data_path)  # no output_path, nothing captured
-        cmd = [
-            sys.executable,
-            "-c",
-            f"open({str(convention_path)!r}, 'wb').write({content!r})",
-        ]
-        methods = _make_methods(store, tmp_path, cmd, blob_index=index)
+    def test_a_reattached_job_falls_back_to_the_captured_stdout_path(self, tmp_path):
+        # After a restart the stored spec has no worker-chosen output_path.
+        log = tmp_path / "job.log"
+        log.write_text("…\nPredictions output path: /data/out.predictions.slp\n")
+        spec = self._track_spec(tmp_path / "video.mp4")
+        assert JobMethods._resolve_track_output_path(spec, log) == Path(
+            "/data/out.predictions.slp"
+        )
 
-        result = await methods.submit({"spec": spec.to_dict()}, conn=None)
-        await _wait_for_terminal(methods, store, result["job_id"])
-
-        expected_sha256 = hashlib.sha256(content).hexdigest()
-        blob = await index.get(expected_sha256)
-        assert blob is not None
-        assert blob.path == str(convention_path)
+    def test_a_reattached_job_falls_back_to_the_naming_convention(self, tmp_path):
+        spec = self._track_spec(tmp_path / "video.slp")
+        assert JobMethods._resolve_track_output_path(spec, tmp_path / "none.log") == (
+            tmp_path / "video.predictions.slp"
+        )
 
     async def test_no_blobs_when_the_output_file_never_materializes(
         self, store, tmp_path
@@ -930,7 +933,10 @@ class TestStopEarly:
         # Something else (e.g. local training) holds the default controller
         # port: the job gets free ports instead, sleap-nn is launched on them,
         # they're saved on the job, and Stop still reaches it over ZMQ.
-        ports = {"controller": self._CONTROL_PORT + 4, "publish": self._PUBLISH_PORT + 4}
+        ports = {
+            "controller": self._CONTROL_PORT + 4,
+            "publish": self._PUBLISH_PORT + 4,
+        }
         ctx = zmq.Context()
         blocker = ctx.socket(zmq.PUB)
         blocker.bind(f"tcp://127.0.0.1:{ports['controller']}")
@@ -1270,7 +1276,9 @@ class TestProgressLines:
         job_id = (await methods.submit({"spec": spec.to_dict()}, conn=None))["job_id"]
         await _wait_for_terminal(methods, store, job_id)
 
-        events = [e for e in await store.get_events_since(job_id) if e.topic == "job.log"]
+        events = [
+            e for e in await store.get_events_since(job_id) if e.topic == "job.log"
+        ]
         logs = [e.data for e in events]
         lines = [d["line"] for d in logs if not d.get("progress")]
         progress = [d["line"] for d in logs if d.get("progress")]
@@ -1280,7 +1288,11 @@ class TestProgressLines:
         # throttle interval of the script's real run time (a slow CI runner
         # stretches the nominal 2.5 s), and nowhere near one per redraw (50).
         elapsed = events[-1].created_at - events[0].created_at
-        assert 1 <= len(progress) <= elapsed / job_methods_module._PROGRESS_EMIT_INTERVAL_SECS + 2
+        assert (
+            1
+            <= len(progress)
+            <= elapsed / job_methods_module._PROGRESS_EMIT_INTERVAL_SECS + 2
+        )
         assert len(progress) < 50
         assert all(p.startswith("Epoch 1: ") and "\r" not in p for p in progress)
 
@@ -1875,14 +1887,18 @@ class TestQueueControl:
         assert methods.queue_position(second) is None
         assert methods.queue_position(third) == 1
         events = await store.get_events_since(second)
-        assert [e.data["state"] for e in events if e.topic == "job.status"][-1] == "canceled"
+        assert [e.data["state"] for e in events if e.topic == "job.status"][
+            -1
+        ] == "canceled"
 
         go.touch()
         await _wait_for_terminal(methods, store, first)
         assert (await _wait_for_terminal(methods, store, third)).state == "completed"
         assert (await store.get_job(second)).state == "canceled"
 
-    async def test_a_failed_model_cancels_the_rest_of_its_run_only(self, store, tmp_path):
+    async def test_a_failed_model_cancels_the_rest_of_its_run_only(
+        self, store, tmp_path
+    ):
         go = tmp_path / "go"
         run_a = {"id": "run-a", "index": 0, "count": 2}
         run_a2 = {"id": "run-a", "index": 1, "count": 2}
@@ -1896,19 +1912,22 @@ class TestQueueControl:
         methods = _make_methods(store, tmp_path, fail_after_go)
         a1 = (
             await methods.submit(
-                {"spec": TrainJobSpec(config_path="/c.yaml", run=run_a).to_dict()}, conn=None
+                {"spec": TrainJobSpec(config_path="/c.yaml", run=run_a).to_dict()},
+                conn=None,
             )
         )["job_id"]
         await _wait_for_state(store, a1, "running")
         methods._builder = _FakeCommandBuilder([sys.executable, "-c", "pass"])
         a2 = (
             await methods.submit(
-                {"spec": TrainJobSpec(config_path="/c.yaml", run=run_a2).to_dict()}, conn=None
+                {"spec": TrainJobSpec(config_path="/c.yaml", run=run_a2).to_dict()},
+                conn=None,
             )
         )["job_id"]
         b1 = (
             await methods.submit(
-                {"spec": TrainJobSpec(config_path="/c.yaml", run=run_b).to_dict()}, conn=None
+                {"spec": TrainJobSpec(config_path="/c.yaml", run=run_b).to_dict()},
+                conn=None,
             )
         )["job_id"]
         await asyncio.sleep(0.1)
@@ -1928,7 +1947,9 @@ class TestQueueControl:
         second = (await methods.submit({"spec": spec.to_dict()}, conn=None))["job_id"]
         await asyncio.sleep(0.3)
 
-        listed = {j["job_id"]: j for j in (await methods.list_jobs({}, conn=None))["jobs"]}
+        listed = {
+            j["job_id"]: j for j in (await methods.list_jobs({}, conn=None))["jobs"]
+        }
         assert isinstance(listed[first]["started_at"], float)
         assert listed[second]["started_at"] is None
 
@@ -2007,14 +2028,23 @@ class TestResumeQueued:
         from sleap_rtc.jobs.process import reattach_all
 
         lost = await store.create_job(
-            "job-lost", TrainJobSpec(config_path="/c.yaml", run={"id": "run-a", "index": 0, "count": 2})
+            "job-lost",
+            TrainJobSpec(
+                config_path="/c.yaml", run={"id": "run-a", "index": 0, "count": 2}
+            ),
         )
         await store.update_state(lost.job_id, "running")  # no live process behind it
         sibling = await store.create_job(
-            "job-sib", TrainJobSpec(config_path="/c.yaml", run={"id": "run-a", "index": 1, "count": 2})
+            "job-sib",
+            TrainJobSpec(
+                config_path="/c.yaml", run={"id": "run-a", "index": 1, "count": 2}
+            ),
         )
         other = await store.create_job(
-            "job-other", TrainJobSpec(config_path="/c.yaml", run={"id": "run-b", "index": 0, "count": 1})
+            "job-other",
+            TrainJobSpec(
+                config_path="/c.yaml", run={"id": "run-b", "index": 0, "count": 1}
+            ),
         )
 
         outcomes = await reattach_all(store)
@@ -2027,19 +2057,27 @@ class TestResumeQueued:
         record = await store.get_job(sibling.job_id)
         assert record.state == "canceled"
         assert "earlier model of this run failed" in record.error
-        assert (await _wait_for_terminal(methods, store, other.job_id)).state == "completed"
+        assert (
+            await _wait_for_terminal(methods, store, other.job_id)
+        ).state == "completed"
 
 
 class TestSubmittedBy:
-    async def test_a_job_records_the_device_that_submitted_it(self, store, spec, tmp_path):
+    async def test_a_job_records_the_device_that_submitted_it(
+        self, store, spec, tmp_path
+    ):
         class _Conn:
             peer_node_id = "device-abc"
             authenticated = True
 
         methods = _make_methods(store, tmp_path, [sys.executable, "-c", "pass"])
-        job_id = (await methods.submit({"spec": spec.to_dict()}, conn=_Conn()))["job_id"]
+        job_id = (await methods.submit({"spec": spec.to_dict()}, conn=_Conn()))[
+            "job_id"
+        ]
         await _wait_for_terminal(methods, store, job_id)
 
         assert (await store.get_job(job_id)).submitted_by == "device-abc"
-        listed = {j["job_id"]: j for j in (await methods.list_jobs({}, conn=None))["jobs"]}
+        listed = {
+            j["job_id"]: j for j in (await methods.list_jobs({}, conn=None))["jobs"]
+        }
         assert listed[job_id]["submitted_by"] == "device-abc"
