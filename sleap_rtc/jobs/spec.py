@@ -68,6 +68,9 @@ class TrainJobSpec:
     # Links jobs submitted together as one run (e.g. the centroid + centered
     # instance jobs of a top-down train), {"id": str, "index": int,
     # "count": int}. Opaque here; the client assigns and interprets it.
+    # Set by the worker, never taken from a client: where sleap-nn may
+    # cache images on disk (`data_config.cache_img_path`), inside the job folder.
+    cache_img_path: Optional[str] = None
     run: Optional[Dict[str, Any]] = None
     # Inference jobs to chain once every job in this spec's `run` has
     # completed (see `JobMethods._chain_post_inference`). Each entry is a

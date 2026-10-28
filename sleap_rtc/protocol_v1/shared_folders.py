@@ -183,6 +183,32 @@ class SharedFolderFileManager(FileManager):
             return None
         return str(self._serve_folder)
 
+    def stat_path(self, path: str) -> dict:
+        """`fs.stat`: full metadata in a shared folder; outside, existence only.
+
+        A job can read media an `.slp` points at wherever it is, so the app
+        needs to know such a file exists — but not its size, contents or
+        neighbors. Answers `{path, type, shared: false}`, or not-found. The
+        worker's data dir is still refused outright.
+        """
+        try:
+            resolved = Path(path).resolve()
+        except (OSError, ValueError):
+            return super().stat_path(path)
+        if self._is_path_allowed(resolved) or _within(resolved, self._data_dir):
+            return super().stat_path(path)
+        if not resolved.exists():
+            return {
+                "path": path,
+                "error": "Path does not exist",
+                "error_code": "PATH_NOT_FOUND",
+            }
+        return {
+            "path": str(resolved),
+            "type": "directory" if resolved.is_dir() else "file",
+            "shared": False,
+        }
+
     def _is_path_allowed(self, path: Path) -> bool:
         try:
             resolved = path.resolve()

@@ -22,7 +22,7 @@ async def test_reports_hardware_and_live_busy_state(monkeypatch):
     info = await methods.info({}, conn=None)
     assert {k: info[k] for k in _FAKE_HARDWARE} == _FAKE_HARDWARE
     assert info["busy"] is False
-    assert "shared_folders" in info["features"]
+    assert {"shared_folders", "path_checks"} <= set(info["features"])
 
     async with queue.slot():
         assert (await methods.info({}, conn=None))["busy"] is True

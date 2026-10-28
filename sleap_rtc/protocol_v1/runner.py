@@ -269,6 +269,7 @@ async def start_worker_server(
             file_manager=file_manager,
             blob_index=blob_index,
             metrics_ports=DEFAULT_ZMQ_PORTS if enable_metrics else None,
+            check_paths=file_manager is not None,
         )
 
         ws_server = await server.serve(host, port)
