@@ -70,6 +70,10 @@ class TrainJobSpec:
     # "count": int}. Opaque here; the client assigns and interprets it.
     # Set by the worker, never taken from a client: where sleap-nn may
     # cache images on disk (`data_config.cache_img_path`), inside the job folder.
+    # Snapshot runs (uploaded labels): the shared folder to save models and
+    # predictions in, chosen by the client. Ignored when the labels are a file
+    # on the worker (outputs go next to it, like SLEAP).
+    output_dir: Optional[str] = None
     cache_img_path: Optional[str] = None
     run: Optional[Dict[str, Any]] = None
     # Inference jobs to chain once every job in this spec's `run` has
@@ -183,6 +187,8 @@ class TrackJobSpec:
     # Links jobs submitted together as one run (e.g. the centroid + centered
     # instance jobs of a top-down train), {"id": str, "index": int,
     # "count": int}. Opaque here; the client assigns and interprets it.
+    # Where to put predictions when `output_path` isn't set: `<output_dir>/predictions/`.
+    output_dir: Optional[str] = None
     run: Optional[Dict[str, Any]] = None
 
     _VALID_FRAME_FILTERS: ClassVar[Set[Optional[str]]] = {

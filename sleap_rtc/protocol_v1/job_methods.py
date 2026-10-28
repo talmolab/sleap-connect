@@ -594,6 +594,10 @@ class JobMethods:
                             "data_path": result.get("labels_path"),
                             "model_paths": model_paths,
                             "project": spec.project,
+                            # A snapshot run's predictions go with its models.
+                            "output_dir": (
+                                spec.output_dir if spec.labels_content else None
+                            ),
                             "run": {
                                 "id": chain_run_id,
                                 "index": chain_index,
@@ -811,7 +815,12 @@ class JobMethods:
         SLEAP's layout (`predictions/` next to the labels file), or the job
         folder if the worker can't write there.
         """
-        path = predictions_path(spec.data_path)
+        project_name = (
+            (spec.project or {}).get("name") if isinstance(spec.project, dict) else None
+        )
+        path = predictions_path(
+            spec.data_path, output_dir=spec.output_dir, name=project_name
+        )
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
             if os.access(path.parent, os.W_OK):

@@ -87,6 +87,9 @@ class JobPathPolicy:
                     {"field": "run_name", "path": name},
                 )
 
+        if spec.output_dir and spec.labels_content:
+            self._require("output_dir", spec.output_dir, roots, write=True)
+
         uploads_labels = bool(spec.labels_content)
         reads = [
             ("labels_path", None if uploads_labels else spec.labels_path),
@@ -113,6 +116,8 @@ class JobPathPolicy:
             self._require("model_paths", path, roots)
         if spec.output_path:
             self._require("output_path", spec.output_path, roots, write=True)
+        if spec.output_dir:
+            self._require("output_dir", spec.output_dir, roots, write=True)
 
     # --- helpers --------------------------------------------------------
 

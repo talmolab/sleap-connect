@@ -279,3 +279,24 @@ class TestStatOutsideSharedFolders:
             == "ACCESS_DENIED"
         )
         assert "size" in fm.stat_path(str(shared))
+
+
+class TestOutputDir:
+    def test_snapshot_output_dir_must_be_shared(self, layout):
+        shared, outside, *_, policy = layout
+        policy.check(Train(labels_content="AAAA", output_dir=str(shared / "out")))
+        err = _refused(
+            policy, Train(labels_content="AAAA", output_dir=str(outside / "out"))
+        )
+        assert err.data["field"] == "output_dir" and "write to" in str(err)
+
+    def test_worker_file_runs_ignore_output_dir(self, layout):
+        shared, outside, *_, policy = layout
+        policy.check(Train(labels_path=str(shared / "l.slp"), output_dir=str(outside)))
+
+    def test_track_output_dir_must_be_shared(self, layout):
+        shared, outside, *_, policy = layout
+        _refused(
+            policy,
+            TrackJobSpec(data_path=str(shared / "v.mp4"), output_dir=str(outside)),
+        )

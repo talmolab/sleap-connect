@@ -31,14 +31,25 @@ def timestamp(now: Optional[datetime] = None) -> str:
 
 
 def train_output_root(spec: TrainJobSpec) -> Optional[Path]:
-    """The labels file's folder, for a job training on a file already on the worker.
+    """The folder a train job's `models/` (and predictions) go in.
 
-    None for uploaded labels (a snapshot) or a folder the worker can't write
-    to — those keep outputs in the job folder.
+    A file already on the worker: its folder, like SLEAP. Uploaded labels (a
+    snapshot): the client's `output_dir`, created if needed. None — keep
+    outputs in the job folder — for a snapshot without one, or a folder the
+    worker can't write to.
     """
-    if spec.labels_content or not spec.labels_path:
+    if spec.labels_content:
+        if not spec.output_dir:
+            return None
+        folder = Path(spec.output_dir).expanduser().resolve()
+        try:
+            folder.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            return None
+    elif spec.labels_path:
+        folder = Path(spec.labels_path).expanduser().resolve().parent
+    else:
         return None
-    folder = Path(spec.labels_path).expanduser().resolve().parent
     return folder if folder.is_dir() and os.access(folder, os.W_OK) else None
 
 
@@ -76,7 +87,12 @@ def bare_run_name(run_name: str) -> str:
     return _unquote(run_name)[0]
 
 
-def predictions_path(data_path: str, now: Optional[datetime] = None) -> Path:
+def predictions_path(
+    data_path: str,
+    now: Optional[datetime] = None,
+    output_dir: Optional[str] = None,
+    name: Optional[str] = None,
+) -> Path:
     """Where a track job's predictions go, as SLEAP names them.
 
     For a labels file: `<its folder>/predictions/<name>.<timestamp>.predictions.slp`.
@@ -84,6 +100,15 @@ def predictions_path(data_path: str, now: Optional[datetime] = None) -> Path:
     the same when there's no labels file).
     """
     data = Path(data_path).expanduser()
+    if output_dir:
+        # A snapshot run's chosen folder; named after the project, not the
+        # snapshot file (`labels.slp`).
+        stem = name or data.name
+        return (
+            Path(output_dir).expanduser()
+            / "predictions"
+            / f"{stem}.{timestamp(now)}.predictions.slp"
+        )
     name = f"{data.name}.{timestamp(now)}.predictions.slp"
     if data.suffix.lower() == ".slp":
         return data.parent / "predictions" / name

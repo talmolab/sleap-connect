@@ -232,7 +232,9 @@ class TestResultBlobs:
             / "predictions"
             / "labels.slp.251028_103000.predictions.slp"
         )
-        monkeypatch.setattr(job_methods_module, "predictions_path", lambda _d: expected)
+        monkeypatch.setattr(
+            job_methods_module, "predictions_path", lambda *_a, **_k: expected
+        )
         content = b"sleap-style predictions"
         index = BlobIndex(tmp_path / "blobs.sqlite")
         cmd = [
@@ -1480,6 +1482,29 @@ class TestPostInferenceChaining:
         assert jobs[chained_id]["post_inference"] is False
         assert jobs[job_id]["model_name"] == Path(record.result["model_dir"]).name
         assert jobs[chained_id]["model_name"] is None
+
+    async def test_snapshot_run_passes_its_output_dir_to_inference(
+        self, store, tmp_path
+    ):
+        out = tmp_path / "shared" / "sleap-connect" / "flies"
+        spec = TrainJobSpec(
+            config_path="/data/centroid.yaml",
+            labels_content="AAAA",
+            output_dir=str(out),
+            run_name="centroid",  # the fake trainer writes models/centroid
+            project={"name": "flies", "id": "p1"},
+            post_inference=[{"peak_threshold": 0.3}],
+        )
+        methods = _make_chaining_methods(store, tmp_path)
+
+        job_id = (await methods.submit({"spec": spec.to_dict()}, conn=None))["job_id"]
+        record = await _wait_for_terminal(methods, store, job_id)
+        chained = await _wait_for_terminal(
+            methods, store, record.result["chained_job_ids"][0]
+        )
+
+        assert chained.spec.output_dir == str(out)
+        assert record.result["model_dir"].startswith(str(out.resolve() / "models"))
 
     async def test_two_job_run_chains_once_after_the_second_completes(
         self, store, tmp_path
