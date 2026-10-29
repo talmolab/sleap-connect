@@ -47,6 +47,14 @@ from sleap_rtc.protocol_v1.errors import (
 from sleap_rtc.jobs.ports import choose_zmq_ports
 from sleap_rtc.protocol_v1.job_paths import JobPathPolicy, config_sets_cache_dir
 from sleap_rtc.protocol_v1.metrics import JobMetricsConsumer, read_training_log_epochs
+from sleap_rtc.protocol_v1.outputs import (
+    bare_run_name,
+    predictions_path,
+    read_model_dir,
+    run_name_for,
+    train_output_root,
+    write_outputs_record,
+)
 from sleap_rtc.protocol_v1.server import Connection, ProtocolV1Server
 
 # The line sleap-nn's track CLI prints on completion, e.g.
@@ -306,9 +314,17 @@ class JobMethods:
                 job_dir = self._job_dir(job_id)
                 job_dir.mkdir(parents=True, exist_ok=True)
                 self._materialize_config_contents(spec, job_dir)
-                spec.ckpt_dir = str(job_dir / "models")
                 self._materialize_labels_content(spec, job_dir / "labels.slp")
+                # Like SLEAP: models next to the labels file (a snapshot's
+                # stay in the job folder), in a run folder of this job's own.
+                root = train_output_root(spec)
+                ckpt_dir = (root / "models") if root else (job_dir / "models")
+                spec.ckpt_dir = str(ckpt_dir)
+                spec.run_name = run_name_for(spec, ckpt_dir)
+                write_outputs_record(job_dir, ckpt_dir / bare_run_name(spec.run_name))
                 spec.cache_img_path = self._cache_dir_for(spec, job_dir)
+            elif isinstance(spec, TrackJobSpec) and not spec.output_path:
+                spec.output_path = str(self._predictions_path_for(job_id, spec))
             missing = _missing_inputs(spec)
             if missing:
                 detail = f"not found on worker: {missing[0]}"
@@ -474,14 +490,18 @@ class JobMethods:
         `model_dir` is what `sleap-nn track --model_paths` takes, so a client
         can run inference with it as a follow-up track job.
         """
-        models = self._job_dir(job_id) / "models"
-        model_dirs = sorted(
-            (d for d in models.glob("*") if (d / "training_config.yaml").exists()),
-            key=lambda d: d.stat().st_mtime,
-        )
+        model_dir = read_model_dir(self._job_dir(job_id))
+        if model_dir is None:
+            # Jobs from before outputs.json: the newest model in the job folder.
+            models = self._job_dir(job_id) / "models"
+            model_dirs = sorted(
+                (d for d in models.glob("*") if (d / "training_config.yaml").exists()),
+                key=lambda d: d.stat().st_mtime,
+            )
+            model_dir = model_dirs[-1] if model_dirs else None
         labels = self._job_dir(job_id) / "labels.slp"
         return {
-            "model_dir": str(model_dirs[-1]) if model_dirs else None,
+            "model_dir": str(model_dir) if model_dir else None,
             "labels_path": str(labels) if labels.exists() else spec.labels_path,
         }
 
@@ -784,6 +804,23 @@ class JobMethods:
                 f.write(content)
             temp_paths.append(temp_path)
         spec.config_paths = temp_paths
+
+    def _predictions_path_for(self, job_id: str, spec) -> Path:
+        """Where a track job's predictions go when the client didn't say.
+
+        SLEAP's layout (`predictions/` next to the labels file), or the job
+        folder if the worker can't write there.
+        """
+        path = predictions_path(spec.data_path)
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            if os.access(path.parent, os.W_OK):
+                return path
+        except OSError:
+            pass
+        fallback = self._job_dir(job_id) / "predictions" / path.name
+        fallback.parent.mkdir(parents=True, exist_ok=True)
+        return fallback
 
     @staticmethod
     def _cache_dir_for(spec, job_dir: Path) -> Optional[str]:
