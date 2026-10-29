@@ -1,4 +1,5 @@
-"""Tests for `serve --daemonize` / `serve --stop` and the serve pidfile."""
+"""Tests for background `serve`, `serve --stop`, the serve pidfile, and the
+running-worker registry."""
 
 import json
 import os
@@ -123,6 +124,59 @@ class TestPidfile:
         daemon.release_pidfile(tmp_path)
         assert daemon.pid_path(tmp_path).exists()
 
+    def test_records_extra_details(self, tmp_path):
+        daemon.acquire_pidfile(tmp_path, {"port": 8765, "background": True})
+        details = daemon.read_details(tmp_path)
+        assert details["port"] == 8765
+        assert details["background"] is True
+        assert details["pid"] == os.getpid()
+
+
+class TestRegistry:
+    def test_acquire_lists_the_worker_and_release_unlists_it(self, tmp_path):
+        me = daemon.acquire_pidfile(tmp_path)
+        assert daemon.list_running() == [(tmp_path.resolve(), me)]
+        entry = daemon.registry_path(tmp_path)
+        pid, started_at, since, data_dir = entry.read_text().rstrip("\n").split("\t")
+        assert int(pid) == os.getpid()
+        assert float(started_at) == me.started_at
+        assert since  # e.g. "Oct 29 14:02"
+        assert data_dir == str(tmp_path.resolve())
+
+        daemon.release_pidfile(tmp_path)
+        assert daemon.list_running() == []
+        assert not entry.exists()
+
+    def test_lives_under_sleap_rtc_home(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("SLEAP_RTC_HOME", str(tmp_path / "home"))
+        assert daemon.registry_path(tmp_path).parent == tmp_path / "home" / "running"
+
+    def test_dead_entries_are_dropped(self, tmp_path):
+        dead = subprocess.Popen([sys.executable, "-c", "pass"])
+        started_at = psutil.Process(dead.pid).create_time()
+        dead.wait()
+        entry = daemon.registry_path(tmp_path)
+        entry.parent.mkdir(parents=True, exist_ok=True)
+        entry.write_text(f"{dead.pid}\t{started_at}\tOct 29 14:02\t{tmp_path}\n")
+        assert daemon.list_running() == []
+        assert not entry.exists()
+
+    def test_corrupt_entries_are_dropped(self, tmp_path):
+        entry = daemon.registry_path(tmp_path)
+        entry.parent.mkdir(parents=True, exist_ok=True)
+        entry.write_text("garbage")
+        assert daemon.list_running() == []
+        assert not entry.exists()
+
+    def test_stale_pidfile_also_drops_the_registry_entry(self, tmp_path):
+        daemon.acquire_pidfile(tmp_path)
+        # Pretend this worker's pidfile is left over from a process long gone.
+        daemon.pid_path(tmp_path).write_text(
+            json.dumps({"pid": os.getpid(), "started_at": 1.0})
+        )
+        assert daemon.read_running(tmp_path) is None
+        assert not daemon.registry_path(tmp_path).exists()
+
 
 class TestServeArgv:
     def test_round_trips_every_option(self, tmp_path):
@@ -145,6 +199,7 @@ class TestServeArgv:
             "--mount", "/b",
             "--no-iroh",
             "--metrics",
+            "--foreground",
         ]  # fmt: skip
 
     def test_omits_blob_port_when_defaulted(self, tmp_path):
@@ -179,9 +234,14 @@ class TestDaemonize:
 
     def test_returns_once_listening_and_stop_shuts_it_down(self, tmp_path):
         port = _free_port()
-        started = _run_cli(*_serve_args(tmp_path, port), "--daemonize")
+        # Background is the default: no flag needed.
+        started = _run_cli(*_serve_args(tmp_path, port))
         assert started.returncode == 0, started.stdout + started.stderr
         assert "running in the background" in started.stdout
+        assert "sleap-rtc status" in started.stdout
+        assert "sleap-rtc serve --stop" in started.stdout
+        # Not at a terminal: the startup-file reminder is never added.
+        assert "new-terminal reminder" not in started.stdout
 
         try:
             running = daemon.read_running(tmp_path)
@@ -192,6 +252,11 @@ class TestDaemonize:
             if sys.platform != "win32":
                 assert os.getsid(running.pid) == running.pid
             assert not daemon.ready_path(tmp_path).exists()
+            # Listed for `status` and the new-terminal reminder.
+            assert [p.pid for _, p in daemon.list_running()] == [running.pid]
+            status = _run_cli("status", "--data-dir", str(tmp_path))
+            assert status.returncode == 0, status.stdout + status.stderr
+            assert f"pid {running.pid}" in status.stdout
         finally:
             stopped = _run_cli("serve", "--stop", "--data-dir", str(tmp_path))
 
@@ -199,17 +264,19 @@ class TestDaemonize:
         assert f"Stopped worker (pid {running.pid})" in stopped.stdout
         assert daemon.read_running(tmp_path) is None
         assert not daemon.pid_path(tmp_path).exists()
+        assert daemon.list_running() == []
         assert not _accepts_connections(port)
         assert "Listening." in daemon.log_path(tmp_path).read_text()
 
     def test_refuses_a_second_worker_on_the_same_data_dir(self, tmp_path):
-        started = _run_cli(*_serve_args(tmp_path, _free_port()), "--daemonize")
+        started = _run_cli(*_serve_args(tmp_path, _free_port()))
         assert started.returncode == 0, started.stdout + started.stderr
         try:
+            # The old flag still works (and is still refused here).
             second = _run_cli(*_serve_args(tmp_path, _free_port()), "--daemonize")
             assert second.returncode != 0
             assert "already running" in second.stderr
-            foreground = _run_cli(*_serve_args(tmp_path, _free_port()))
+            foreground = _run_cli(*_serve_args(tmp_path, _free_port()), "--foreground")
             assert foreground.returncode != 0
             assert "already running" in foreground.stderr
         finally:
@@ -220,7 +287,7 @@ class TestDaemonize:
             taken.bind(("127.0.0.1", 0))
             taken.listen()
             port = taken.getsockname()[1]
-            started = _run_cli(*_serve_args(tmp_path, port), "--daemonize")
+            started = _run_cli(*_serve_args(tmp_path, port))
 
         assert started.returncode != 0
         assert "exited during startup" in started.stderr

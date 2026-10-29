@@ -25,7 +25,12 @@ sleap-rtc serve
 
 The first time, it asks whether to share this folder with the devices you pair. Answer **y**:
 they can then browse it, and their jobs can read and write inside it. The answer is remembered.
-Add `--daemonize` to keep the worker running after you close the terminal.
+
+The worker then runs in the background: you get your prompt back, and it keeps running after you
+close the terminal or log out. Check on it with `sleap-rtc status` and stop it with
+`sleap-rtc serve --stop`. So you don't forget it's running, new terminals show a one-line
+reminder while it is (`sleap-rtc shell-hook uninstall` removes it). Use `--foreground` to keep it
+attached to the terminal instead.
 
 **3. Get a pairing code.**
 
@@ -46,7 +51,8 @@ The full guide (connection routes, the Connect window, troubleshooting) is in th
 
 | Command | What it does |
 |---|---|
-| `sleap-rtc serve` | Run the worker in the foreground. `--daemonize` runs it in the background; `--stop` stops it. |
+| `sleap-rtc serve` | Start the worker in the background. `--stop` stops it; `--foreground` keeps it attached to the terminal (Ctrl-C to stop). |
+| `sleap-rtc status` | Show whether the worker is running: PID, uptime, address, shared folders, paired devices, jobs. |
 | `sleap-rtc pair` | Print a one-time pairing code for a new device. |
 | `sleap-rtc folders` | List the folders shared with paired devices. |
 | `sleap-rtc add-folder [FOLDER]` | Share another folder (relative paths are fine). |
@@ -54,6 +60,7 @@ The full guide (connection routes, the Connect window, troubleshooting) is in th
 | `sleap-rtc clients` | List paired devices: name, app, when paired, last seen. |
 | `sleap-rtc clients remove NAME` | Unpair a device (by name or ID prefix). `--all` unpairs every device and cancels unused pairing codes. |
 | `sleap-rtc doctor` | Check the machine's setup. |
+| `sleap-rtc shell-hook uninstall` | Remove the new-terminal reminder (`install` adds it back; set `SLEAP_RTC_NO_SHELL_HOOK=1` to never add it). |
 
 ## How it works
 

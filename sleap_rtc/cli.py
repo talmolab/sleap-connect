@@ -2647,110 +2647,6 @@ def tui(room, room_secret):
     app.run()
 
 
-@cli.command(name="status")
-def status():
-    """Display current authentication and configuration status.
-
-    Shows:
-    - Current login status and user info
-    - JWT token expiration
-    - Saved room secrets
-    - Credential file location
-    - API tokens (if any)
-
-    Example:
-        sleap-rtc status
-    """
-    from sleap_rtc.auth.credentials import (
-        get_credentials,
-        get_jwt,
-        get_user,
-        is_logged_in,
-        CREDENTIALS_PATH,
-    )
-
-    click.echo("")
-    click.echo(click.style("SLEAP-RTC Status", bold=True))
-    click.echo("=" * 40)
-
-    # Login status
-    click.echo("")
-    click.echo(click.style("Authentication:", bold=True))
-    if is_logged_in():
-        user = get_user()
-        click.echo(f"  Status:   {click.style('Logged in', fg='green')}")
-        click.echo(f"  Username: {user.get('username', 'unknown')}")
-        click.echo(f"  User ID:  {user.get('user_id', user.get('id', 'unknown'))}")
-
-        # JWT expiry
-        jwt_token = get_jwt()
-        if jwt_token:
-            try:
-                import jwt
-
-                claims = jwt.decode(jwt_token, options={"verify_signature": False})
-                exp = claims.get("exp")
-                if exp:
-                    from datetime import datetime
-
-                    exp_dt = datetime.fromtimestamp(exp)
-                    now = datetime.now()
-                    if exp_dt > now:
-                        remaining = exp_dt - now
-                        hours = remaining.total_seconds() / 3600
-                        click.echo(
-                            f"  JWT expires: {exp_dt.strftime('%Y-%m-%d %H:%M')} ({hours:.1f}h remaining)"
-                        )
-                    else:
-                        click.echo(f"  JWT expires: {click.style('EXPIRED', fg='red')}")
-            except Exception:
-                pass
-    else:
-        click.echo(f"  Status: {click.style('Not logged in', fg='yellow')}")
-        click.echo("  Run 'sleap-rtc login' to authenticate")
-
-    # Credential file
-    click.echo("")
-    click.echo(click.style("Credentials File:", bold=True))
-    click.echo(f"  Location: {CREDENTIALS_PATH}")
-    if CREDENTIALS_PATH.exists():
-        click.echo(f"  Status:   {click.style('exists', fg='green')}")
-    else:
-        click.echo(f"  Status:   {click.style('not found', fg='yellow')}")
-
-    # Room secrets
-    creds = get_credentials()
-    room_secrets = creds.get("room_secrets", {})
-    click.echo("")
-    click.echo(click.style("Room Secrets:", bold=True))
-    if room_secrets:
-        for room_id, secret in room_secrets.items():
-            masked = secret[:4] + "..." + secret[-4:] if len(secret) > 8 else "****"
-            click.echo(f"  {room_id}: {masked}")
-    else:
-        click.echo("  No room secrets saved")
-
-    # API tokens
-    tokens = creds.get("tokens", {})
-    click.echo("")
-    click.echo(click.style("API Tokens:", bold=True))
-    if tokens:
-        for room_id, token_info in tokens.items():
-            name = token_info.get("worker_name", "unknown")
-            api_key = token_info.get("api_key", "")
-            masked_key = api_key[:8] + "..." if len(api_key) > 8 else api_key
-            click.echo(f"  {room_id}: {name} ({masked_key})")
-    else:
-        click.echo("  No API tokens saved")
-
-    # Protocol v1 worker (item 1.5/1.6 — pairing/jobs, no signaling server)
-    from sleap_rtc.protocol_v1.cli import print_status_section
-
-    print_status_section()
-
-    click.echo("")
-
-
 @cli.command(name="doctor")
 def doctor():
     """Check system configuration and connectivity.
@@ -3928,6 +3824,8 @@ from sleap_rtc.protocol_v1.cli import folders as protocol_v1_folders
 from sleap_rtc.protocol_v1.cli import remove_folder as protocol_v1_remove_folder
 from sleap_rtc.protocol_v1.cli import pair as protocol_v1_pair
 from sleap_rtc.protocol_v1.cli import serve as protocol_v1_serve
+from sleap_rtc.protocol_v1.cli import shell_hook_group as protocol_v1_shell_hook
+from sleap_rtc.protocol_v1.cli import status as protocol_v1_status
 
 cli.add_command(protocol_v1_serve)
 cli.add_command(protocol_v1_pair)
@@ -3935,6 +3833,8 @@ cli.add_command(protocol_v1_clients)
 cli.add_command(protocol_v1_add_folder)
 cli.add_command(protocol_v1_remove_folder)
 cli.add_command(protocol_v1_folders)
+cli.add_command(protocol_v1_status)
+cli.add_command(protocol_v1_shell_hook)
 
 
 if __name__ == "__main__":
