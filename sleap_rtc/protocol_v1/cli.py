@@ -19,6 +19,7 @@ import json
 import os
 import shlex
 import signal
+import subprocess
 import sys
 import textwrap
 from pathlib import Path
@@ -360,7 +361,14 @@ def _data_dir_arg(data_dir: Path) -> str:
     """
     if data_dir.expanduser().resolve() == DEFAULT_DATA_DIR.expanduser().resolve():
         return ""
-    return f" --data-dir {shlex.quote(str(data_dir))}"
+    return f" --data-dir {_quote_arg(str(data_dir))}"
+
+
+def _quote_arg(arg: str) -> str:
+    """`arg` quoted for this OS's shell, for a command shown to copy."""
+    if sys.platform == "win32":
+        return subprocess.list2cmdline([arg])
+    return shlex.quote(arg)
 
 
 def _stop(data_dir: Path) -> None:

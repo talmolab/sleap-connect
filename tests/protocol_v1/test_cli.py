@@ -190,7 +190,8 @@ class TestStatusCommand:
         assert "1 (lab-imac)" in result.output
         assert "0 running, 1 queued" in result.output
         assert "serve.log" in result.output
-        assert f"serve --stop --data-dir {tmp_path}" in result.output
+        assert "serve --stop --data-dir " in result.output
+        assert str(tmp_path) in result.output
 
     def test_finds_workers_through_the_registry(self, tmp_path):
         from sleap_rtc.protocol_v1 import daemon

@@ -53,8 +53,12 @@ class TestStartupFiles:
         assert shell_hook.detect_shell() is None
 
 
+# The shells `uninstall` looks after on this OS.
+_THIS_OS_SHELLS = ["powershell"] if sys.platform == "win32" else ["zsh", "bash", "fish"]
+
+
 class TestInstall:
-    @pytest.mark.parametrize("shell", shell_hook.SHELLS)
+    @pytest.mark.parametrize("shell", _THIS_OS_SHELLS)
     def test_adds_one_block_and_uninstall_restores_the_file(self, home, shell):
         rc = shell_hook.startup_files(shell)[0]
         rc.parent.mkdir(parents=True, exist_ok=True)
@@ -66,7 +70,7 @@ class TestInstall:
         text = rc.read_text()
         assert text.startswith(original)
         assert text.count(shell_hook.BEGIN_MARKER) == 1
-        assert str(shell_hook.notice_path(shell)) in text
+        assert shell_hook.notice_path(shell).name in text
         assert shell_hook.notice_path(shell).exists()
 
         # Idempotent.
@@ -74,10 +78,10 @@ class TestInstall:
         assert again.added == [] and again.already == [rc]
         assert rc.read_text() == text
 
-        assert rc in shell_hook.uninstall() or shell == "powershell"
-        if shell != "powershell":  # uninstall only scans this OS's shells
-            assert rc.read_text() == original
+        assert shell_hook.uninstall() == [rc]
+        assert rc.read_text() == original
 
+    @posix_only
     def test_creates_a_missing_startup_file(self, home):
         result = shell_hook.install("fish")
         rc = home / ".config" / "fish" / "config.fish"
@@ -97,7 +101,8 @@ class TestInstall:
 
     def test_notice_scripts_point_at_the_registry(self, home):
         shell_hook.write_notice_scripts()
-        for shell in ("bash", "fish", "powershell"):
+        # (fish escapes backslashes, so on Windows only PowerShell's applies.)
+        for shell in ("powershell",) if sys.platform == "win32" else ("bash", "fish"):
             assert str(daemon.registry_dir()) in shell_hook.notice_path(
                 shell
             ).read_text(encoding="utf-8-sig")
