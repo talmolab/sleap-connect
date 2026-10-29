@@ -45,6 +45,7 @@ from sleap_rtc.protocol_v1.errors import (
     ProtocolError,
 )
 from sleap_rtc.jobs.ports import choose_zmq_ports
+from sleap_rtc.protocol_v1.job_paths import JobPathPolicy, config_sets_cache_dir
 from sleap_rtc.protocol_v1.metrics import JobMetricsConsumer, read_training_log_epochs
 from sleap_rtc.protocol_v1.server import Connection, ProtocolV1Server
 
@@ -99,6 +100,7 @@ class JobMethods:
         command_builder: Optional[object] = None,
         blob_index: Optional[BlobIndex] = None,
         metrics_ports: Optional[Dict[str, int]] = None,
+        check_paths: bool = False,
     ):
         """Wire up and register the method handlers.
 
@@ -130,6 +132,11 @@ class JobMethods:
                 code passes `sleap_rtc.jobs.builder.DEFAULT_ZMQ_PORTS` (the
                 same ports `CommandBuilder` wires into the actual `sleap-nn`
                 invocation when no override is given).
+            check_paths: Refuse a submitted job that names a path outside
+                `file_manager`'s shared folders or this worker's job-runs
+                folder (`job.path_not_shared`). Off by default so tests can
+                submit jobs with arbitrary temp paths; `start_worker_server`
+                turns it on whenever folders are shared through a file manager.
         """
         self.server = server
         self.store = store
@@ -139,6 +146,15 @@ class JobMethods:
         # alongside the logs, so a train job's model is always findable.
         self.runs_dir = self.log_dir.parent / "job-runs"
         self.file_manager = file_manager
+        self.path_policy: Optional[JobPathPolicy] = (
+            JobPathPolicy(
+                lambda: [m.path for m in getattr(file_manager, "mounts", [])],
+                self.runs_dir,
+                data_dir=self.log_dir.parent,
+            )
+            if check_paths
+            else None
+        )
         self.blob_index = blob_index
         self.metrics_ports = metrics_ports
         self._builder = (
@@ -212,6 +228,9 @@ class JobMethods:
         except Exception as e:
             raise ProtocolError(JOB_SPEC_INVALID, f"Invalid job spec: {e}") from e
 
+        if self.path_policy is not None:
+            self.path_policy.check(spec)
+
         return {
             "job_id": await self._submit_spec(
                 spec, submitted_by=getattr(conn, "peer_node_id", None)
@@ -283,12 +302,13 @@ class JobMethods:
             await self.store.update_state(job_id, "running")
             await self._emit(job_id, "job.status", {"state": "running"})
 
-            self._materialize_config_contents(spec)
             if isinstance(spec, TrainJobSpec):
                 job_dir = self._job_dir(job_id)
                 job_dir.mkdir(parents=True, exist_ok=True)
+                self._materialize_config_contents(spec, job_dir)
                 spec.ckpt_dir = str(job_dir / "models")
                 self._materialize_labels_content(spec, job_dir / "labels.slp")
+                spec.cache_img_path = self._cache_dir_for(spec, job_dir)
             missing = _missing_inputs(spec)
             if missing:
                 detail = f"not found on worker: {missing[0]}"
@@ -723,7 +743,7 @@ class JobMethods:
                     await self._emit(job_id, "job.epoch", epoch)
 
     @staticmethod
-    def _materialize_config_contents(spec) -> None:
+    def _materialize_config_contents(spec, dest_dir: Optional[Path] = None) -> None:
         """Write `spec.config_contents` to temp files and populate
         `spec.config_paths`, since `CommandBuilder` only ever reads
         `config_paths` (it has no notion of inline config text).
@@ -740,6 +760,10 @@ class JobMethods:
 
         A no-op for `TrackJobSpec` (no `config_contents` concept) and for
         a `TrainJobSpec` that came with `config_paths` already set instead.
+
+        Written into `dest_dir` (the job's folder, as `config_<n>.yaml`) so
+        the job keeps a record of exactly what it ran with; a temp file only
+        when no folder is given.
         """
         if not isinstance(spec, TrainJobSpec) or not spec.config_contents:
             return
@@ -748,6 +772,11 @@ class JobMethods:
         for idx, content in enumerate(spec.config_contents):
             for old_path, new_path in (spec.path_mappings or {}).items():
                 content = content.replace(old_path, new_path)
+            if dest_dir is not None:
+                path = Path(dest_dir) / f"config_{idx}.yaml"
+                path.write_text(content)
+                temp_paths.append(str(path))
+                continue
             fd, temp_path = tempfile.mkstemp(
                 suffix=".yaml", prefix=f"job_config_{idx}_"
             )
@@ -755,6 +784,22 @@ class JobMethods:
                 f.write(content)
             temp_paths.append(temp_path)
         spec.config_paths = temp_paths
+
+    @staticmethod
+    def _cache_dir_for(spec, job_dir: Path) -> Optional[str]:
+        """Where sleap-nn may cache images on disk.
+
+        The job's folder, never wherever a config asks
+        (`data_config.cache_img_path`). None when no config sets one
+        (sleap-nn then uses the checkpoint folder).
+        """
+        for path in spec.config_paths or []:
+            try:
+                if config_sets_cache_dir(Path(path).read_text()):
+                    return str(job_dir / "img_cache")
+            except OSError:
+                continue
+        return None
 
     @staticmethod
     def _materialize_labels_content(spec, dest: Optional[Path] = None) -> None:

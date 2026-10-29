@@ -104,6 +104,9 @@ class CommandBuilder:
         if spec.ckpt_dir:
             cmd.append(f"trainer_config.ckpt_dir={spec.ckpt_dir}")
 
+        if getattr(spec, "cache_img_path", None):
+            cmd.append(f"data_config.cache_img_path={spec.cache_img_path}")
+
         if spec.resume_ckpt_path:
             cmd.append(f"trainer_config.resume_ckpt_path={spec.resume_ckpt_path}")
 

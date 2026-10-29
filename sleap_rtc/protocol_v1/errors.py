@@ -33,6 +33,8 @@ JOB_NOT_FOUND = "job.not_found"
 JOB_ALREADY_TERMINAL = "job.already_terminal"
 JOB_SPEC_INVALID = "job.spec_invalid"
 JOB_ACTIVE = "job.active"
+# A job names a path outside the worker's shared folders (or would write there).
+JOB_PATH_NOT_SHARED = "job.path_not_shared"
 
 # clients.*
 CLIENTS_BAD_NAME = "clients.bad_name"
