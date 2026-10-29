@@ -63,7 +63,8 @@ def _can_ask() -> bool:
 
 def _glyph(symbol: str, fallback: str) -> str:
     """`symbol`, or `fallback` where stdout can't encode it (e.g. a
-    Windows pipe in a legacy code page)."""
+    Windows pipe in a legacy code page).
+    """
     try:
         symbol.encode(sys.stdout.encoding or "ascii")
     except (UnicodeEncodeError, LookupError):
@@ -355,7 +356,8 @@ def _daemonize(argv: list, data_dir: Path) -> None:
 
 def _data_dir_arg(data_dir: Path) -> str:
     """` --data-dir <dir>` for a non-default data dir, so a shown command
-    targets the same worker; empty for the default."""
+    targets the same worker; empty for the default.
+    """
     if data_dir.expanduser().resolve() == DEFAULT_DATA_DIR.expanduser().resolve():
         return ""
     return f" --data-dir {shlex.quote(str(data_dir))}"

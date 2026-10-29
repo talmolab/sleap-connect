@@ -193,7 +193,8 @@ def acquire_pidfile(data_dir: Path, details: Optional[dict] = None) -> ServeProc
 
 def release_pidfile(data_dir: Path) -> None:
     """Remove `data_dir`'s pidfile (and registry entry), but only if it is
-    this process's."""
+    this process's.
+    """
     path = pid_path(data_dir)
     try:
         if int(json.loads(path.read_text())["pid"]) == os.getpid():
