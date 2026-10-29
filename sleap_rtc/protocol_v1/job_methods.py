@@ -314,10 +314,24 @@ class JobMethods:
                 job_dir = self._job_dir(job_id)
                 job_dir.mkdir(parents=True, exist_ok=True)
                 self._materialize_config_contents(spec, job_dir)
+                # An upload that names a file on the worker is a corrected
+                # copy of it: its outputs belong next to that file.
+                original_labels = spec.labels_path if spec.labels_content else None
                 self._materialize_labels_content(spec, job_dir / "labels.slp")
                 # Like SLEAP: models next to the labels file (a snapshot's
                 # stay in the job folder), in a run folder of this job's own.
-                root = train_output_root(spec)
+                root = train_output_root(
+                    spec,
+                    original_labels_path=original_labels,
+                    may_write=(
+                        self.path_policy.allows
+                        if self.path_policy is not None
+                        else None
+                    ),
+                )
+                if root is not None and spec.labels_content and not spec.output_dir:
+                    # So post-training inference puts its predictions there too.
+                    spec.output_dir = str(root)
                 ckpt_dir = (root / "models") if root else (job_dir / "models")
                 spec.ckpt_dir = str(ckpt_dir)
                 spec.run_name = run_name_for(spec, ckpt_dir)

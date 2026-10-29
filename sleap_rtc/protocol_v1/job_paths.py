@@ -137,6 +137,14 @@ class JobPathPolicy:
             except OSError:
                 continue  # A missing file fails the job later, with its own message.
 
+    def allows(self, path: str) -> bool:
+        """Whether a job may read or write `path` (no error, just yes/no)."""
+        try:
+            self._require("path", path, self.roots())
+            return True
+        except ProtocolError:
+            return False
+
     def _require(
         self, field: str, path: str, roots: List[Path], write: bool = False
     ) -> None:

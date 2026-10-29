@@ -1506,6 +1506,32 @@ class TestPostInferenceChaining:
         assert chained.spec.output_dir == str(out)
         assert record.result["model_dir"].startswith(str(out.resolve() / "models"))
 
+    async def test_repointed_copy_trains_and_predicts_next_to_the_original(
+        self, store, tmp_path
+    ):
+        project = tmp_path / "project"
+        project.mkdir()
+        spec = TrainJobSpec(
+            config_path="/data/centroid.yaml",
+            labels_path=str(project / "labels.v002.slp"),  # the file on the worker
+            labels_content="AAAA",  # its corrected copy (videos re-pointed)
+            run_name="centroid",  # the fake trainer writes models/centroid
+            project={"name": "labels.v002.slp", "id": "p1"},
+            post_inference=[{"peak_threshold": 0.3}],
+        )
+        methods = _make_chaining_methods(store, tmp_path)
+
+        job_id = (await methods.submit({"spec": spec.to_dict()}, conn=None))["job_id"]
+        record = await _wait_for_terminal(methods, store, job_id)
+        chained = await _wait_for_terminal(
+            methods, store, record.result["chained_job_ids"][0]
+        )
+
+        assert record.result["model_dir"] == str(
+            project.resolve() / "models" / "centroid"
+        )
+        assert chained.spec.output_dir == str(project.resolve())
+
     async def test_two_job_run_chains_once_after_the_second_completes(
         self, store, tmp_path
     ):

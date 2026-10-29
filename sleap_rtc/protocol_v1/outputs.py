@@ -18,7 +18,7 @@ import json
 import os
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 from sleap_rtc.jobs.spec import TrainJobSpec
 
@@ -30,15 +30,25 @@ def timestamp(now: Optional[datetime] = None) -> str:
     return (now or datetime.now()).strftime("%y%m%d_%H%M%S")
 
 
-def train_output_root(spec: TrainJobSpec) -> Optional[Path]:
+def train_output_root(
+    spec: TrainJobSpec,
+    original_labels_path: Optional[str] = None,
+    may_write: Optional[Callable[[str], bool]] = None,
+) -> Optional[Path]:
     """The folder a train job's `models/` (and predictions) go in.
 
     A file already on the worker: its folder, like SLEAP. Uploaded labels (a
-    snapshot): the client's `output_dir`, created if needed. None — keep
-    outputs in the job folder — for a snapshot without one, or a folder the
-    worker can't write to.
+    snapshot): the client's `output_dir`, created if needed; else, when the
+    upload is a corrected copy of a file on the worker (`original_labels_path`
+    — e.g. the Connect window re-pointing its videos), that file's folder, if
+    `may_write` allows it. None — keep outputs in the job folder — otherwise,
+    or for a folder the worker can't write to.
     """
-    if spec.labels_content:
+    if spec.labels_content and not spec.output_dir and original_labels_path:
+        folder = Path(original_labels_path).expanduser().resolve().parent
+        if may_write is not None and not may_write(str(folder)):
+            return None
+    elif spec.labels_content:
         if not spec.output_dir:
             return None
         folder = Path(spec.output_dir).expanduser().resolve()

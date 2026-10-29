@@ -175,3 +175,32 @@ class TestSnapshotOutputDir:
         assert predictions_path(
             "/w/job-runs/j/labels.slp", NOW, output_dir="/s/out", name="mice"
         ) == Path("/s/out/predictions/mice.261028_103000.predictions.slp")
+
+
+class TestRepointedCopy:
+    """An upload that names its original file on the worker (the Connect
+    window re-pointing videos) keeps outputs next to that file."""
+
+    def test_uses_the_original_files_folder(self, tmp_path):
+        spec = Train(labels_content="AAAA")
+        root = train_output_root(
+            spec, original_labels_path=str(tmp_path / "labels.slp")
+        )
+        assert root == tmp_path.resolve()
+
+    def test_not_if_that_folder_isnt_allowed(self, tmp_path):
+        spec = Train(labels_content="AAAA")
+        root = train_output_root(
+            spec,
+            original_labels_path=str(tmp_path / "labels.slp"),
+            may_write=lambda p: False,
+        )
+        assert root is None
+
+    def test_an_explicit_output_dir_wins(self, tmp_path):
+        out = tmp_path / "chosen"
+        spec = Train(labels_content="AAAA", output_dir=str(out))
+        assert (
+            train_output_root(spec, original_labels_path=str(tmp_path / "x" / "l.slp"))
+            == out.resolve()
+        )
