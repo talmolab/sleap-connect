@@ -314,10 +314,24 @@ class JobMethods:
                 job_dir = self._job_dir(job_id)
                 job_dir.mkdir(parents=True, exist_ok=True)
                 self._materialize_config_contents(spec, job_dir)
+                # An upload that names a file on the worker is a corrected
+                # copy of it: its outputs belong next to that file.
+                original_labels = spec.labels_path if spec.labels_content else None
                 self._materialize_labels_content(spec, job_dir / "labels.slp")
                 # Like SLEAP: models next to the labels file (a snapshot's
                 # stay in the job folder), in a run folder of this job's own.
-                root = train_output_root(spec)
+                root = train_output_root(
+                    spec,
+                    original_labels_path=original_labels,
+                    may_write=(
+                        self.path_policy.allows
+                        if self.path_policy is not None
+                        else None
+                    ),
+                )
+                if root is not None and spec.labels_content and not spec.output_dir:
+                    # So post-training inference puts its predictions there too.
+                    spec.output_dir = str(root)
                 ckpt_dir = (root / "models") if root else (job_dir / "models")
                 spec.ckpt_dir = str(ckpt_dir)
                 spec.run_name = run_name_for(spec, ckpt_dir)
@@ -594,6 +608,10 @@ class JobMethods:
                             "data_path": result.get("labels_path"),
                             "model_paths": model_paths,
                             "project": spec.project,
+                            # A snapshot run's predictions go with its models.
+                            "output_dir": (
+                                spec.output_dir if spec.labels_content else None
+                            ),
                             "run": {
                                 "id": chain_run_id,
                                 "index": chain_index,
@@ -811,7 +829,12 @@ class JobMethods:
         SLEAP's layout (`predictions/` next to the labels file), or the job
         folder if the worker can't write there.
         """
-        path = predictions_path(spec.data_path)
+        project_name = (
+            (spec.project or {}).get("name") if isinstance(spec.project, dict) else None
+        )
+        path = predictions_path(
+            spec.data_path, output_dir=spec.output_dir, name=project_name
+        )
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
             if os.access(path.parent, os.W_OK):

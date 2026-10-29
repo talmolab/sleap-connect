@@ -94,6 +94,9 @@ class JobPathPolicy:
                     {"field": "run_name", "path": name},
                 )
 
+        if spec.output_dir and spec.labels_content:
+            self._require("output_dir", spec.output_dir, roots, write=True)
+
         uploads_labels = bool(spec.labels_content)
         reads = [
             # Checked even for an upload: one that names a file on the worker
@@ -123,6 +126,8 @@ class JobPathPolicy:
             self._require("model_paths", path, roots)
         if spec.output_path:
             self._require("output_path", spec.output_path, roots, write=True)
+        if spec.output_dir:
+            self._require("output_dir", spec.output_dir, roots, write=True)
 
     # --- helpers --------------------------------------------------------
 
@@ -141,6 +146,14 @@ class JobPathPolicy:
                 yield Path(path).read_text()
             except OSError:
                 continue  # A missing file fails the job later, with its own message.
+
+    def allows(self, path: str) -> bool:
+        """Whether a job may read or write `path` (no error, just yes/no)."""
+        try:
+            self._require("path", path, self.roots())
+            return True
+        except ProtocolError:
+            return False
 
     def _require(
         self, field: str, path: str, roots: List[Path], write: bool = False

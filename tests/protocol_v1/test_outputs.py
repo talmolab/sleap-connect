@@ -153,3 +153,54 @@ class TestTrainJobLayout:
         )
         # The submitted config is kept in the job folder (stage 2), not next to the labels.
         assert (tmp_path / "data" / "job-runs" / first_id / "config_0.yaml").exists()
+
+
+class TestSnapshotOutputDir:
+    def test_snapshot_with_output_dir_uses_it_and_creates_it(self, tmp_path):
+        out = tmp_path / "serve" / "sleap-connect" / "mice"
+        spec = Train(labels_content="AAAA", output_dir=str(out))
+        assert train_output_root(spec) == out.resolve()
+        assert out.is_dir()
+
+    def test_snapshot_without_output_dir_keeps_the_job_folder(self):
+        assert train_output_root(Train(labels_content="AAAA")) is None
+
+    def test_worker_file_ignores_output_dir(self, tmp_path):
+        spec = Train(
+            labels_path=str(tmp_path / "labels.slp"), output_dir=str(tmp_path / "x")
+        )
+        assert train_output_root(spec) == tmp_path.resolve()
+
+    def test_snapshot_predictions_are_named_after_the_project(self):
+        assert predictions_path(
+            "/w/job-runs/j/labels.slp", NOW, output_dir="/s/out", name="mice"
+        ) == Path("/s/out/predictions/mice.261028_103000.predictions.slp")
+
+
+class TestRepointedCopy:
+    """An upload that names its original file on the worker (the Connect
+    window re-pointing videos) keeps outputs next to that file."""
+
+    def test_uses_the_original_files_folder(self, tmp_path):
+        spec = Train(labels_content="AAAA")
+        root = train_output_root(
+            spec, original_labels_path=str(tmp_path / "labels.slp")
+        )
+        assert root == tmp_path.resolve()
+
+    def test_not_if_that_folder_isnt_allowed(self, tmp_path):
+        spec = Train(labels_content="AAAA")
+        root = train_output_root(
+            spec,
+            original_labels_path=str(tmp_path / "labels.slp"),
+            may_write=lambda p: False,
+        )
+        assert root is None
+
+    def test_an_explicit_output_dir_wins(self, tmp_path):
+        out = tmp_path / "chosen"
+        spec = Train(labels_content="AAAA", output_dir=str(out))
+        assert (
+            train_output_root(spec, original_labels_path=str(tmp_path / "x" / "l.slp"))
+            == out.resolve()
+        )
