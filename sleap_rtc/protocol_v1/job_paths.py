@@ -10,6 +10,8 @@ follows those wherever they are — the file's author chose them.
 """
 
 import os
+import posixpath
+import re
 from pathlib import Path
 from typing import Iterable, List, Optional, Sequence
 
@@ -42,8 +44,13 @@ def run_name_escapes(name: str) -> bool:
     sleap-nn writes to `<ckpt_dir>/<run_name>`, so `../../elsewhere` or an
     absolute path would leave it. Subfolders (`a/b`) stay inside and are fine.
     """
+    # POSIX rules on every OS: on Windows, os.path would turn "/ckpt/x" into
+    # "\\ckpt\\x" and every name would look like it escapes.
     base = "/ckpt"
-    joined = os.path.normpath(os.path.join(base, _unquote(name).replace("\\", "/")))
+    name = _unquote(name).replace("\\", "/")
+    if re.match(r"^[A-Za-z]:", name):  # a Windows drive path is absolute too
+        return True
+    joined = posixpath.normpath(posixpath.join(base, name))
     return not joined.startswith(base + "/")
 
 
