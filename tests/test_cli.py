@@ -36,48 +36,6 @@ def temp_credentials(tmp_path):
             yield creds_path
 
 
-class TestStatusCommand:
-    """Tests for 'sleap-rtc status' command."""
-
-    def test_status_not_logged_in(self, runner, temp_credentials):
-        """Should show not logged in when no credentials."""
-        result = runner.invoke(cli, ["status"])
-        assert result.exit_code == 0
-        assert "Not logged in" in result.output or "logged in" in result.output.lower()
-
-    def test_status_logged_in(self, runner, temp_credentials):
-        """Should show user info when logged in."""
-        # Create credentials file with JWT and user info
-        temp_credentials.write_text(
-            json.dumps(
-                {
-                    "jwt": "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ0ZXN0dXNlciIsImV4cCI6OTk5OTk5OTk5OX0.xxx",
-                    "user": {"username": "testuser", "name": "Test User"},
-                }
-            )
-        )
-        result = runner.invoke(cli, ["status"])
-        assert result.exit_code == 0
-        # Should show some auth status info
-        assert "testuser" in result.output or "Auth" in result.output or "JWT" in result.output
-
-    def test_status_with_room_secrets(self, runner, temp_credentials):
-        """Should show room secrets when present."""
-        temp_credentials.write_text(
-            json.dumps(
-                {
-                    "jwt": "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ0ZXN0dXNlciIsImV4cCI6OTk5OTk5OTk5OX0.xxx",
-                    "user": {"username": "testuser"},
-                    "room_secrets": {"my-room": "secret123"},
-                }
-            )
-        )
-        result = runner.invoke(cli, ["status"])
-        assert result.exit_code == 0
-        # Should mention room secrets
-        assert "my-room" in result.output or "Room" in result.output or "secret" in result.output.lower()
-
-
 class TestDoctorCommand:
     """Tests for 'sleap-rtc doctor' command."""
 

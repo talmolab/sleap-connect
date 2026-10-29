@@ -1,21 +1,23 @@
-"""CLI commands for the protocol v1 worker: `serve`, `pair`, and extensions
-to the existing `doctor`/`status` commands.
+"""CLI commands for the protocol v1 worker: `serve`, `pair`, `status`,
+`shell-hook`, and an extension to the existing `doctor` command.
 
 Kept in its own module (rather than added directly to the ~4000-line
 `cli.py`) so the new, still-evolving protocol v1 surface stays easy to
-find; `cli.py` just imports and registers `serve`/`pair`, and calls the
-`print_*_section` functions from within the existing `doctor`/`status`
-commands.
+find; `cli.py` just imports and registers these commands, and calls
+`print_doctor_section` from within the existing `doctor` command.
 
-`serve --daemonize` / `serve --stop` run and stop the worker in the
-background (see `daemon.py`). OS service installation (`service install` —
-systemd --user / LaunchAgent / Windows Task Scheduler), for a worker that
-also comes back after a reboot, is a separate follow-up.
+`serve` runs the worker in the background by default (see `daemon.py`;
+`--foreground` keeps it attached), and `serve --stop` stops it. The first
+background start also adds a new-terminal reminder to the user's shell
+startup file (see `shell_hook.py`). OS service installation (`service
+install` — systemd --user / LaunchAgent / Windows Task Scheduler), for a
+worker that also comes back after a reboot, is a separate follow-up.
 """
 
 import asyncio
 import json
 import os
+import shlex
 import signal
 import sys
 import textwrap
@@ -25,7 +27,7 @@ from typing import Optional
 
 import click
 
-from sleap_rtc.protocol_v1 import daemon
+from sleap_rtc.protocol_v1 import daemon, shell_hook
 from sleap_rtc.protocol_v1.runner import (
     DEFAULT_DATA_DIR,
     DEFAULT_PORT,
@@ -57,6 +59,16 @@ def _can_ask() -> bool:
     attached to a console (e.g. on Windows).
     """
     return sys.stdin.isatty() and sys.stdout.isatty()
+
+
+def _glyph(symbol: str, fallback: str) -> str:
+    """`symbol`, or `fallback` where stdout can't encode it (e.g. a
+    Windows pipe in a legacy code page)."""
+    try:
+        symbol.encode(sys.stdout.encoding or "ascii")
+    except (UnicodeEncodeError, LookupError):
+        return fallback
+    return symbol
 
 
 def _share_folder(
@@ -155,18 +167,23 @@ def _share_folder(
     "training progress instead of only raw log lines.",
 )
 @click.option(
+    "--foreground",
+    is_flag=True,
+    help="Stay attached to this terminal (press Ctrl-C to stop) instead of "
+    "running in the background.",
+)
+@click.option(
     "--daemonize",
     is_flag=True,
-    help="Run in the background: detach from this terminal (so it keeps "
-    "running after the terminal or SSH session closes) and return once the "
-    "worker is listening. Output goes to serve.log under --data-dir.",
+    hidden=True,
+    help="Run in the background. This is now the default; kept so existing "
+    "commands keep working.",
 )
 @click.option(
     "--stop",
     is_flag=True,
-    help="Stop the worker running against --data-dir (e.g. one started with "
-    "--daemonize) and exit. Running jobs keep running and are reattached "
-    "by the next 'serve'.",
+    help="Stop the worker running against --data-dir and exit. Running jobs "
+    "keep running and are reattached by the next 'serve'.",
 )
 @click.option(
     "--ready-file",
@@ -185,6 +202,7 @@ def serve(
     serve_folder: Optional[str],
     iroh: bool,
     metrics: bool,
+    foreground: bool,
     daemonize: bool,
     stop: bool,
     ready_file: Optional[str],
@@ -196,10 +214,14 @@ def serve(
     connects straight to it over localhost/LAN/Tailscale, or via iroh if
     it can't reach this machine directly (see --iroh).
 
-    Runs in the foreground by default; press Ctrl-C to stop. With
-    --daemonize it runs in the background instead, surviving the terminal
-    or SSH session that started it, until 'serve --stop'. (It does not come
-    back after a reboot — that needs an OS service, a planned follow-up.)
+    Runs in the background: it returns once the worker is listening, and
+    keeps running after you close the terminal or log out, until 'serve
+    --stop'. (It does not come back after a reboot — that needs an OS
+    service, a planned follow-up.) Check on it with 'sleap-rtc status'. The
+    first time, it also adds a one-line reminder to your shell's startup
+    file, shown in new terminals while the worker runs (remove it with
+    'sleap-rtc shell-hook uninstall'). With --foreground it stays attached
+    to this terminal instead; press Ctrl-C to stop.
 
     Only one worker can run per --data-dir at a time.
 
@@ -209,7 +231,8 @@ def serve(
 
     Examples:
         cd /data/project && sleap-rtc serve
-        sleap-rtc serve --daemonize --mount /data/videos:lab-data
+        sleap-rtc serve --mount /data/videos:lab-data
+        sleap-rtc status
         sleap-rtc serve --stop
     """
     data_dir_path = Path(data_dir).expanduser()
@@ -219,7 +242,14 @@ def serve(
         return
 
     serve_folder_path = Path(serve_folder) if serve_folder else Path.cwd().resolve()
-    # Ask here, in the user's terminal — before a --daemonize child (which
+    if ready_file is None:
+        # The user's own invocation (not a background child): refresh the
+        # reminder scripts so they match this version.
+        try:
+            shell_hook.write_notice_scripts()
+        except OSError:
+            pass
+    # Ask here, in the user's terminal — before the background child (which
     # has none) is spawned; the child then finds the answers already saved.
     shared = open_shared_folders(data_dir_path)
     interactive = _can_ask() and ready_file is None
@@ -230,7 +260,7 @@ def serve(
             shared, resolve_folder(path), label, yes=yes, interactive=interactive
         )
 
-    if daemonize:
+    if not foreground and ready_file is None:
         _daemonize(
             daemon.serve_argv(
                 host=host,
@@ -244,10 +274,23 @@ def serve(
             ),
             data_dir_path,
         )
+        message = shell_hook.auto_install(interactive=_can_ask())
+        if message:
+            click.echo("")
+            click.echo(message)
         return
 
     try:
-        daemon.acquire_pidfile(data_dir_path)
+        daemon.acquire_pidfile(
+            data_dir_path,
+            {
+                "host": host,
+                "port": port,
+                "blob_port": blob_port,
+                "iroh": iroh,
+                "background": ready_file is not None,
+            },
+        )
     except daemon.AlreadyRunningError as e:
         raise click.ClickException(_already_running_message(e, data_dir_path))
     try:
@@ -292,15 +335,30 @@ def _daemonize(argv: list, data_dir: Path) -> None:
             click.echo("")
         raise click.ClickException(f"{e} (full log: {daemon.log_path(data_dir)})")
 
-    click.echo(click.style("sleap-connect worker running in the background", bold=True))
-    click.echo(f"  pid:       {info['pid']}")
-    click.echo(f"  node_id:   {info['node_id']}")
-    click.echo(f"  address:   {info['address']}")
-    click.echo(f"  log:       {daemon.log_path(data_dir)}")
     click.echo("")
     click.echo(
-        "Pair a client with 'sleap-rtc pair'; stop with 'sleap-rtc serve --stop'."
+        click.style(_glyph("✓", "*"), fg="green")
+        + click.style(
+            f" sleap-connect worker running in the background (pid {info['pid']}).",
+            bold=True,
+        )
     )
+    click.echo("  It keeps running after you close this terminal or log out,")
+    click.echo("  until you stop it.")
+    click.echo("")
+    click.echo(f"  Check status:  sleap-rtc status{_data_dir_arg(data_dir)}")
+    click.echo(f"  Stop it:       sleap-rtc serve --stop{_data_dir_arg(data_dir)}")
+    click.echo(f"  Logs:          {shell_hook.display(daemon.log_path(data_dir))}")
+    click.echo("")
+    click.echo(f"  Pair a device: sleap-rtc pair{_data_dir_arg(data_dir)}")
+
+
+def _data_dir_arg(data_dir: Path) -> str:
+    """` --data-dir <dir>` for a non-default data dir, so a shown command
+    targets the same worker; empty for the default."""
+    if data_dir.expanduser().resolve() == DEFAULT_DATA_DIR.expanduser().resolve():
+        return ""
+    return f" --data-dir {shlex.quote(str(data_dir))}"
 
 
 def _stop(data_dir: Path) -> None:
@@ -737,55 +795,177 @@ def print_doctor_section(data_dir: Path = DEFAULT_DATA_DIR) -> bool:
     return all_ok
 
 
-def print_status_section(data_dir: Path = DEFAULT_DATA_DIR) -> None:
-    """Print a "Protocol v1 Worker" section for the `status` command.
-
-    Args:
-        data_dir: Same default `serve`/`pair` use.
-    """
-    click.echo("")
-    click.echo(click.style("Protocol v1 Worker:", bold=True))
-
-    id_path = identity_path(data_dir)
-    if not id_path.exists():
-        click.echo("  Not yet initialized (no 'sleap-rtc serve' or 'pair' run yet)")
-        return
-
-    from sleap_rtc.protocol_v1.identity import WorkerIdentity
-
-    identity = WorkerIdentity(id_path)
-    click.echo(f"  node_id: {identity.node_id}")
-
-    running = daemon.read_running(data_dir)
-    if running is None:
-        click.echo("  Worker: not running")
-    else:
-        click.echo(f"  Worker: running (pid {running.pid})")
-
-    has_store = devices_path(data_dir).exists() or trust_store_path(data_dir).exists()
-    n_trusted = len(open_trust_store(data_dir).list_trusted()) if has_store else 0
-    click.echo(f"  Paired clients: {n_trusted}")
-
-    store_path = data_dir / "jobs.sqlite"
-    if store_path.exists():
-        asyncio.run(_print_recent_jobs(store_path))
-    else:
-        click.echo("  Jobs: none yet")
+def _duration(secs: float) -> str:
+    """A short duration: "3h 12m", "2d 4h", "45s"."""
+    secs = int(max(0, secs))
+    days, rem = divmod(secs, 86400)
+    hours, rem = divmod(rem, 3600)
+    mins, secs = divmod(rem, 60)
+    if days:
+        return f"{days}d {hours}h"
+    if hours:
+        return f"{hours}h {mins}m"
+    if mins:
+        return f"{mins}m"
+    return f"{secs}s"
 
 
-async def _print_recent_jobs(store_path: Path, limit: int = 5) -> None:
+async def _job_counts(store_path: Path) -> dict:
     from sleap_rtc.jobs.store import JobStore
 
     async with JobStore(store_path) as store:
         jobs = await store.list_jobs()
+    counts: dict = {}
+    for record in jobs:
+        counts[record.state] = counts.get(record.state, 0) + 1
+    return counts
 
-    if not jobs:
-        click.echo("  Jobs: none yet")
-        return
 
-    click.echo(f"  Recent jobs (showing up to {limit}):")
-    for record in jobs[:limit]:
-        click.echo(f"    {record.job_id}: {record.state}")
+def _print_worker_status(data_dir: Path, running: daemon.ServeProcess) -> None:
+    details = daemon.read_details(data_dir)
+    mode = "in the background" if details.get("background", True) else "in a terminal"
+    click.echo(
+        click.style(_glyph("●", "*"), fg="green")
+        + click.style(" sleap-connect worker: running ", bold=True)
+        + f"{mode} (pid {running.pid}, up {_duration(time.time() - running.started_at)})"
+    )
+
+    rows = []
+    if "port" in details:
+        address = f"ws://{details.get('host', '0.0.0.0')}:{details['port']}"
+        if details.get("iroh"):
+            address += " · iroh"
+        rows.append(("Address", address))
+    rows.append(("Data dir", shell_hook.display(data_dir)))
+
+    shared = open_shared_folders(data_dir).list()
+    rows.append(
+        ("Shared folders", ", ".join(f.path for f in shared) if shared else "none")
+    )
+
+    has_store = devices_path(data_dir).exists() or trust_store_path(data_dir).exists()
+    devices = open_trust_store(data_dir).list_devices() if has_store else []
+    names = ", ".join(d.name or "(unnamed)" for d in devices)
+    rows.append(("Paired devices", f"{len(devices)} ({names})" if devices else "0"))
+
+    store_path = data_dir / "jobs.sqlite"
+    counts = asyncio.run(_job_counts(store_path)) if store_path.exists() else {}
+    rows.append(
+        (
+            "Jobs",
+            f"{counts.get('running', 0)} running, {counts.get('queued', 0)} queued",
+        )
+    )
+    if details.get("background", True):
+        rows.append(("Log", shell_hook.display(daemon.log_path(data_dir))))
+
+    width = max(len(label) for label, _ in rows) + 1
+    for label, value in rows:
+        click.echo(f"  {label + ':':<{width}} {value}")
+    click.echo("")
+    click.echo(
+        f"Stop: sleap-rtc serve --stop{_data_dir_arg(data_dir)} · "
+        f"pair a device: sleap-rtc pair{_data_dir_arg(data_dir)}"
+    )
+
+
+@click.command(name="status")
+@_DATA_DIR_OPTION
+def status(data_dir: Optional[str]):
+    """Show whether a sleap-connect worker is running, and its details.
+
+    Lists every running worker (normally just one). Exits with status 1
+    when none is running.
+    """
+    if data_dir is not None:
+        path = _data_dir(data_dir)
+        found = [(path, r)] if (r := daemon.read_running(path)) else []
+    else:
+        found = daemon.list_running()
+        # A worker started by an older version isn't in the registry.
+        default = DEFAULT_DATA_DIR.expanduser()
+        if not any(d.resolve() == default.resolve() for d, _ in found):
+            if (r := daemon.read_running(default)) is not None:
+                found.append((default, r))
+
+    if not found:
+        click.echo(
+            click.style(_glyph("○", "-"), fg="yellow")
+            + click.style(" sleap-connect worker: not running", bold=True)
+        )
+        click.echo(
+            "  Start one in your data folder:  cd /path/to/data && sleap-rtc serve"
+        )
+        raise SystemExit(1)
+
+    for i, (path, running) in enumerate(found):
+        if i:
+            click.echo("")
+        _print_worker_status(path, running)
+
+
+@click.group(name="shell-hook", invoke_without_command=True)
+@click.pass_context
+def shell_hook_group(ctx: click.Context):
+    """Manage the new-terminal reminder shown while a worker is running.
+
+    The first 'sleap-rtc serve' adds a small block to your shell's startup
+    file (~/.zshrc, ~/.bashrc, fish config.fish, or the PowerShell profile)
+    so new terminals show a one-line notice while a worker runs. Set
+    SLEAP_RTC_NO_SHELL_HOOK=1 to stop 'serve' from adding it.
+    """
+    if ctx.invoked_subcommand is None:
+        ctx.invoke(shell_hook_status)
+
+
+@shell_hook_group.command(name="install")
+@click.option(
+    "--shell",
+    type=click.Choice(shell_hook.SHELLS),
+    default=None,
+    help="Shell to add the reminder for. [default: your current shell]",
+)
+def shell_hook_install(shell: Optional[str]):
+    """Add the new-terminal reminder to your shell's startup file."""
+    shell = shell or shell_hook.detect_shell()
+    if shell is None:
+        raise click.ClickException(
+            "Couldn't tell which shell you use. Pass --shell "
+            f"({', '.join(shell_hook.SHELLS)})."
+        )
+    result = shell_hook.install(shell)
+    for path in result.added:
+        click.echo(f"Added the reminder to {shell_hook.display(path)}.")
+    for path in result.already:
+        click.echo(f"{shell_hook.display(path)} already has the reminder.")
+    if result.added:
+        click.echo("It shows up in terminals you open from now on.")
+
+
+@shell_hook_group.command(name="uninstall")
+def shell_hook_uninstall():
+    """Remove the new-terminal reminder (and stop 'serve' re-adding it)."""
+    changed = shell_hook.uninstall()
+    for path in changed:
+        click.echo(f"Removed the reminder from {shell_hook.display(path)}.")
+    if not changed:
+        click.echo("No startup file had the reminder.")
+    click.echo(
+        "'sleap-rtc serve' won't add it again ('sleap-rtc shell-hook install' to undo)."
+    )
+
+
+@shell_hook_group.command(name="status")
+def shell_hook_status():
+    """Show which startup files have the new-terminal reminder."""
+    files = shell_hook.installed_files()
+    if files:
+        for path in files:
+            click.echo(f"Reminder installed in {shell_hook.display(path)}.")
+    else:
+        click.echo(
+            "The new-terminal reminder isn't installed ('sleap-rtc shell-hook install')."
+        )
 
 
 def _data_dir(data_dir: Optional[str]) -> Path:
