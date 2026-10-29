@@ -69,10 +69,26 @@ class TestRunName:
             "'../x'",
             "a/../../x",
             "..\\x",
+            "C:\\x",
         ],
     )
     def test_names_that_escape(self, name):
         assert run_name_escapes(name) is True
+
+
+class TestRunNameOnWindows:
+    """The check must not depend on the worker's OS (Windows os.path uses
+    backslashes, which once made every run name look like it escaped)."""
+
+    def test_same_answers_with_windows_path_rules(self, monkeypatch):
+        import ntpath
+
+        from sleap_rtc.protocol_v1 import job_paths
+
+        monkeypatch.setattr(job_paths.os, "path", ntpath)
+        assert run_name_escapes("centroid") is False
+        assert run_name_escapes("a/b") is False
+        assert run_name_escapes("../x") is True
 
 
 class TestTrain:
