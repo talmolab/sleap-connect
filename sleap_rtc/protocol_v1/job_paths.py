@@ -92,7 +92,10 @@ class JobPathPolicy:
 
         uploads_labels = bool(spec.labels_content)
         reads = [
-            ("labels_path", None if uploads_labels else spec.labels_path),
+            # Checked even for an upload: one that names a file on the worker
+            # is a corrected copy of it (the Connect window re-pointing its
+            # videos), so that file must be shared like any other.
+            ("labels_path", spec.labels_path),
             ("val_labels_path", spec.val_labels_path),
             ("resume_ckpt_path", spec.resume_ckpt_path),
             *(("config_path", p) for p in spec.config_paths or []),

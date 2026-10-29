@@ -87,9 +87,18 @@ class TestTrain:
         assert f'sleap-rtc add-folder "{outside}"' in str(err)
         assert err.data["field"] == "labels_path"
 
-    def test_uploaded_labels_ignore_labels_path(self, layout):
+    def test_an_upload_without_a_path_is_allowed(self, layout):
+        *_, policy = layout
+        policy.check(Train(labels_content="AAAA"))
+
+    def test_an_upload_naming_a_file_outside_is_refused(self, layout):
+        # The Connect window's corrected copy of a worker file: the file
+        # itself must still be in a shared folder.
         _, outside, *_, policy = layout
-        policy.check(Train(labels_path=str(outside / "x.slp"), labels_content="AAAA"))
+        err = _refused(
+            policy, Train(labels_path=str(outside / "x.slp"), labels_content="AAAA")
+        )
+        assert err.data["field"] == "labels_path"
 
     @pytest.mark.parametrize("field", ["val_labels_path", "resume_ckpt_path"])
     def test_other_read_fields(self, layout, field):
