@@ -22,6 +22,7 @@ from sleap_rtc.jobs.spec import TrackJobSpec, TrainJobSpec
 from sleap_rtc.jobs.store import JobStore
 from sleap_rtc.protocol_v1.blobs import BlobIndex
 from sleap_rtc.protocol_v1.errors import JOB_NOT_FOUND, ProtocolError
+from sleap_rtc.protocol_v1.outputs import bare_run_name
 from sleap_rtc.protocol_v1.job_methods import JobMethods
 from sleap_rtc.protocol_v1 import job_methods as job_methods_module
 from sleap_rtc.protocol_v1.server import Connection, ProtocolV1Server
@@ -79,6 +80,17 @@ async def _wait_for_terminal(methods, store, job_id, timeout=10):
         record.state in TERMINAL_STATES
     ), f"job {job_id} ended in state {record.state!r}"
     return record
+
+
+async def _wait_for_spawned(store, job_id, timeout=5):
+    """Until the job's process exists ("running" is set a moment earlier)."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        record = await store.get_job(job_id)
+        if record.pid is not None:
+            return record
+        await asyncio.sleep(0.05)
+    raise AssertionError(f"job {job_id} never spawned within {timeout}s")
 
 
 async def _wait_for_state(store, job_id, state, timeout=5):
@@ -384,7 +396,7 @@ class TestCancel:
         )
         result = await methods.submit({"spec": spec.to_dict()}, conn=None)
         job_id = result["job_id"]
-        await _wait_for_state(store, job_id, "running")
+        await _wait_for_spawned(store, job_id)
 
         await methods.cancel({"job_id": job_id, "mode": "stop"}, conn=None)
 
@@ -396,7 +408,7 @@ class TestCancel:
         )
         result = await methods.submit({"spec": spec.to_dict()}, conn=None)
         job_id = result["job_id"]
-        await _wait_for_state(store, job_id, "running")
+        await _wait_for_spawned(store, job_id)
 
         await methods.cancel({"job_id": job_id, "mode": "cancel"}, conn=None)
 
@@ -973,7 +985,7 @@ class TestStopEarly:
         )
         result = await methods.submit({"spec": spec.to_dict()}, conn=None)
         job_id = result["job_id"]
-        await _wait_for_state(store, job_id, "running")
+        await _wait_for_spawned(store, job_id)
 
         await methods.cancel({"job_id": job_id, "mode": "stop"}, conn=None)
 
@@ -989,7 +1001,7 @@ class TestStopEarly:
         )
         result = await methods.submit({"spec": spec.to_dict()}, conn=None)
         job_id = result["job_id"]
-        await _wait_for_state(store, job_id, "running")
+        await _wait_for_spawned(store, job_id)
 
         await methods.cancel({"job_id": job_id, "mode": "cancel"}, conn=None)
 
@@ -1344,11 +1356,11 @@ def _make_ckpt_methods(store, tmp_path, script):
     )
 
 
-def _write_run(ckpt_dir, epochs=(), wait_for=None):
+def _write_run(ckpt_dir, epochs=(), wait_for=None, run="centroid"):
     """Script: create a sleap-nn-like run folder, optionally logging epochs."""
     return (
         "import os, time\n"
-        f"run = os.path.join({ckpt_dir!r}, 'centroid')\n"
+        f"run = os.path.join({ckpt_dir!r}, {run!r})\n"
         "os.makedirs(run, exist_ok=True)\n"
         "open(os.path.join(run, 'training_config.yaml'), 'w').write('x: 1')\n"
         "print('line 1', flush=True)\n"
@@ -1412,7 +1424,9 @@ class _TrainThenTrackBuilder:
 
     def build_command(self, spec, zmq_ports=None):
         if isinstance(spec, TrainJobSpec):
-            return [sys.executable, "-c", self._train_script(spec.ckpt_dir)]
+            # Into the run folder the worker chose, like sleap-nn does.
+            run = bare_run_name(spec.run_name) if spec.run_name else "centroid"
+            return [sys.executable, "-c", self._train_script(spec.ckpt_dir, run=run)]
         return [sys.executable, "-c", "pass"]
 
 
@@ -1663,7 +1677,9 @@ class TestReattachedEpochBackfill:
         from sleap_rtc.jobs.process import reattach_all
 
         go = tmp_path / "go"
-        script = lambda ckpt_dir: _write_run(ckpt_dir, epochs=(0, 1), wait_for=go)
+        script = lambda ckpt_dir, run="centroid": _write_run(  # noqa: E731
+            ckpt_dir, epochs=(0, 1), wait_for=go, run=run
+        )
         spec = TrainJobSpec(config_path="/data/c.yaml")
         first = _make_ckpt_methods(store, tmp_path, script)
         job_id = (await first.submit({"spec": spec.to_dict()}, conn=None))["job_id"]
