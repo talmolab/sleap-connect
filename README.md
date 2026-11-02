@@ -23,7 +23,8 @@ cd /path/to/your/data
 sleap-rtc serve
 ```
 
-The first time, it asks whether to share this folder with the devices you pair. Answer **y**:
+Or name the folder instead of `cd`-ing into it: `sleap-rtc serve /path/to/your/data` (handy with
+`uv run`). The first time, it asks whether to share this folder with the devices you pair. Answer **y**:
 they can then browse it, and their jobs can read and write inside it. The answer is remembered.
 
 The worker then runs in the background: you get your prompt back, and it keeps running after you
@@ -51,7 +52,7 @@ The full guide (connection routes, the Connect window, troubleshooting) is in th
 
 | Command | What it does |
 |---|---|
-| `sleap-rtc serve` | Start the worker in the background. `--stop` stops it; `--foreground` keeps it attached to the terminal (Ctrl-C to stop). |
+| `sleap-rtc serve [FOLDER]` | Start the worker in the background, sharing FOLDER (default: the current folder). `--stop` stops it; `--foreground` keeps it attached to the terminal (Ctrl-C to stop). |
 | `sleap-rtc status` | Show whether the worker is running: PID, uptime, address, shared folders, paired devices, jobs. |
 | `sleap-rtc pair` | Print a one-time pairing code for a new device. |
 | `sleap-rtc folders` | List the folders shared with paired devices. |

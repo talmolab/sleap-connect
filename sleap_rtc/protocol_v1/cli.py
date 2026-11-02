@@ -115,6 +115,7 @@ def _share_folder(
 
 
 @click.command(name="serve")
+@click.argument("folder", required=False)
 @click.option("--host", default="0.0.0.0", show_default=True, help="Bind address.")
 @click.option("--port", default=DEFAULT_PORT, show_default=True, help="Bind port.")
 @click.option(
@@ -195,6 +196,7 @@ def _share_folder(
     "its child is up.",
 )
 def serve(
+    folder: Optional[str],
     host: str,
     port: int,
     blob_port: Optional[int],
@@ -227,13 +229,14 @@ def serve(
 
     Only one worker can run per --data-dir at a time.
 
-    The folder you start it in is shared with paired devices — asked the
-    first time (y/N), then remembered. Run it in your data folder. Share
-    more with --mount or 'sleap-rtc add-folder'.
+    FOLDER (default: the folder you run it in) is shared with paired
+    devices — asked the first time (y/N), then remembered. Point it at your
+    data folder. Share more with --mount or 'sleap-rtc add-folder'.
 
     Examples:
         cd /data/project && sleap-rtc serve
-        sleap-rtc serve --mount /data/videos:lab-data
+        sleap-rtc serve /data/project
+        sleap-rtc serve /data/project --mount /data/videos:lab-data
         sleap-rtc status
         sleap-rtc serve --stop
     """
@@ -243,7 +246,16 @@ def serve(
         _stop(data_dir_path)
         return
 
-    serve_folder_path = Path(serve_folder) if serve_folder else Path.cwd().resolve()
+    if folder is not None:
+        serve_folder_path = resolve_folder(folder)
+        if not serve_folder_path.is_dir():
+            raise click.BadParameter(
+                f"not a folder: {serve_folder_path}", param_hint="FOLDER"
+            )
+    elif serve_folder:
+        serve_folder_path = Path(serve_folder)
+    else:
+        serve_folder_path = Path.cwd().resolve()
     if ready_file is None:
         # The user's own invocation (not a background child): refresh the
         # reminder scripts so they match this version.

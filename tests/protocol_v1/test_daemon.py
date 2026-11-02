@@ -8,6 +8,7 @@ import socket
 import subprocess
 import sys
 import time
+from pathlib import Path
 
 import psutil
 import pytest
@@ -29,9 +30,9 @@ def _free_port() -> int:
         return s.getsockname()[1]
 
 
-def _run_cli(*args, timeout=90):
+def _run_cli(*args, timeout=90, cwd=None):
     return subprocess.run(
-        [*_CLI, *args], capture_output=True, text=True, timeout=timeout
+        [*_CLI, *args], capture_output=True, text=True, timeout=timeout, cwd=cwd
     )
 
 
@@ -297,6 +298,33 @@ class TestDaemonize:
         # socket address".
         stderr = started.stderr.lower()
         assert "address already in use" in stderr or "only one usage" in stderr
+        assert daemon.read_running(tmp_path) is None
+
+    def test_shares_the_folder_given_as_an_argument(self, tmp_path):
+        from sleap_rtc.protocol_v1.runner import open_shared_folders
+
+        data_dir, project, elsewhere = (
+            tmp_path / n for n in ("state", "project", "cwd")
+        )
+        project.mkdir()
+        elsewhere.mkdir()
+        started = _run_cli(
+            *_serve_args(data_dir, _free_port()), "project", "--yes", cwd=tmp_path
+        )
+        assert started.returncode == 0, started.stdout + started.stderr
+        try:
+            shared = [Path(f.path) for f in open_shared_folders(data_dir).list()]
+            # Relative to where it was run, and only that folder (not the cwd).
+            assert shared == [project.resolve()]
+        finally:
+            _run_cli("serve", "--stop", "--data-dir", str(data_dir))
+
+    def test_rejects_a_folder_argument_that_isnt_a_folder(self, tmp_path):
+        started = _run_cli(
+            *_serve_args(tmp_path, _free_port()), str(tmp_path / "missing"), "--yes"
+        )
+        assert started.returncode == 2
+        assert "not a folder" in started.stderr
         assert daemon.read_running(tmp_path) is None
 
     def test_stop_with_nothing_running(self, tmp_path):
