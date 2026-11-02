@@ -36,6 +36,10 @@ JOB_ACTIVE = "job.active"
 # A job names a path outside the worker's shared folders (or would write there).
 JOB_PATH_NOT_SHARED = "job.path_not_shared"
 
+# media.*
+# A media.frame source that exists but can't be decoded (or has no such frame).
+MEDIA_UNREADABLE = "media.unreadable"
+
 # clients.*
 CLIENTS_BAD_NAME = "clients.bad_name"
 

@@ -40,6 +40,7 @@ from sleap_rtc.protocol_v1.iroh_live import (
 from sleap_rtc.protocol_v1.job_methods import JobMethods
 from sleap_rtc.protocol_v1.pairing import PendingPairings
 from sleap_rtc.protocol_v1.server import ProtocolV1Server
+from sleap_rtc.protocol_v1.media import MediaMethods
 from sleap_rtc.protocol_v1.worker_info import WorkerInfoMethods
 from sleap_rtc.protocol_v1.shared_folders import SharedFolders
 from sleap_rtc.protocol_v1.trust_store import TrustStore
@@ -261,6 +262,7 @@ async def start_worker_server(
         AuthMethods(server, identity, trust_store, pending_pairings)
         queue = JobQueue(max_concurrent=1)
         WorkerInfoMethods(server, queue)
+        MediaMethods(server)
         job_methods = JobMethods(
             server,
             store,
