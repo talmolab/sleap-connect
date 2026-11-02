@@ -20,8 +20,15 @@ running jobs on startup. The pidfile records the process's own start time
 alongside its PID (the same PID-reuse guard as `jobs.process.is_alive`), so
 a stale pidfile left by a crash or reboot is detected and cleared rather
 than blocking the next start forever.
+
+Each running `serve` is also listed in a per-user registry
+(`~/.sleap-rtc/running/`, one small file per --data-dir), so `sleap-rtc
+status` and the new-terminal reminder (`shell_hook.py`) can find every
+running worker without knowing which --data-dir it was started with. The
+registry file is a single tab-separated line, readable from plain shell.
 """
 
+import hashlib
 import json
 import os
 import signal
@@ -30,7 +37,7 @@ import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Optional, Sequence
+from typing import List, Optional, Sequence, Tuple
 
 import psutil
 
@@ -58,6 +65,27 @@ def pid_path(data_dir: Path) -> Path:
 def log_path(data_dir: Path) -> Path:
     """Where a daemonized `serve` writes its stdout/stderr."""
     return data_dir / "serve.log"
+
+
+def sleap_home() -> Path:
+    """Per-user sleap-rtc state shared by every --data-dir.
+
+    `~/.sleap-rtc`, or `$SLEAP_RTC_HOME` if set (tests point it at a
+    temporary folder so they never touch the real one).
+    """
+    override = os.environ.get("SLEAP_RTC_HOME")
+    return Path(override) if override else Path.home() / ".sleap-rtc"
+
+
+def registry_dir() -> Path:
+    """Where every running `serve` lists itself (see the module docstring)."""
+    return sleap_home() / "running"
+
+
+def registry_path(data_dir: Path) -> Path:
+    """`data_dir`'s entry in the running-worker registry."""
+    key = hashlib.sha256(str(Path(data_dir).resolve()).encode()).hexdigest()[:16]
+    return registry_dir() / f"{key}.run"
 
 
 def ready_path(data_dir: Path) -> Path:
@@ -104,18 +132,41 @@ def read_running(data_dir: Path) -> Optional[ServeProcess]:
     if is_alive(recorded.pid, recorded.started_at):
         return recorded
     path.unlink(missing_ok=True)
+    registry_path(data_dir).unlink(missing_ok=True)
     return None
 
 
-def acquire_pidfile(data_dir: Path) -> ServeProcess:
+def read_details(data_dir: Path) -> dict:
+    """The extra details a running `serve` recorded in its pidfile.
+
+    Whatever `acquire_pidfile` was given (address, ports, ...); empty if
+    there is no readable pidfile.
+    """
+    try:
+        data = json.loads(pid_path(data_dir).read_text())
+    except (FileNotFoundError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def acquire_pidfile(data_dir: Path, details: Optional[dict] = None) -> ServeProcess:
     """Record the current process as `data_dir`'s running `serve`.
+
+    Also lists it in the per-user running-worker registry.
+
+    Args:
+        data_dir: The worker's --data-dir.
+        details: Extra JSON-able facts to record alongside the PID (shown
+            by `sleap-rtc status`, read back with `read_details`).
 
     Raises:
         AlreadyRunningError: if another live `serve` already holds it.
     """
     data_dir.mkdir(parents=True, exist_ok=True)
     me = ServeProcess(pid=os.getpid(), started_at=psutil.Process().create_time())
-    payload = json.dumps({"pid": me.pid, "started_at": me.started_at})
+    payload = json.dumps(
+        {**(details or {}), "pid": me.pid, "started_at": me.started_at}
+    )
     path = pid_path(data_dir)
 
     # Two attempts: the first can only fail on an existing file, which is
@@ -132,6 +183,7 @@ def acquire_pidfile(data_dir: Path) -> ServeProcess:
             raise AlreadyRunningError(running)
         with os.fdopen(fd, "w") as f:
             f.write(payload)
+        _register(data_dir, me)
         return me
 
     # Lost a race with another starting worker between removal and re-create.
@@ -140,13 +192,62 @@ def acquire_pidfile(data_dir: Path) -> ServeProcess:
 
 
 def release_pidfile(data_dir: Path) -> None:
-    """Remove `data_dir`'s pidfile, but only if it is this process's."""
+    """Remove `data_dir`'s pidfile (and registry entry), but only if it is
+    this process's.
+    """
     path = pid_path(data_dir)
     try:
         if int(json.loads(path.read_text())["pid"]) == os.getpid():
             path.unlink(missing_ok=True)
+            registry_path(data_dir).unlink(missing_ok=True)
     except (FileNotFoundError, ValueError, KeyError, TypeError):
         pass
+
+
+def _register(data_dir: Path, me: ServeProcess) -> None:
+    """List `me` in the running-worker registry.
+
+    One tab-separated line — pid, start time (Unix seconds), start time as
+    shown to people, data dir — so the shell reminder can read it with a
+    plain `read` instead of a JSON parser. Best effort: a worker that can't
+    write here still runs; it just isn't listed.
+    """
+    since = time.strftime("%b %d %H:%M", time.localtime(me.started_at))
+    line = f"{me.pid}\t{me.started_at}\t{since}\t{Path(data_dir).resolve()}\n"
+    path = registry_path(data_dir)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(path.name + ".tmp")
+        tmp.write_text(line)
+        os.replace(tmp, path)
+    except OSError:
+        pass
+
+
+def list_running() -> List[Tuple[Path, ServeProcess]]:
+    """Every live `serve` in the registry, as (data dir, process).
+
+    Entries whose process is gone (a crash, a reboot) are removed.
+    """
+    found = []
+    try:
+        entries = sorted(registry_dir().glob("*.run"))
+    except OSError:
+        return []
+    for entry in entries:
+        try:
+            pid, started_at, _since, data_dir = (
+                entry.read_text().rstrip("\n").split("\t")
+            )
+            process = ServeProcess(pid=int(pid), started_at=float(started_at))
+        except (OSError, ValueError):
+            entry.unlink(missing_ok=True)
+            continue
+        if is_alive(process.pid, process.started_at):
+            found.append((Path(data_dir), process))
+        else:
+            entry.unlink(missing_ok=True)
+    return found
 
 
 def write_ready(path: Path, info: dict) -> None:
@@ -177,6 +278,7 @@ def serve_argv(
         argv += ["--serve-folder", str(serve_folder)]
     argv.append("--iroh" if iroh else "--no-iroh")
     argv.append("--metrics" if metrics else "--no-metrics")
+    argv.append("--foreground")
     return argv
 
 
@@ -321,4 +423,5 @@ def stop_running(
 
         remove_iroh_live(iroh_live_path(data_dir))
         pid_path(data_dir).unlink(missing_ok=True)
+        registry_path(data_dir).unlink(missing_ok=True)
     return running

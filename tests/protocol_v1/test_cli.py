@@ -1,4 +1,4 @@
-"""Tests for the protocol v1 CLI additions (pair, doctor/status sections).
+"""Tests for the protocol v1 CLI additions (pair, status, doctor section).
 
 `serve`'s CLI wrapper itself (argument parsing, printing) isn't separately
 covered here — it deliberately loops forever until Ctrl-C, and the
@@ -8,6 +8,7 @@ either signal-based interruption or timeouts that add flakiness for little
 additional coverage.
 """
 
+import os
 import json
 
 from click.testing import CliRunner
@@ -15,7 +16,6 @@ from click.testing import CliRunner
 from sleap_rtc.protocol_v1.cli import (
     pair,
     print_doctor_section,
-    print_status_section,
 )
 from sleap_rtc.protocol_v1.pair_code import decode_pair_code
 from sleap_rtc.protocol_v1.pairing import PendingPairings
@@ -140,34 +140,71 @@ class TestDoctorSection:
         assert "Paired clients: 1" in captured.out
 
 
-class TestStatusSection:
-    """Tests for print_status_section."""
+class TestStatusCommand:
+    def _run(self, *args):
+        from click.testing import CliRunner
 
-    def test_reports_not_initialized_before_any_identity_exists(self, tmp_path, capsys):
-        print_status_section(data_dir=tmp_path)
+        from sleap_rtc.protocol_v1.cli import status
 
-        captured = capsys.readouterr()
-        assert "Not yet initialized" in captured.out
+        return CliRunner().invoke(status, list(args))
 
-    def test_reports_recent_jobs(self, tmp_path, capsys):
+    def test_not_running_exits_1_with_how_to_start(self, tmp_path):
+        result = self._run("--data-dir", str(tmp_path))
+
+        assert result.exit_code == 1
+        assert "not running" in result.output
+        assert "sleap-rtc serve" in result.output
+
+    def test_reports_a_running_worker(self, tmp_path):
         import asyncio
 
         from sleap_rtc.jobs.spec import TrainJobSpec
         from sleap_rtc.jobs.store import JobStore
-        from sleap_rtc.protocol_v1.identity import WorkerIdentity
+        from sleap_rtc.protocol_v1 import daemon
+        from sleap_rtc.protocol_v1.runner import open_shared_folders, open_trust_store
 
-        WorkerIdentity(identity_path(tmp_path))
+        folder = tmp_path / "data"
+        folder.mkdir()
+        open_shared_folders(tmp_path).add(folder)
+        open_trust_store(tmp_path).add_trusted("node-a", {"device_name": "lab-imac"})
 
         async def _seed():
             async with JobStore(tmp_path / "jobs.sqlite") as store:
                 await store.create_job("job-1", TrainJobSpec(config_path="/x.yaml"))
 
         asyncio.run(_seed())
+        # This test process stands in for the running worker.
+        daemon.acquire_pidfile(
+            tmp_path,
+            {"host": "0.0.0.0", "port": 8765, "iroh": True, "background": True},
+        )
+        try:
+            result = self._run("--data-dir", str(tmp_path))
+        finally:
+            daemon.release_pidfile(tmp_path)
 
-        print_status_section(data_dir=tmp_path)
+        assert result.exit_code == 0, result.output
+        assert f"running in the background (pid {os.getpid()}" in result.output
+        assert "ws://0.0.0.0:8765 · iroh" in result.output
+        assert str(folder) in result.output
+        assert "1 (lab-imac)" in result.output
+        assert "0 running, 1 queued" in result.output
+        assert "serve.log" in result.output
+        assert "serve --stop --data-dir " in result.output
+        assert str(tmp_path) in result.output
 
-        captured = capsys.readouterr()
-        assert "job-1: queued" in captured.out
+    def test_finds_workers_through_the_registry(self, tmp_path):
+        from sleap_rtc.protocol_v1 import daemon
+
+        daemon.acquire_pidfile(tmp_path, {"background": False})
+        try:
+            result = self._run()
+        finally:
+            daemon.release_pidfile(tmp_path)
+
+        assert result.exit_code == 0, result.output
+        assert "running in a terminal" in result.output
+        assert "serve.log" not in result.output
 
 
 class TestClientsCommand:
