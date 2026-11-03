@@ -11,11 +11,11 @@ import urllib.request
 
 import pytest
 
-from sleap_rtc.protocol_v1.blob_http import (
+from sleap_connect.protocol_v1.blob_http import (
     make_blob_http_server,
     run_blob_http_server_in_thread,
 )
-from sleap_rtc.protocol_v1.blobs import BlobIndex, hash_file
+from sleap_connect.protocol_v1.blobs import BlobIndex, hash_file
 
 KNOWN_HASH = "a" * 64  # a well-formed-looking but unregistered hash
 

@@ -6,8 +6,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from sleap_rtc.config import MountConfig
-from sleap_rtc.protocol import (
+from sleap_connect.config import MountConfig
+from sleap_connect.protocol import (
     MSG_FILE_UPLOAD_CACHE_HIT,
     MSG_FILE_UPLOAD_COMPLETE,
     MSG_FILE_UPLOAD_ERROR,
@@ -15,7 +15,7 @@ from sleap_rtc.protocol import (
     MSG_FILE_UPLOAD_READY,
     MSG_SEPARATOR,
 )
-from sleap_rtc.worker.file_manager import FileManager
+from sleap_connect.worker.file_manager import FileManager
 
 
 # ---------------------------------------------------------------------------
@@ -97,7 +97,7 @@ class TestStartUploadSession:
         await fm.start_upload_session(ch, "labels.pkg.slp", 100, str(tmp_path), "1")
 
         ch.send.assert_called_once_with(MSG_FILE_UPLOAD_READY)
-        expected_path = tmp_path / "sleap_rtc_downloads" / "labels.pkg.slp"
+        expected_path = tmp_path / "sleap_connect_downloads" / "labels.pkg.slp"
         assert fm._upload_session["file_path"] == expected_path
         assert expected_path.parent.is_dir()
 

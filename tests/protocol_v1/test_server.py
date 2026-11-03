@@ -16,19 +16,19 @@ covered in test_auth.py, not here.
 import pytest
 import websockets
 
-from sleap_rtc.auth.keypair import (
+from sleap_connect.auth.keypair import (
     generate_keypair,
     public_key_from_b64,
     public_key_to_b64,
     verify_signature,
 )
-from sleap_rtc.protocol_v1.auth import AuthMethods
-from sleap_rtc.protocol_v1.envelope import Event, Hello, Req, parse_envelope
-from sleap_rtc.protocol_v1.errors import ProtocolError
-from sleap_rtc.protocol_v1.identity import WorkerIdentity
-from sleap_rtc.protocol_v1.pairing import PendingPairings
-from sleap_rtc.protocol_v1.server import ProtocolV1Server
-from sleap_rtc.protocol_v1.trust_store import TrustStore
+from sleap_connect.protocol_v1.auth import AuthMethods
+from sleap_connect.protocol_v1.envelope import Event, Hello, Req, parse_envelope
+from sleap_connect.protocol_v1.errors import ProtocolError
+from sleap_connect.protocol_v1.identity import WorkerIdentity
+from sleap_connect.protocol_v1.pairing import PendingPairings
+from sleap_connect.protocol_v1.server import ProtocolV1Server
+from sleap_connect.protocol_v1.trust_store import TrustStore
 
 
 @pytest.fixture

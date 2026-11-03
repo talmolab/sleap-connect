@@ -4,7 +4,7 @@ import base64
 
 import pytest
 
-from sleap_rtc.auth.psk import (
+from sleap_connect.auth.psk import (
     compute_hmac,
     generate_nonce,
     generate_secret,

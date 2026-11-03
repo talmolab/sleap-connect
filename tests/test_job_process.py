@@ -12,15 +12,15 @@ import sys
 
 import pytest
 
-from sleap_rtc.jobs.process import (
+from sleap_connect.jobs.process import (
     is_alive,
     reattach_all,
     send_stop_signal,
     read_exit_code,
     spawn_detached,
 )
-from sleap_rtc.jobs.spec import TrainJobSpec
-from sleap_rtc.jobs.store import JobStore
+from sleap_connect.jobs.spec import TrainJobSpec
+from sleap_connect.jobs.store import JobStore
 
 
 @pytest.fixture
@@ -286,7 +286,7 @@ class TestSendCancelSignalTaskTracking:
     ):
         import gc
 
-        import sleap_rtc.jobs.process as process_module
+        import sleap_connect.jobs.process as process_module
 
         monkeypatch.setattr(process_module, "_CANCEL_GRACE_SECS", 0.05)
 
@@ -430,9 +430,9 @@ class TestJobOutlivesTheWorkerProcess:
         worker = f"""
 import asyncio, sys
 from pathlib import Path
-from sleap_rtc.jobs.process import spawn_detached
-from sleap_rtc.jobs.spec import TrainJobSpec
-from sleap_rtc.jobs.store import JobStore
+from sleap_connect.jobs.process import spawn_detached
+from sleap_connect.jobs.spec import TrainJobSpec
+from sleap_connect.jobs.store import JobStore
 
 async def main():
     async with JobStore(Path({str(tmp_path / 'jobs.sqlite')!r})) as store:

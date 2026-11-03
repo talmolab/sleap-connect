@@ -13,12 +13,12 @@ from pathlib import Path
 import psutil
 import pytest
 
-from sleap_rtc.protocol_v1 import daemon
+from sleap_connect.protocol_v1 import daemon
 
 _CLI = [
     sys.executable,
     "-c",
-    "from sleap_rtc.cli import cli; cli(prog_name='sleap-rtc')",
+    "from sleap_connect.cli import cli; cli(prog_name='sleap-connect')",
 ]
 
 posix_only = pytest.mark.skipif(sys.platform == "win32", reason="POSIX signals")
@@ -148,8 +148,8 @@ class TestRegistry:
         assert daemon.list_running() == []
         assert not entry.exists()
 
-    def test_lives_under_sleap_rtc_home(self, tmp_path, monkeypatch):
-        monkeypatch.setenv("SLEAP_RTC_HOME", str(tmp_path / "home"))
+    def test_lives_under_sleap_connect_home(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("SLEAP_CONNECT_HOME", str(tmp_path / "home"))
         assert daemon.registry_path(tmp_path).parent == tmp_path / "home" / "running"
 
     def test_dead_entries_are_dropped(self, tmp_path):
@@ -239,8 +239,8 @@ class TestDaemonize:
         started = _run_cli(*_serve_args(tmp_path, port))
         assert started.returncode == 0, started.stdout + started.stderr
         assert "running in the background" in started.stdout
-        assert "sleap-rtc status" in started.stdout
-        assert "sleap-rtc serve --stop" in started.stdout
+        assert "sleap-connect status" in started.stdout
+        assert "sleap-connect serve --stop" in started.stdout
         # Not at a terminal: the startup-file reminder is never added.
         assert "new-terminal reminder" not in started.stdout
 
@@ -301,7 +301,7 @@ class TestDaemonize:
         assert daemon.read_running(tmp_path) is None
 
     def test_shares_the_folder_given_as_an_argument(self, tmp_path):
-        from sleap_rtc.protocol_v1.runner import open_shared_folders
+        from sleap_connect.protocol_v1.runner import open_shared_folders
 
         data_dir, project, elsewhere = (
             tmp_path / n for n in ("state", "project", "cwd")

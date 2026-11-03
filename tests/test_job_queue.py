@@ -4,7 +4,7 @@ import asyncio
 
 import pytest
 
-from sleap_rtc.jobs.queue import JobQueue
+from sleap_connect.jobs.queue import JobQueue
 
 
 class TestJobQueue:

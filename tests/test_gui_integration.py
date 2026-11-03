@@ -1,18 +1,18 @@
-"""Integration tests for sleap-rtc GUI components.
+"""Integration tests for sleap-connect GUI components.
 
-These tests verify the integration between sleap-rtc GUI components and
+These tests verify the integration between sleap-connect GUI components and
 simulate how they would be used within SLEAP's training dialog.
 
 Testing Approach for SLEAP Maintainers
 ======================================
 
-This module demonstrates how to test sleap-rtc GUI integration without
+This module demonstrates how to test sleap-connect GUI integration without
 requiring a live server or actual SLEAP installation. The key patterns are:
 
 1. **Mock SLEAP Preferences**: Use `MockSLEAPPreferences` to simulate
    SLEAP's preference system for the experimental features flag.
 
-2. **Mock API Responses**: Patch `sleap_rtc.api` functions to return
+2. **Mock API Responses**: Patch `sleap_connect.api` functions to return
    controlled test data without network calls.
 
 3. **Mock Qt Dialogs**: Patch dialog classes to simulate user interactions
@@ -39,7 +39,7 @@ from typing import Any
 
 from qtpy.QtCore import Qt
 
-from sleap_rtc.api import (
+from sleap_connect.api import (
     User,
     Room,
     Worker,
@@ -65,7 +65,7 @@ class MockSLEAPPreferences:
     """Mock implementation of SLEAP's preference system.
 
     This simulates how SLEAP stores user preferences, including the
-    experimental features flag that controls sleap-rtc visibility.
+    experimental features flag that controls sleap-connect visibility.
 
     Usage:
         prefs = MockSLEAPPreferences()
@@ -260,13 +260,13 @@ class TestWidgetVisibility:
 
         assert show_remote_training is True
 
-    @patch("sleap_rtc.api.is_available")
+    @patch("sleap_connect.api.is_available")
     def test_widget_hidden_when_rtc_unavailable(self, mock_is_available, mock_prefs):
-        """Widget should be hidden when sleap-rtc is not available."""
+        """Widget should be hidden when sleap-connect is not available."""
         mock_prefs.set("enable_experimental_features", True)
         mock_is_available.return_value = False
 
-        from sleap_rtc.api import is_available
+        from sleap_connect.api import is_available
 
         # Both conditions must be true
         show_remote_training = (
@@ -275,7 +275,7 @@ class TestWidgetVisibility:
 
         assert show_remote_training is False
 
-    @patch("sleap_rtc.api.is_available")
+    @patch("sleap_connect.api.is_available")
     def test_widget_visible_when_all_conditions_met(
         self, mock_is_available, mock_prefs
     ):
@@ -283,7 +283,7 @@ class TestWidgetVisibility:
         mock_prefs.set("enable_experimental_features", True)
         mock_is_available.return_value = True
 
-        from sleap_rtc.api import is_available
+        from sleap_connect.api import is_available
 
         show_remote_training = (
             mock_prefs.get("enable_experimental_features", False) and is_available()
@@ -300,12 +300,12 @@ class TestWidgetVisibility:
 class TestFullTrainingFlow:
     """Tests for the complete training workflow."""
 
-    @patch("sleap_rtc.api.run_training")
-    @patch("sleap_rtc.api.check_video_paths")
-    @patch("sleap_rtc.api.validate_config")
-    @patch("sleap_rtc.api.list_workers")
-    @patch("sleap_rtc.api.list_rooms")
-    @patch("sleap_rtc.api.is_logged_in")
+    @patch("sleap_connect.api.run_training")
+    @patch("sleap_connect.api.check_video_paths")
+    @patch("sleap_connect.api.validate_config")
+    @patch("sleap_connect.api.list_workers")
+    @patch("sleap_connect.api.list_rooms")
+    @patch("sleap_connect.api.is_logged_in")
     def test_successful_training_flow(
         self,
         mock_is_logged_in,
@@ -361,7 +361,7 @@ class TestFullTrainingFlow:
         )
 
         # Execute flow
-        from sleap_rtc.api import (
+        from sleap_connect.api import (
             is_logged_in,
             list_rooms,
             list_workers,
@@ -399,8 +399,8 @@ class TestFullTrainingFlow:
         assert result.job_id == "job-123"
         assert result.model_path == "/models/run-123"
 
-    @patch("sleap_rtc.api.run_training")
-    @patch("sleap_rtc.api.is_logged_in")
+    @patch("sleap_connect.api.run_training")
+    @patch("sleap_connect.api.is_logged_in")
     def test_training_flow_not_logged_in(
         self,
         mock_is_logged_in,
@@ -409,7 +409,7 @@ class TestFullTrainingFlow:
         """Test training flow fails when not logged in."""
         mock_is_logged_in.return_value = False
 
-        from sleap_rtc.gui.presubmission import check_authentication
+        from sleap_connect.gui.presubmission import check_authentication
 
         result = check_authentication()
 
@@ -435,7 +435,7 @@ class TestProgressForwarding:
         mock_zmq.Context.return_value = mock_context
         mock_context.socket.return_value = mock_socket
 
-        from sleap_rtc.gui.runners import RemoteProgressBridge
+        from sleap_connect.gui.runners import RemoteProgressBridge
 
         event = ProgressEvent(
             event_type="train_begin",
@@ -461,7 +461,7 @@ class TestProgressForwarding:
         mock_zmq.Context.return_value = mock_context
         mock_context.socket.return_value = mock_socket
 
-        from sleap_rtc.gui.runners import RemoteProgressBridge
+        from sleap_connect.gui.runners import RemoteProgressBridge
 
         event = ProgressEvent(
             event_type="epoch_end",
@@ -489,7 +489,7 @@ class TestProgressForwarding:
         mock_zmq.Context.return_value = mock_context
         mock_context.socket.return_value = mock_socket
 
-        from sleap_rtc.gui.runners import RemoteProgressBridge
+        from sleap_connect.gui.runners import RemoteProgressBridge
 
         event = ProgressEvent(
             event_type="train_end",
@@ -504,7 +504,7 @@ class TestProgressForwarding:
         assert payload["what"] == ""
 
     @pytest.mark.xfail(reason="ZMQ mock wiring mismatch; needs investigation")
-    @patch("sleap_rtc.api.run_training")
+    @patch("sleap_connect.api.run_training")
     def test_run_remote_training_forwards_progress(self, mock_run_training, mock_zmq):
         """Should forward all progress events through bridge via send_string."""
         mock_context = MagicMock()
@@ -532,7 +532,7 @@ class TestProgressForwarding:
 
         mock_run_training.side_effect = simulate_training
 
-        from sleap_rtc.gui.runners import run_remote_training
+        from sleap_connect.gui.runners import run_remote_training
 
         result = run_remote_training(
             config_path="/path/to/config.yaml",
@@ -551,21 +551,21 @@ class TestProgressForwarding:
 class TestFailureScenarios:
     """Tests for error handling and failure scenarios."""
 
-    @patch("sleap_rtc.api.list_rooms")
-    @patch("sleap_rtc.api.is_logged_in")
+    @patch("sleap_connect.api.list_rooms")
+    @patch("sleap_connect.api.is_logged_in")
     def test_network_error_on_list_rooms(self, mock_is_logged_in, mock_list_rooms):
         """Should handle network errors when listing rooms."""
         mock_is_logged_in.return_value = True
         mock_list_rooms.side_effect = Exception("Network timeout")
 
-        from sleap_rtc.api import list_rooms
+        from sleap_connect.api import list_rooms
 
         with pytest.raises(Exception) as exc_info:
             list_rooms()
 
         assert "Network timeout" in str(exc_info.value)
 
-    @patch("sleap_rtc.api.validate_config")
+    @patch("sleap_connect.api.validate_config")
     def test_validation_error_handling(self, mock_validate_config):
         """Should handle validation errors correctly."""
         mock_validate_config.return_value = ValidationResult(
@@ -586,14 +586,14 @@ class TestFailureScenarios:
             config_path="/path/to/config.yaml",
         )
 
-        from sleap_rtc.gui.presubmission import check_config_validation
+        from sleap_connect.gui.presubmission import check_config_validation
 
         result = check_config_validation("/path/to/config.yaml", parent_widget=None)
 
         assert result.success is False
         assert "Value must be positive" in result.error
 
-    @patch("sleap_rtc.api.check_video_paths")
+    @patch("sleap_connect.api.check_video_paths")
     def test_path_resolution_error_handling(self, mock_check_paths):
         """Should handle path resolution errors correctly."""
         mock_check_paths.return_value = PathCheckResult(
@@ -616,7 +616,7 @@ class TestFailureScenarios:
             slp_path="/data/labels.slp",
         )
 
-        from sleap_rtc.gui.presubmission import check_video_paths
+        from sleap_connect.gui.presubmission import check_video_paths
 
         result = check_video_paths("/data/labels.slp", "room-1", parent_widget=None)
 
@@ -624,7 +624,7 @@ class TestFailureScenarios:
         assert "video1.mp4" in result.error
         assert "video2.mp4" in result.error
 
-    @patch("sleap_rtc.api.run_training")
+    @patch("sleap_connect.api.run_training")
     def test_training_error_handling(self, mock_run_training):
         """Should handle training errors correctly."""
         mock_run_training.side_effect = JobError(
@@ -633,7 +633,7 @@ class TestFailureScenarios:
             exit_code=1,
         )
 
-        from sleap_rtc.api import run_training
+        from sleap_connect.api import run_training
 
         with pytest.raises(JobError) as exc_info:
             run_training(
@@ -644,12 +644,12 @@ class TestFailureScenarios:
         assert "CUDA out of memory" in str(exc_info.value)
         assert exc_info.value.job_id == "job-123"
 
-    @patch("sleap_rtc.api.is_logged_in")
+    @patch("sleap_connect.api.is_logged_in")
     def test_authentication_error_handling(self, mock_is_logged_in):
         """Should handle authentication errors correctly."""
         mock_is_logged_in.return_value = False
 
-        from sleap_rtc.gui.presubmission import run_presubmission_checks
+        from sleap_connect.gui.presubmission import run_presubmission_checks
 
         result = run_presubmission_checks(
             config_path="/path/to/config.yaml",
@@ -660,24 +660,24 @@ class TestFailureScenarios:
         assert result.success is False
         assert "Not logged in" in result.error
 
-    @patch("sleap_rtc.api.list_workers")
-    @patch("sleap_rtc.api.is_logged_in")
+    @patch("sleap_connect.api.list_workers")
+    @patch("sleap_connect.api.is_logged_in")
     def test_room_not_found_error(self, mock_is_logged_in, mock_list_workers):
         """Should handle room not found errors."""
         mock_is_logged_in.return_value = True
         mock_list_workers.side_effect = RoomNotFoundError("Room not found")
 
-        from sleap_rtc.api import list_workers
+        from sleap_connect.api import list_workers
 
         with pytest.raises(RoomNotFoundError):
             list_workers("nonexistent-room")
 
-    @patch("sleap_rtc.api.validate_config")
+    @patch("sleap_connect.api.validate_config")
     def test_config_file_not_found(self, mock_validate_config):
         """Should handle missing config file."""
         mock_validate_config.side_effect = ConfigurationError("File not found")
 
-        from sleap_rtc.gui.presubmission import check_config_validation
+        from sleap_connect.gui.presubmission import check_config_validation
 
         result = check_config_validation("/nonexistent/config.yaml")
 
@@ -693,9 +693,9 @@ class TestFailureScenarios:
 class TestPresubmissionEndToEnd:
     """End-to-end tests for the presubmission validation flow."""
 
-    @patch("sleap_rtc.api.check_video_paths")
-    @patch("sleap_rtc.api.validate_config")
-    @patch("sleap_rtc.api.is_logged_in")
+    @patch("sleap_connect.api.check_video_paths")
+    @patch("sleap_connect.api.validate_config")
+    @patch("sleap_connect.api.is_logged_in")
     def test_full_presubmission_success(
         self,
         mock_is_logged_in,
@@ -726,7 +726,7 @@ class TestPresubmissionEndToEnd:
             slp_path="/data/labels.slp",
         )
 
-        from sleap_rtc.gui.presubmission import run_presubmission_checks
+        from sleap_connect.gui.presubmission import run_presubmission_checks
 
         result = run_presubmission_checks(
             config_path="/path/to/config.yaml",
@@ -737,9 +737,9 @@ class TestPresubmissionEndToEnd:
         assert result.success is True
         assert result.path_mappings == {"/local/video.mp4": "/data/video.mp4"}
 
-    @patch("sleap_rtc.api.check_video_paths")
-    @patch("sleap_rtc.api.validate_config")
-    @patch("sleap_rtc.api.is_logged_in")
+    @patch("sleap_connect.api.check_video_paths")
+    @patch("sleap_connect.api.validate_config")
+    @patch("sleap_connect.api.is_logged_in")
     def test_presubmission_stops_on_auth_failure(
         self,
         mock_is_logged_in,
@@ -749,7 +749,7 @@ class TestPresubmissionEndToEnd:
         """Test presubmission stops when authentication fails."""
         mock_is_logged_in.return_value = False
 
-        from sleap_rtc.gui.presubmission import run_presubmission_checks
+        from sleap_connect.gui.presubmission import run_presubmission_checks
 
         result = run_presubmission_checks(
             config_path="/path/to/config.yaml",
@@ -762,9 +762,9 @@ class TestPresubmissionEndToEnd:
         mock_validate_config.assert_not_called()
         mock_check_video_paths.assert_not_called()
 
-    @patch("sleap_rtc.api.check_video_paths")
-    @patch("sleap_rtc.api.validate_config")
-    @patch("sleap_rtc.api.is_logged_in")
+    @patch("sleap_connect.api.check_video_paths")
+    @patch("sleap_connect.api.validate_config")
+    @patch("sleap_connect.api.is_logged_in")
     def test_presubmission_stops_on_validation_error(
         self,
         mock_is_logged_in,
@@ -786,7 +786,7 @@ class TestPresubmissionEndToEnd:
             config_path="/path/to/config.yaml",
         )
 
-        from sleap_rtc.gui.presubmission import run_presubmission_checks
+        from sleap_connect.gui.presubmission import run_presubmission_checks
 
         result = run_presubmission_checks(
             config_path="/path/to/config.yaml",
@@ -808,24 +808,24 @@ class TestDocumentation:
     """Tests that serve as documentation for SLEAP integration.
 
     These tests demonstrate the expected patterns for integrating
-    sleap-rtc into SLEAP's GUI.
+    sleap-connect into SLEAP's GUI.
     """
 
     def test_example_sleap_integration_pattern(self, mock_prefs):
         """Example: How SLEAP should integrate the RemoteTrainingWidget.
 
         This test demonstrates the recommended pattern for integrating
-        sleap-rtc widgets into SLEAP's training configuration dialog.
+        sleap-connect widgets into SLEAP's training configuration dialog.
         """
         # Step 1: Check if experimental features are enabled
         show_remote_training = mock_prefs.get("enable_experimental_features", False)
 
         if show_remote_training:
-            # Step 2: Check if sleap-rtc is available
-            # In real code: from sleap_rtc.api import is_available
+            # Step 2: Check if sleap-connect is available
+            # In real code: from sleap_connect.api import is_available
             # if is_available():
             #     # Step 3: Create and add the widget
-            #     from sleap_rtc.gui import RemoteTrainingWidget
+            #     from sleap_connect.gui import RemoteTrainingWidget
             #     remote_widget = RemoteTrainingWidget()
             #     layout.addWidget(remote_widget)
             pass
@@ -840,7 +840,7 @@ class TestDocumentation:
         before starting remote training.
         """
         # In real SLEAP code:
-        # from sleap_rtc.gui import run_presubmission_checks
+        # from sleap_connect.gui import run_presubmission_checks
         #
         # result = run_presubmission_checks(
         #     config_path=self.config_path,
@@ -877,7 +877,7 @@ class TestDocumentation:
         mock_context.socket.return_value = mock_socket
 
         # In real SLEAP code:
-        # from sleap_rtc.gui import run_remote_training
+        # from sleap_connect.gui import run_remote_training
         #
         # # LossViewer subscribes to port 9001 by default
         # result = run_remote_training(
@@ -893,7 +893,7 @@ class TestDocumentation:
         #
         # LossViewer will receive these and update the loss plot.
 
-        from sleap_rtc.gui.runners import RemoteProgressBridge
+        from sleap_connect.gui.runners import RemoteProgressBridge
 
         with RemoteProgressBridge(publish_port=9001) as bridge:
             bridge.on_progress(
@@ -925,7 +925,7 @@ class TestRemoteFileBrowser:
     @pytest.fixture
     def browser(self, send_fn, qapp):
         """Create a RemoteFileBrowser with mocked transport."""
-        from sleap_rtc.gui.widgets import RemoteFileBrowser
+        from sleap_connect.gui.widgets import RemoteFileBrowser
 
         browser = RemoteFileBrowser(send_fn=send_fn)
         yield browser
@@ -934,7 +934,7 @@ class TestRemoteFileBrowser:
     @pytest.fixture
     def browser_with_filter(self, send_fn, qapp):
         """Create a RemoteFileBrowser with SLP file filter."""
-        from sleap_rtc.gui.widgets import RemoteFileBrowser
+        from sleap_connect.gui.widgets import RemoteFileBrowser
 
         browser = RemoteFileBrowser(send_fn=send_fn, file_filter="*.slp")
         yield browser
@@ -1392,7 +1392,7 @@ class TestRemoteFileBrowser:
 
     def test_multi_extension_filter(self, send_fn, qapp):
         """Multiple extensions in filter should all be selectable."""
-        from sleap_rtc.gui.widgets import RemoteFileBrowser
+        from sleap_connect.gui.widgets import RemoteFileBrowser
 
         browser = RemoteFileBrowser(send_fn=send_fn, file_filter="*.mp4,*.avi,*.mov")
         mounts = [{"path": "/mnt/data", "label": "Data"}]
@@ -1453,7 +1453,7 @@ class TestSlpPathDialogBrowser:
 
     def test_no_browser_without_send_fn(self, qapp):
         """SlpPathDialog without send_fn should not have a browser panel."""
-        from sleap_rtc.gui.widgets import SlpPathDialog
+        from sleap_connect.gui.widgets import SlpPathDialog
 
         dialog = SlpPathDialog(
             local_path="/local/labels.slp",
@@ -1464,7 +1464,7 @@ class TestSlpPathDialogBrowser:
 
     def test_browser_panel_present_with_send_fn(self, qapp, send_fn):
         """SlpPathDialog with send_fn should have a browser panel."""
-        from sleap_rtc.gui.widgets import SlpPathDialog
+        from sleap_connect.gui.widgets import SlpPathDialog
 
         dialog = SlpPathDialog(
             local_path="/local/labels.slp",
@@ -1477,7 +1477,7 @@ class TestSlpPathDialogBrowser:
 
     def test_browse_toggle_loads_mounts(self, qapp, send_fn):
         """Toggling browse on should load mounts and toggle visibility."""
-        from sleap_rtc.gui.widgets import SlpPathDialog
+        from sleap_connect.gui.widgets import SlpPathDialog
 
         dialog = SlpPathDialog(
             local_path="/local/labels.slp",
@@ -1496,7 +1496,7 @@ class TestSlpPathDialogBrowser:
 
     def test_file_selected_fills_path(self, qapp, send_fn):
         """Selecting a file in the browser should fill the worker path input."""
-        from sleap_rtc.gui.widgets import SlpPathDialog
+        from sleap_connect.gui.widgets import SlpPathDialog
 
         dialog = SlpPathDialog(
             local_path="/local/labels.slp",
@@ -1510,7 +1510,7 @@ class TestSlpPathDialogBrowser:
 
     def test_browser_has_slp_filter(self, qapp, send_fn):
         """Browser should filter for .slp files."""
-        from sleap_rtc.gui.widgets import SlpPathDialog
+        from sleap_connect.gui.widgets import SlpPathDialog
 
         dialog = SlpPathDialog(
             local_path="/local/labels.slp",
@@ -1539,7 +1539,7 @@ class TestPathResolutionDialogBrowser:
         from qtpy.QtWidgets import QMessageBox
 
         monkeypatch.setattr(
-            "sleap_rtc.gui.widgets.QMessageBox.question",
+            "sleap_connect.gui.widgets.QMessageBox.question",
             lambda *a, **kw: QMessageBox.No,
         )
 
@@ -1566,7 +1566,7 @@ class TestPathResolutionDialogBrowser:
 
     def test_no_browser_without_send_fn(self, qapp, missing_videos):
         """PathResolutionDialog without send_fn should not have a browser."""
-        from sleap_rtc.gui.widgets import PathResolutionDialog
+        from sleap_connect.gui.widgets import PathResolutionDialog
 
         dialog = PathResolutionDialog(missing_videos)
         assert dialog._browser is None
@@ -1574,7 +1574,7 @@ class TestPathResolutionDialogBrowser:
 
     def test_browser_present_with_send_fn(self, qapp, missing_videos, send_fn):
         """PathResolutionDialog with send_fn should have a browser."""
-        from sleap_rtc.gui.widgets import PathResolutionDialog
+        from sleap_connect.gui.widgets import PathResolutionDialog
 
         dialog = PathResolutionDialog(missing_videos, send_fn=send_fn)
         assert dialog._browser is not None
@@ -1583,7 +1583,7 @@ class TestPathResolutionDialogBrowser:
 
     def test_browse_button_sets_target_and_loads(self, qapp, missing_videos, send_fn):
         """Clicking Browse... should set target row and load mounts."""
-        from sleap_rtc.gui.widgets import PathResolutionDialog
+        from sleap_connect.gui.widgets import PathResolutionDialog
 
         dialog = PathResolutionDialog(missing_videos, send_fn=send_fn)
 
@@ -1595,7 +1595,7 @@ class TestPathResolutionDialogBrowser:
 
     def test_file_selected_fills_target_row(self, qapp, missing_videos, send_fn):
         """Selecting a file in browser should fill the target row's path."""
-        from sleap_rtc.gui.widgets import PathResolutionDialog
+        from sleap_connect.gui.widgets import PathResolutionDialog
 
         dialog = PathResolutionDialog(missing_videos, send_fn=send_fn)
 
@@ -1612,7 +1612,7 @@ class TestPathResolutionDialogBrowser:
 
     def test_browse_different_rows(self, qapp, missing_videos, send_fn):
         """Browsing different rows should target the correct path edit."""
-        from sleap_rtc.gui.widgets import PathResolutionDialog
+        from sleap_connect.gui.widgets import PathResolutionDialog
 
         dialog = PathResolutionDialog(missing_videos, send_fn=send_fn)
 
@@ -1627,7 +1627,7 @@ class TestPathResolutionDialogBrowser:
 
     def test_browser_has_video_filter(self, qapp, missing_videos, send_fn):
         """Browser should filter for video file types."""
-        from sleap_rtc.gui.widgets import PathResolutionDialog
+        from sleap_connect.gui.widgets import PathResolutionDialog
 
         dialog = PathResolutionDialog(missing_videos, send_fn=send_fn)
         exts = dialog._browser._allowed_extensions
@@ -1640,7 +1640,7 @@ class TestPathResolutionDialogBrowser:
 
     def test_browse_fallback_without_send_fn(self, qapp, missing_videos):
         """Without send_fn, Browse... should use fallback QInputDialog."""
-        from sleap_rtc.gui.widgets import PathResolutionDialog
+        from sleap_connect.gui.widgets import PathResolutionDialog
 
         dialog = PathResolutionDialog(missing_videos)
         # _on_browse_path with no browser should try QInputDialog

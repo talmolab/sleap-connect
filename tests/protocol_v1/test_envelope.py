@@ -4,7 +4,7 @@ import json
 
 import pytest
 
-from sleap_rtc.protocol_v1.envelope import (
+from sleap_connect.protocol_v1.envelope import (
     Event,
     EnvelopeError,
     Hello,

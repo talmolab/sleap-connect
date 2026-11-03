@@ -1,9 +1,9 @@
 """Tests for the `worker.info` method."""
 
-from sleap_rtc.jobs.queue import JobQueue
-from sleap_rtc.protocol_v1 import worker_info
-from sleap_rtc.protocol_v1.server import ProtocolV1Server
-from sleap_rtc.protocol_v1.worker_info import WorkerInfoMethods
+from sleap_connect.jobs.queue import JobQueue
+from sleap_connect.protocol_v1 import worker_info
+from sleap_connect.protocol_v1.server import ProtocolV1Server
+from sleap_connect.protocol_v1.worker_info import WorkerInfoMethods
 
 _FAKE_HARDWARE = {
     "gpu_model": "NVIDIA A40",

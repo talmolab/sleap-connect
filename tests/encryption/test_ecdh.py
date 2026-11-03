@@ -5,7 +5,7 @@ import json
 import pytest
 from cryptography.exceptions import InvalidTag
 
-from sleap_rtc.encryption.ecdh import (
+from sleap_connect.encryption.ecdh import (
     decrypt,
     derive_shared_key,
     encrypt,

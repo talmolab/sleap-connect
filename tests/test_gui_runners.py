@@ -1,4 +1,4 @@
-"""Tests for sleap_rtc.gui.runners module."""
+"""Tests for sleap_connect.gui.runners module."""
 
 import sys
 import pytest
@@ -6,8 +6,8 @@ from unittest.mock import MagicMock, patch
 
 import jsonpickle
 
-from sleap_rtc.api import ProgressEvent
-from sleap_rtc.gui.runners import (
+from sleap_connect.api import ProgressEvent
+from sleap_connect.gui.runners import (
     RemoteProgressBridge,
     run_remote_training,
     format_progress_line,
@@ -216,8 +216,8 @@ class TestRemoteProgressBridgeCancelForwarding:
     def test_loss_viewer_cancel_forwards_msg_job_cancel(self, mock_zmq):
         import time
         import jsonpickle
-        from sleap_rtc.gui.runners import RemoteProgressBridge
-        from sleap_rtc.protocol import MSG_JOB_CANCEL
+        from sleap_connect.gui.runners import RemoteProgressBridge
+        from sleap_connect.protocol import MSG_JOB_CANCEL
 
         sent: list[str] = []
 
@@ -568,7 +568,7 @@ class TestFormatProgressLine:
 class TestRunRemoteTraining:
     """Tests for run_remote_training function."""
 
-    @patch("sleap_rtc.api.run_training")
+    @patch("sleap_connect.api.run_training")
     def test_basic_call(self, mock_run_training, mock_zmq):
         """Should call run_training with correct args."""
         mock_socket = _setup_zmq_mocks(mock_zmq)
@@ -589,7 +589,7 @@ class TestRunRemoteTraining:
         assert call_kwargs["worker_id"] == "worker-1"
         assert result == mock_result
 
-    @patch("sleap_rtc.api.run_training")
+    @patch("sleap_connect.api.run_training")
     def test_on_raw_progress_wired_to_bridge(self, mock_run_training, mock_zmq):
         """Should wire on_raw_progress to bridge.on_raw_zmq_message."""
         mock_socket = _setup_zmq_mocks(mock_zmq)
@@ -605,7 +605,7 @@ class TestRunRemoteTraining:
         call_kwargs = mock_run_training.call_args[1]
         assert call_kwargs["on_raw_progress"] is not None
 
-    @patch("sleap_rtc.api.run_training")
+    @patch("sleap_connect.api.run_training")
     def test_raw_zmq_passthrough(self, mock_run_training, mock_zmq):
         """Should forward raw ZMQ messages directly to LossViewer socket."""
         mock_socket = _setup_zmq_mocks(mock_zmq)
@@ -633,7 +633,7 @@ class TestRunRemoteTraining:
             '{"event": "epoch_end", "what": "centroid"}'
         )
 
-    @patch("sleap_rtc.api.run_training")
+    @patch("sleap_connect.api.run_training")
     def test_progress_callback_no_longer_publishes_to_zmq(self, mock_run_training, mock_zmq):
         """Progress callback should NOT publish to ZMQ (raw passthrough handles that)."""
         mock_socket = _setup_zmq_mocks(mock_zmq)
@@ -658,7 +658,7 @@ class TestRunRemoteTraining:
         # No ZMQ messages from progress_callback — LossViewer is fed by raw passthrough
         mock_socket.send_string.assert_not_called()
 
-    @patch("sleap_rtc.api.run_training")
+    @patch("sleap_connect.api.run_training")
     def test_custom_callback_called(self, mock_run_training, mock_zmq):
         """Should call custom progress callback."""
         mock_socket = _setup_zmq_mocks(mock_zmq)
@@ -685,7 +685,7 @@ class TestRunRemoteTraining:
         assert len(callback_events) == 1
         assert callback_events[0].event_type == "train_begin"
 
-    @patch("sleap_rtc.api.run_training")
+    @patch("sleap_connect.api.run_training")
     def test_on_model_type_updates_bridge_and_calls_user_callback(
         self, mock_run_training, mock_zmq
     ):
@@ -731,7 +731,7 @@ class TestRunRemoteTraining:
             "filtered out by LossViewer"
         )
 
-    @patch("sleap_rtc.api.run_training")
+    @patch("sleap_connect.api.run_training")
     def test_model_type_passed_to_run_training(self, mock_run_training, mock_zmq):
         """Should pass model_type through to run_training API call."""
         mock_socket = _setup_zmq_mocks(mock_zmq)
@@ -747,7 +747,7 @@ class TestRunRemoteTraining:
         call_kwargs = mock_run_training.call_args[1]
         assert call_kwargs["model_type"] == "centroid"
 
-    @patch("sleap_rtc.api.run_training")
+    @patch("sleap_connect.api.run_training")
     def test_on_log_passed_to_run_training(self, mock_run_training, mock_zmq):
         """Should pass on_log through to run_training API call."""
         mock_socket = _setup_zmq_mocks(mock_zmq)
@@ -765,7 +765,7 @@ class TestRunRemoteTraining:
         call_kwargs = mock_run_training.call_args[1]
         assert call_kwargs["on_log"] is not None
 
-    @patch("sleap_rtc.api.run_training")
+    @patch("sleap_connect.api.run_training")
     def test_default_on_log_prints_to_stdout(self, mock_run_training, mock_zmq, capsys):
         """When on_log is not provided, raw log lines should print to stdout."""
         mock_socket = _setup_zmq_mocks(mock_zmq)
@@ -787,7 +787,7 @@ class TestRunRemoteTraining:
         captured = capsys.readouterr()
         assert "Epoch 1/10: loss=0.5" in captured.out
 
-    @patch("sleap_rtc.api.run_training")
+    @patch("sleap_connect.api.run_training")
     def test_custom_on_log_receives_lines(self, mock_run_training, mock_zmq):
         """Custom on_log callback should receive raw log lines."""
         mock_socket = _setup_zmq_mocks(mock_zmq)
@@ -811,7 +811,7 @@ class TestRunRemoteTraining:
 
         assert log_lines == ["line 1\n", "line 2\n"]
 
-    @patch("sleap_rtc.api.run_training")
+    @patch("sleap_connect.api.run_training")
     def test_progress_also_printed_to_terminal(self, mock_run_training, mock_zmq):
         """Structured progress events should also be formatted and sent to on_log."""
         mock_socket = _setup_zmq_mocks(mock_zmq)
@@ -839,7 +839,7 @@ class TestRunRemoteTraining:
         assert "Epoch 1" in log_lines[0]
         assert "train_loss=0.5" in log_lines[0]
 
-    @patch("sleap_rtc.api.run_training")
+    @patch("sleap_connect.api.run_training")
     def test_on_channel_ready_wired_to_bridge(self, mock_run_training, mock_zmq):
         """Should pass bridge.set_send_fn as on_channel_ready."""
         mock_socket = _setup_zmq_mocks(mock_zmq)
@@ -874,7 +874,7 @@ class TestStopCancelCommands:
         """Should forward 'stop' as CONTROL_COMMAND::{raw} via send_fn."""
         import jsonpickle
 
-        from sleap_rtc.protocol import MSG_CONTROL_COMMAND, MSG_SEPARATOR
+        from sleap_connect.protocol import MSG_CONTROL_COMMAND, MSG_SEPARATOR
 
         mock_socket = _setup_zmq_mocks(mock_zmq)
         mock_context = mock_zmq.Context.return_value
@@ -914,7 +914,7 @@ class TestStopCancelCommands:
         """Should forward 'cancel' command as MSG_JOB_CANCEL via send_fn."""
         import jsonpickle
 
-        from sleap_rtc.protocol import MSG_JOB_CANCEL
+        from sleap_connect.protocol import MSG_JOB_CANCEL
 
         mock_socket = _setup_zmq_mocks(mock_zmq)
         mock_context = mock_zmq.Context.return_value
@@ -997,7 +997,7 @@ class TestJobExecutorStopCancel:
         """stop_running_job should send SIGINT to the process group."""
         import signal
         from unittest.mock import patch
-        from sleap_rtc.worker.job_executor import JobExecutor
+        from sleap_connect.worker.job_executor import JobExecutor
 
         executor = JobExecutor(worker=MagicMock(), capabilities=MagicMock())
         mock_process = MagicMock()
@@ -1016,7 +1016,7 @@ class TestJobExecutorStopCancel:
         """cancel_running_job should send SIGTERM to the process group."""
         import signal
         from unittest.mock import patch
-        from sleap_rtc.worker.job_executor import JobExecutor
+        from sleap_connect.worker.job_executor import JobExecutor
 
         executor = JobExecutor(worker=MagicMock(), capabilities=MagicMock())
         mock_process = MagicMock()
@@ -1032,7 +1032,7 @@ class TestJobExecutorStopCancel:
 
     def test_stop_no_running_process(self):
         """stop_running_job should not crash when no process is running."""
-        from sleap_rtc.worker.job_executor import JobExecutor
+        from sleap_connect.worker.job_executor import JobExecutor
 
         executor = JobExecutor(worker=MagicMock(), capabilities=MagicMock())
         executor._running_process = None
@@ -1042,7 +1042,7 @@ class TestJobExecutorStopCancel:
 
     def test_stop_already_exited_process(self):
         """stop_running_job should not signal an already-exited process."""
-        from sleap_rtc.worker.job_executor import JobExecutor
+        from sleap_connect.worker.job_executor import JobExecutor
 
         executor = JobExecutor(worker=MagicMock(), capabilities=MagicMock())
         mock_process = MagicMock()
@@ -1228,7 +1228,7 @@ class TestHandleJobMessage:
 
     def test_job_log_creates_dialog_and_appends(self):
         bridge = RemoteProgressBridge()
-        with patch("sleap_rtc.gui.widgets.InferenceProgressDialog") as MockDialog:
+        with patch("sleap_connect.gui.widgets.InferenceProgressDialog") as MockDialog:
             instance = MagicMock()
             MockDialog.return_value = instance
             bridge._dispatch_job_msg(
@@ -1245,7 +1245,7 @@ class TestHandleJobMessage:
 
     def test_job_log_with_cr_prefix_strips_before_regex(self):
         bridge = RemoteProgressBridge()
-        with patch("sleap_rtc.gui.widgets.InferenceProgressDialog") as MockDialog:
+        with patch("sleap_connect.gui.widgets.InferenceProgressDialog") as MockDialog:
             instance = MagicMock()
             MockDialog.return_value = instance
             bridge._dispatch_job_msg(
@@ -1261,7 +1261,7 @@ class TestHandleJobMessage:
 
     def test_job_progress_calls_update(self):
         bridge = RemoteProgressBridge()
-        with patch("sleap_rtc.gui.widgets.InferenceProgressDialog") as MockDialog:
+        with patch("sleap_connect.gui.widgets.InferenceProgressDialog") as MockDialog:
             instance = MagicMock()
             MockDialog.return_value = instance
             payload = {"n_processed": 10, "n_total": 50}
@@ -1272,7 +1272,7 @@ class TestHandleJobMessage:
         bridge = RemoteProgressBridge()
         received: list[str] = []
         bridge.set_predictions_ready_callback(received.append)
-        with patch("sleap_rtc.gui.widgets.InferenceProgressDialog") as MockDialog:
+        with patch("sleap_connect.gui.widgets.InferenceProgressDialog") as MockDialog:
             instance = MagicMock()
             MockDialog.return_value = instance
             # Open the dialog with an initial JOB_LOG so the COMPLETE branch
@@ -1295,7 +1295,7 @@ class TestHandleJobMessage:
     def test_job_failed_with_no_dialog_creates_one_and_shows_error(self):
         bridge = RemoteProgressBridge()
         assert bridge._inference_dialog is None
-        with patch("sleap_rtc.gui.widgets.InferenceProgressDialog") as MockDialog:
+        with patch("sleap_connect.gui.widgets.InferenceProgressDialog") as MockDialog:
             instance = MagicMock()
             MockDialog.return_value = instance
             bridge._dispatch_job_msg("JOB_FAILED", {"message": "subprocess crashed"})
@@ -1305,7 +1305,7 @@ class TestHandleJobMessage:
 
     def test_job_failed_with_existing_dialog_reuses_it(self):
         bridge = RemoteProgressBridge()
-        with patch("sleap_rtc.gui.widgets.InferenceProgressDialog") as MockDialog:
+        with patch("sleap_connect.gui.widgets.InferenceProgressDialog") as MockDialog:
             instance = MagicMock()
             MockDialog.return_value = instance
             bridge._dispatch_job_msg("JOB_LOG", {"text": "Booting..."})
@@ -1317,7 +1317,7 @@ class TestHandleJobMessage:
 
     def test_show_eager_dialog_creates_waiting_state(self):
         bridge = RemoteProgressBridge()
-        with patch("sleap_rtc.gui.widgets.InferenceProgressDialog") as mock_cls:
+        with patch("sleap_connect.gui.widgets.InferenceProgressDialog") as mock_cls:
             mock_dialog = MagicMock()
             mock_cls.return_value = mock_dialog
 
@@ -1328,7 +1328,7 @@ class TestHandleJobMessage:
 
     def test_first_job_log_transitions_from_waiting_to_live(self):
         bridge = RemoteProgressBridge()
-        with patch("sleap_rtc.gui.widgets.InferenceProgressDialog") as mock_cls:
+        with patch("sleap_connect.gui.widgets.InferenceProgressDialog") as mock_cls:
             mock_dialog = MagicMock()
             mock_dialog._progress_bar.maximum.return_value = 0  # indeterminate
             mock_cls.return_value = mock_dialog
@@ -1360,7 +1360,7 @@ class TestDispatchJobMsgMultiSpec:
 
     def test_first_job_log_shows_video_1_of_3(self):
         bridge = RemoteProgressBridge()
-        with patch("sleap_rtc.gui.widgets.InferenceProgressDialog") as MockDialog:
+        with patch("sleap_connect.gui.widgets.InferenceProgressDialog") as MockDialog:
             instance = MagicMock()
             MockDialog.return_value = instance
             bridge._dispatch_job_msg("JOB_LOG", {
@@ -1375,7 +1375,7 @@ class TestDispatchJobMsgMultiSpec:
 
     def test_second_spec_log_updates_to_video_2_of_3(self):
         bridge = RemoteProgressBridge()
-        with patch("sleap_rtc.gui.widgets.InferenceProgressDialog") as MockDialog:
+        with patch("sleap_connect.gui.widgets.InferenceProgressDialog") as MockDialog:
             instance = MagicMock()
             # First call: dialog just created, maximum returns default (not 0)
             # After first JOB_LOG creates dialog, subsequent calls check maximum()
@@ -1403,7 +1403,7 @@ class TestDispatchJobMsgMultiSpec:
     def test_single_spec_no_video_label(self):
         """When jobs_total=1, don't show 'video 1 of 1' — same as current behavior."""
         bridge = RemoteProgressBridge()
-        with patch("sleap_rtc.gui.widgets.InferenceProgressDialog") as MockDialog:
+        with patch("sleap_connect.gui.widgets.InferenceProgressDialog") as MockDialog:
             instance = MagicMock()
             MockDialog.return_value = instance
             bridge._dispatch_job_msg("JOB_LOG", {
@@ -1416,7 +1416,7 @@ class TestDispatchJobMsgMultiSpec:
     def test_no_enrichment_fields_works_like_before(self):
         """Without job_index/jobs_total (pre-batch callers), no crash."""
         bridge = RemoteProgressBridge()
-        with patch("sleap_rtc.gui.widgets.InferenceProgressDialog") as MockDialog:
+        with patch("sleap_connect.gui.widgets.InferenceProgressDialog") as MockDialog:
             instance = MagicMock()
             MockDialog.return_value = instance
             bridge._dispatch_job_msg("JOB_LOG", {"text": "hello"})
@@ -1427,7 +1427,7 @@ class TestDispatchJobMsgMultiSpec:
     def test_job_complete_mid_batch_resets_progress(self):
         """JOB_COMPLETE for a non-final spec resets progress bar to indeterminate."""
         bridge = RemoteProgressBridge()
-        with patch("sleap_rtc.gui.widgets.InferenceProgressDialog") as MockDialog:
+        with patch("sleap_connect.gui.widgets.InferenceProgressDialog") as MockDialog:
             instance = MagicMock()
             MockDialog.return_value = instance
             # Open dialog
@@ -1447,7 +1447,7 @@ class TestDispatchJobMsgMultiSpec:
     def test_job_complete_final_spec_calls_finish(self):
         """JOB_COMPLETE for the final spec calls finish() as normal."""
         bridge = RemoteProgressBridge()
-        with patch("sleap_rtc.gui.widgets.InferenceProgressDialog") as MockDialog:
+        with patch("sleap_connect.gui.widgets.InferenceProgressDialog") as MockDialog:
             instance = MagicMock()
             MockDialog.return_value = instance
             # Open dialog
@@ -1465,7 +1465,7 @@ class TestDispatchJobMsgMultiSpec:
         bridge = RemoteProgressBridge()
         received: list[str] = []
         bridge.set_predictions_ready_callback(received.append)
-        with patch("sleap_rtc.gui.widgets.InferenceProgressDialog") as MockDialog:
+        with patch("sleap_connect.gui.widgets.InferenceProgressDialog") as MockDialog:
             instance = MagicMock()
             MockDialog.return_value = instance
             bridge._dispatch_job_msg("JOB_LOG", {

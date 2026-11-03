@@ -12,15 +12,15 @@ from pathlib import Path
 
 import pytest
 
-from sleap_rtc.protocol_v1.iroh_live import build_iroh_section
-from sleap_rtc.protocol_v1.pair_code import (
+from sleap_connect.protocol_v1.iroh_live import build_iroh_section
+from sleap_connect.protocol_v1.pair_code import (
     CODE_PREFIX,
     RELAY_TABLE,
     PairCodeError,
     decode_pair_code,
     encode_pair_code,
 )
-from sleap_rtc.protocol_v1.pairing import PairingTicket
+from sleap_connect.protocol_v1.pairing import PairingTicket
 
 VECTORS_PATH = Path(__file__).parent / "pair_code_vectors.json"
 
@@ -196,7 +196,7 @@ class TestDecodeErrors:
         import hashlib
         import struct
 
-        from sleap_rtc.protocol_v1.pair_code import (
+        from sleap_connect.protocol_v1.pair_code import (
             _CHECKSUM_LEN,
             _b32_encode,
             _b64url_decode,

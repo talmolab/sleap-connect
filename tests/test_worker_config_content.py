@@ -6,15 +6,15 @@ import pytest
 
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from sleap_rtc.config import MountConfig
-from sleap_rtc.jobs.spec import TrainJobSpec
-from sleap_rtc.protocol import (
+from sleap_connect.config import MountConfig
+from sleap_connect.jobs.spec import TrainJobSpec
+from sleap_connect.protocol import (
     MSG_JOB_SUBMIT,
     MSG_JOB_ACCEPTED,
     MSG_JOB_REJECTED,
     MSG_SEPARATOR,
 )
-from sleap_rtc.worker.worker_class import RTCWorkerClient
+from sleap_connect.worker.worker_class import RTCWorkerClient
 
 
 @pytest.fixture(autouse=True)
@@ -28,7 +28,7 @@ def _mock_pipeline_reporter():
     mock_reporter = MagicMock()
     mock_reporter.async_cleanup = AsyncMock()
     with patch(
-        "sleap_rtc.worker.worker_class.ProgressReporter", return_value=mock_reporter
+        "sleap_connect.worker.worker_class.ProgressReporter", return_value=mock_reporter
     ):
         yield
 
@@ -240,7 +240,7 @@ class TestConfigContentHandling:
         }
         message = build_submit_message(spec_dict)
 
-        with patch("sleap_rtc.worker.worker_class.logging") as mock_logging:
+        with patch("sleap_connect.worker.worker_class.logging") as mock_logging:
             await worker.handle_job_submit(mock_channel, message)
 
             # Check that path_mappings were logged
@@ -369,7 +369,7 @@ class TestSleapNNVersionProperty:
 
     def test_get_sleap_nn_version_returns_string(self):
         """_get_sleap_nn_version() must return a non-empty string."""
-        from sleap_rtc.worker.worker_class import _get_sleap_nn_version
+        from sleap_connect.worker.worker_class import _get_sleap_nn_version
 
         version = _get_sleap_nn_version()
         assert isinstance(version, str)
@@ -387,7 +387,7 @@ class TestSleapNNVersionProperty:
             return real_import(name, *args, **kwargs)
 
         monkeypatch.setattr(builtins, "__import__", mock_import)
-        from sleap_rtc.worker import worker_class
+        from sleap_connect.worker import worker_class
 
         monkeypatch.setattr(worker_class, "_get_sleap_nn_version", lambda: "unknown")
         assert worker_class._get_sleap_nn_version() == "unknown"
@@ -431,7 +431,7 @@ class TestGPUModelDetection:
 
         # Reload capabilities to pick up the stubbed torch
         import importlib
-        import sleap_rtc.worker.capabilities as caps_mod
+        import sleap_connect.worker.capabilities as caps_mod
 
         importlib.reload(caps_mod)
 
@@ -448,7 +448,7 @@ class TestMeshCoordinatorICEServers:
     def test_handle_client_offer_creates_fresh_pc(self):
         """_handle_client_offer source must call _create_client_peer_connection."""
         import inspect
-        from sleap_rtc.worker.mesh_coordinator import MeshCoordinator
+        from sleap_connect.worker.mesh_coordinator import MeshCoordinator
 
         src = inspect.getsource(MeshCoordinator._handle_client_offer)
         assert (
@@ -463,7 +463,7 @@ class TestExplicitIceServers:
         """_create_peer_connection must always pass RTCConfiguration(iceServers=...)
         so aiortc does NOT fall back to its hardcoded default in an uncontrolled way."""
         import inspect
-        from sleap_rtc.worker.worker_class import RTCWorkerClient
+        from sleap_connect.worker.worker_class import RTCWorkerClient
 
         src = inspect.getsource(RTCWorkerClient._create_peer_connection)
         # Must always create an RTCConfiguration — no bare RTCPeerConnection()
@@ -479,7 +479,7 @@ class TestExplicitIceServers:
         """When signaling server provides no ICE servers, factory must fall
         back to public STUN so workers behind NAT get srflx candidates."""
         import inspect
-        from sleap_rtc.worker.worker_class import RTCWorkerClient
+        from sleap_connect.worker.worker_class import RTCWorkerClient
 
         src = inspect.getsource(RTCWorkerClient._create_peer_connection)
         assert "_FALLBACK_STUN" in src
@@ -489,7 +489,7 @@ class TestExplicitIceServers:
         """All RTCPeerConnection calls in mesh_coordinator must use the factory
         method, not bare RTCPeerConnection()."""
         import inspect
-        from sleap_rtc.worker import mesh_coordinator
+        from sleap_connect.worker import mesh_coordinator
 
         src = inspect.getsource(mesh_coordinator)
         # Count bare RTCPeerConnection() calls (not inside strings/comments)
@@ -509,7 +509,7 @@ class TestDoubleOfferGuard:
     def test_offer_skipped_when_admin_controller_is_admin(self):
         """worker_class main loop must skip 'offer' when admin_controller.is_admin is True."""
         import inspect
-        from sleap_rtc.worker.worker_class import RTCWorkerClient
+        from sleap_connect.worker.worker_class import RTCWorkerClient
 
         # Read the source around the offer handler and verify the admin guard
         src = inspect.getsource(RTCWorkerClient.handle_connection)

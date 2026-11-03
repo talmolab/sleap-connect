@@ -7,8 +7,8 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from sleap_rtc.client.file_transfer import upload_file, UPLOAD_CHUNK_SIZE
-from sleap_rtc.protocol import (
+from sleap_connect.client.file_transfer import upload_file, UPLOAD_CHUNK_SIZE
+from sleap_connect.protocol import (
     MSG_FILE_UPLOAD_CACHE_HIT,
     MSG_FILE_UPLOAD_CHECK,
     MSG_FILE_UPLOAD_COMPLETE,

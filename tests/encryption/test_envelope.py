@@ -2,8 +2,8 @@
 
 import pytest
 
-from sleap_rtc.encryption.ecdh import derive_shared_key, generate_keypair
-from sleap_rtc.encryption.envelope import ENCRYPTED_RELAY_TYPE, unwrap, wrap
+from sleap_connect.encryption.ecdh import derive_shared_key, generate_keypair
+from sleap_connect.encryption.envelope import ENCRYPTED_RELAY_TYPE, unwrap, wrap
 
 
 class TestWrap:

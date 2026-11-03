@@ -7,7 +7,7 @@ import sys
 
 import pytest
 
-from sleap_rtc.protocol_v1 import daemon, shell_hook
+from sleap_connect.protocol_v1 import daemon, shell_hook
 
 posix_only = pytest.mark.skipif(sys.platform == "win32", reason="POSIX shells")
 
@@ -114,7 +114,7 @@ class TestAutoInstall:
         monkeypatch.setenv("SHELL", "/bin/zsh")
         message = shell_hook.auto_install(interactive=True)
         assert "Added a new-terminal reminder to ~/.zshrc" in message
-        assert "sleap-rtc shell-hook uninstall" in message
+        assert "sleap-connect shell-hook uninstall" in message
         assert shell_hook.auto_install(interactive=True) is None
 
     @posix_only
@@ -183,7 +183,7 @@ class TestNoticeScript:
         shell_hook.write_notice_scripts()
 
     def test_prints_one_line_per_running_worker(self, shell, tmp_path):
-        worker = _sleeper("sleap-rtc serve")
+        worker = _sleeper("sleap-connect serve")
         try:
             _register(worker.pid, tmp_path)
             out = _source(shell, interactive=True)
@@ -194,11 +194,11 @@ class TestNoticeScript:
             f"sleap-connect worker is running (pid {worker.pid}, since Oct 29 14:02)"
             in out
         )
-        assert "status: sleap-rtc status" in out
-        assert f"sleap-rtc serve --stop --data-dir '{tmp_path}'" in out
+        assert "status: sleap-connect status" in out
+        assert f"sleap-connect serve --stop --data-dir '{tmp_path}'" in out
 
     def test_silent_in_non_interactive_shells(self, shell, tmp_path):
-        worker = _sleeper("sleap-rtc serve")
+        worker = _sleeper("sleap-connect serve")
         try:
             _register(worker.pid, tmp_path)
             out = _source(shell, interactive=False)
@@ -215,7 +215,9 @@ class TestNoticeScript:
         assert not daemon.registry_path(tmp_path).exists()
 
     def test_ignores_a_reused_pid(self, shell, tmp_path):
-        other = _sleeper("something else")
+        # A plain `sleep`: a Python sleeper's own path (this checkout's .venv)
+        # can itself contain "sleap-connect".
+        other = subprocess.Popen(["sleep", "60"])
         try:
             _register(other.pid, tmp_path)
             out = _source(shell, interactive=True)

@@ -20,9 +20,9 @@ import json
 import iroh
 import pytest
 
-from sleap_rtc.protocol_v1.blobs import BlobIndex, compute_chunk_hashes, hash_file
-from sleap_rtc.protocol_v1.iroh_transport import ALPN, read_frame, write_frame
-from sleap_rtc.protocol_v1.server import ProtocolV1Server
+from sleap_connect.protocol_v1.blobs import BlobIndex, compute_chunk_hashes, hash_file
+from sleap_connect.protocol_v1.iroh_transport import ALPN, read_frame, write_frame
+from sleap_connect.protocol_v1.server import ProtocolV1Server
 
 _MINIMAL = iroh.preset_minimal
 

@@ -1,12 +1,12 @@
-"""Tests for 'sleap-rtc config' path-mapping subcommands."""
+"""Tests for 'sleap-connect config' path-mapping subcommands."""
 
 from unittest import mock
 
 import pytest
 from click.testing import CliRunner
 
-from sleap_rtc.cli import cli
-from sleap_rtc.config import Config, PathMapping
+from sleap_connect.cli import cli
+from sleap_connect.config import Config, PathMapping
 
 
 @pytest.fixture
@@ -25,7 +25,7 @@ def cfg(tmp_path, monkeypatch):
 @pytest.fixture
 def patched_config(cfg):
     """Patch get_config() in the config module to return our temp-dir Config."""
-    with mock.patch("sleap_rtc.config.get_config", return_value=cfg):
+    with mock.patch("sleap_connect.config.get_config", return_value=cfg):
         yield cfg
 
 

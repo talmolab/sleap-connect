@@ -1,8 +1,8 @@
-"""Tests for choosing a train job's ZMQ ports (sleap_rtc.jobs.ports)."""
+"""Tests for choosing a train job's ZMQ ports (sleap_connect.jobs.ports)."""
 
 import socket
 
-from sleap_rtc.jobs.ports import choose_zmq_ports
+from sleap_connect.jobs.ports import choose_zmq_ports
 
 
 def _free_pair():

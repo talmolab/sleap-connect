@@ -3,7 +3,7 @@
 import json
 import time
 
-from sleap_rtc.protocol_v1.pairing import PendingPairings
+from sleap_connect.protocol_v1.pairing import PendingPairings
 
 
 class TestPendingPairings:
@@ -56,7 +56,7 @@ class TestFileBackedPendingPairings:
     """Tests for the optional file-backed mode (cross-process handoff)."""
 
     def test_a_ticket_minted_in_one_instance_is_claimable_in_another(self, tmp_path):
-        # Simulates `sleap-rtc pair` (mints) and `sleap-rtc serve` (claims)
+        # Simulates `sleap-connect pair` (mints) and `sleap-connect serve` (claims)
         # as two separate processes sharing the same file.
         path = tmp_path / "pending.json"
         minter = PendingPairings(path=path)

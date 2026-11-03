@@ -2,7 +2,7 @@
 
 import pytest
 
-from sleap_rtc.config import Config, PathMapping
+from sleap_connect.config import Config, PathMapping
 
 
 @pytest.fixture

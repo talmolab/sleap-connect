@@ -9,13 +9,13 @@ from unittest import mock
 
 import pytest
 
-from sleap_rtc.auth import credentials
+from sleap_connect.auth import credentials
 
 
 @pytest.fixture
 def temp_credentials_dir(tmp_path):
     """Create a temporary credentials directory for testing."""
-    creds_dir = tmp_path / ".sleap-rtc"
+    creds_dir = tmp_path / ".sleap-connect"
     creds_dir.mkdir()
     creds_path = creds_dir / "credentials.json"
 

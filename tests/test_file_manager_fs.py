@@ -7,8 +7,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from sleap_rtc.config import MountConfig
-from sleap_rtc.worker.file_manager import FileManager
+from sleap_connect.config import MountConfig
+from sleap_connect.worker.file_manager import FileManager
 
 
 @pytest.fixture
@@ -418,7 +418,7 @@ class TestCheckVideoAccessibility:
             ]
         )
 
-        with patch("sleap_rtc.worker.file_manager.sio") as mock_sio:
+        with patch("sleap_connect.worker.file_manager.sio") as mock_sio:
             mock_sio.load_file.return_value = mock_labels
 
             result = file_manager.check_video_accessibility(str(slp_file))
@@ -448,7 +448,7 @@ class TestCheckVideoAccessibility:
             ]
         )
 
-        with patch("sleap_rtc.worker.file_manager.sio") as mock_sio:
+        with patch("sleap_connect.worker.file_manager.sio") as mock_sio:
             mock_sio.load_file.return_value = mock_labels
 
             result = file_manager.check_video_accessibility(str(slp_file))
@@ -472,7 +472,7 @@ class TestCheckVideoAccessibility:
             ]
         )
 
-        with patch("sleap_rtc.worker.file_manager.sio") as mock_sio:
+        with patch("sleap_connect.worker.file_manager.sio") as mock_sio:
             mock_sio.load_file.return_value = mock_labels
 
             result = file_manager.check_video_accessibility(str(slp_file))
@@ -495,7 +495,7 @@ class TestCheckVideoAccessibility:
         slp_file = temp_mount / "labels.slp"
         slp_file.write_text("slp data")
 
-        with patch("sleap_rtc.worker.file_manager.SLEAP_IO_AVAILABLE", False):
+        with patch("sleap_connect.worker.file_manager.SLEAP_IO_AVAILABLE", False):
             result = fm.check_video_accessibility(str(slp_file))
 
             assert "error" in result
@@ -520,7 +520,7 @@ class TestCheckVideoAccessibility:
             ]
         )
 
-        with patch("sleap_rtc.worker.file_manager.sio") as mock_sio:
+        with patch("sleap_connect.worker.file_manager.sio") as mock_sio:
             mock_sio.load_file.return_value = mock_labels
 
             result = file_manager.check_video_accessibility(str(slp_file))
@@ -689,7 +689,7 @@ class TestWriteSlpWithNewPaths:
             "/old/path/video2.mp4": "/new/path/video2.mp4",
         }
 
-        with patch("sleap_rtc.worker.file_manager.sio") as mock_sio:
+        with patch("sleap_connect.worker.file_manager.sio") as mock_sio:
             mock_sio.load_file.return_value = mock_labels
 
             result = file_manager.write_slp_with_new_paths(
@@ -796,7 +796,7 @@ class TestWriteSlpWithNewPaths:
             ]
         )
 
-        with patch("sleap_rtc.worker.file_manager.sio") as mock_sio:
+        with patch("sleap_connect.worker.file_manager.sio") as mock_sio:
             mock_sio.load_file.return_value = mock_labels
 
             result = file_manager.write_slp_with_new_paths(
@@ -815,7 +815,7 @@ class TestWriteSlpWithNewPaths:
         slp_file = temp_mount / "labels.slp"
         slp_file.write_text("slp data")
 
-        with patch("sleap_rtc.worker.file_manager.SLEAP_IO_AVAILABLE", False):
+        with patch("sleap_connect.worker.file_manager.SLEAP_IO_AVAILABLE", False):
             result = fm.write_slp_with_new_paths(
                 slp_path=str(slp_file),
                 output_dir=str(temp_mount),
@@ -835,7 +835,7 @@ class TestWriteSlpWithNewPaths:
         output_dir = temp_mount / "output"
         output_dir.mkdir()
 
-        with patch("sleap_rtc.worker.file_manager.sio") as mock_sio:
+        with patch("sleap_connect.worker.file_manager.sio") as mock_sio:
             mock_sio.load_file.side_effect = Exception("Corrupted file")
 
             result = file_manager.write_slp_with_new_paths(
@@ -871,7 +871,7 @@ class TestWriteSlpWithNewPaths:
             "/old/path/video2.mp4": "/new/path/video2.mp4",
         }
 
-        with patch("sleap_rtc.worker.file_manager.sio") as mock_sio:
+        with patch("sleap_connect.worker.file_manager.sio") as mock_sio:
             mock_sio.load_file.return_value = mock_labels
 
             result = file_manager.write_slp_with_new_paths(
@@ -901,7 +901,7 @@ class TestWriteSlpWithNewPaths:
         )
         mock_labels.save.side_effect = PermissionError("Permission denied")
 
-        with patch("sleap_rtc.worker.file_manager.sio") as mock_sio:
+        with patch("sleap_connect.worker.file_manager.sio") as mock_sio:
             mock_sio.load_file.return_value = mock_labels
 
             result = file_manager.write_slp_with_new_paths(

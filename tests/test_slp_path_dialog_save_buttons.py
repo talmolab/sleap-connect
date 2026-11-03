@@ -5,7 +5,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from qtpy.QtWidgets import QApplication
 
-from sleap_rtc.gui.widgets import SlpPathDialog
+from sleap_connect.gui.widgets import SlpPathDialog
 
 
 @pytest.fixture(scope="session")
@@ -75,7 +75,7 @@ class TestSaveSLPButton:
         )
 
         with patch(
-            "sleap_rtc.gui.widgets.QFileDialog.getExistingDirectory",
+            "sleap_connect.gui.widgets.QFileDialog.getExistingDirectory",
             return_value=str(tmp_path),
         ):
             dlg._on_save_slp_clicked()
@@ -87,7 +87,7 @@ class TestSaveSLPButton:
         dlg = _make_dialog(save_fn=lambda p: None)
 
         with patch(
-            "sleap_rtc.gui.widgets.QFileDialog.getExistingDirectory",
+            "sleap_connect.gui.widgets.QFileDialog.getExistingDirectory",
             return_value=str(tmp_path),
         ):
             dlg._on_save_slp_clicked()
@@ -100,7 +100,7 @@ class TestSaveSLPButton:
         dlg = _make_dialog(save_fn=lambda p: saved_paths.append(p))
 
         with patch(
-            "sleap_rtc.gui.widgets.QFileDialog.getExistingDirectory",
+            "sleap_connect.gui.widgets.QFileDialog.getExistingDirectory",
             return_value="",
         ):
             dlg._on_save_slp_clicked()
@@ -114,7 +114,7 @@ class TestSaveSLPButton:
         dlg = _make_dialog(save_fn=failing_fn)
 
         with patch(
-            "sleap_rtc.gui.widgets.QFileDialog.getExistingDirectory",
+            "sleap_connect.gui.widgets.QFileDialog.getExistingDirectory",
             return_value=str(tmp_path),
         ):
             dlg._on_save_slp_clicked()
@@ -126,7 +126,7 @@ class TestSaveSLPButton:
         dlg = _make_dialog(save_fn=lambda p: (_ for _ in ()).throw(RuntimeError("err")))
 
         with patch(
-            "sleap_rtc.gui.widgets.QFileDialog.getExistingDirectory",
+            "sleap_connect.gui.widgets.QFileDialog.getExistingDirectory",
             return_value=str(tmp_path),
         ):
             dlg._on_save_slp_clicked()
@@ -145,7 +145,7 @@ class TestSavePkgSLPButton:
         )
 
         with patch(
-            "sleap_rtc.gui.widgets.QFileDialog.getExistingDirectory",
+            "sleap_connect.gui.widgets.QFileDialog.getExistingDirectory",
             return_value=str(tmp_path),
         ):
             dlg._on_save_pkg_slp_clicked()
@@ -157,7 +157,7 @@ class TestSavePkgSLPButton:
         dlg = _make_dialog(convert_fn=lambda p: None)
 
         with patch(
-            "sleap_rtc.gui.widgets.QFileDialog.getExistingDirectory",
+            "sleap_connect.gui.widgets.QFileDialog.getExistingDirectory",
             return_value=str(tmp_path),
         ):
             dlg._on_save_pkg_slp_clicked()
@@ -170,7 +170,7 @@ class TestSavePkgSLPButton:
         dlg = _make_dialog(convert_fn=lambda p: converted_paths.append(p))
 
         with patch(
-            "sleap_rtc.gui.widgets.QFileDialog.getExistingDirectory",
+            "sleap_connect.gui.widgets.QFileDialog.getExistingDirectory",
             return_value="",
         ):
             dlg._on_save_pkg_slp_clicked()
@@ -184,7 +184,7 @@ class TestSavePkgSLPButton:
         dlg = _make_dialog(convert_fn=failing_fn)
 
         with patch(
-            "sleap_rtc.gui.widgets.QFileDialog.getExistingDirectory",
+            "sleap_connect.gui.widgets.QFileDialog.getExistingDirectory",
             return_value=str(tmp_path),
         ):
             dlg._on_save_pkg_slp_clicked()
@@ -195,7 +195,7 @@ class TestSavePkgSLPButton:
         dlg = _make_dialog(convert_fn=lambda p: (_ for _ in ()).throw(RuntimeError("err")))
 
         with patch(
-            "sleap_rtc.gui.widgets.QFileDialog.getExistingDirectory",
+            "sleap_connect.gui.widgets.QFileDialog.getExistingDirectory",
             return_value=str(tmp_path),
         ):
             dlg._on_save_pkg_slp_clicked()

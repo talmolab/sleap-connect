@@ -3,7 +3,7 @@
 import json
 import pytest
 
-from sleap_rtc.jobs.spec import TrainJobSpec, TrackJobSpec, parse_job_spec
+from sleap_connect.jobs.spec import TrainJobSpec, TrackJobSpec, parse_job_spec
 
 
 class TestTrainJobSpec:

@@ -22,25 +22,25 @@ import struct
 import iroh
 import pytest
 
-from sleap_rtc.auth.keypair import generate_keypair, public_key_to_b64
-from sleap_rtc.protocol_v1.auth import AuthMethods
-from sleap_rtc.protocol_v1.envelope import Hello, Req, parse_envelope
-from sleap_rtc.protocol_v1.errors import ProtocolError
-from sleap_rtc.protocol_v1.identity import WorkerIdentity
-from sleap_rtc.protocol_v1.iroh_transport import (
+from sleap_connect.auth.keypair import generate_keypair, public_key_to_b64
+from sleap_connect.protocol_v1.auth import AuthMethods
+from sleap_connect.protocol_v1.envelope import Hello, Req, parse_envelope
+from sleap_connect.protocol_v1.errors import ProtocolError
+from sleap_connect.protocol_v1.identity import WorkerIdentity
+from sleap_connect.protocol_v1.iroh_transport import (
     ALPN,
     FrameTooLarge,
     IrohStreamTransport,
     read_frame,
 )
-from sleap_rtc.protocol_v1.pairing import PendingPairings
-from sleap_rtc.protocol_v1.server import (
+from sleap_connect.protocol_v1.pairing import PendingPairings
+from sleap_connect.protocol_v1.server import (
     DEFAULT_WS_MAX_SIZE,
     Connection,
     ProtocolV1Server,
     TransportClosed,
 )
-from sleap_rtc.protocol_v1.trust_store import TrustStore
+from sleap_connect.protocol_v1.trust_store import TrustStore
 
 _MINIMAL = iroh.preset_minimal
 

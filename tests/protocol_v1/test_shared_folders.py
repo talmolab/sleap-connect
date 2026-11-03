@@ -5,8 +5,8 @@ from pathlib import Path
 import click
 from click.testing import CliRunner
 
-from sleap_rtc.protocol_v1.cli import _share_folder, add_folder, folders, remove_folder
-from sleap_rtc.protocol_v1.shared_folders import (
+from sleap_connect.protocol_v1.cli import _share_folder, add_folder, folders, remove_folder
+from sleap_connect.protocol_v1.shared_folders import (
     SharedFolderFileManager,
     SharedFolders,
     is_broad,
@@ -81,7 +81,7 @@ class TestHelpers:
 class TestFileManager:
     def test_browsing_is_limited_to_shared_folders_and_never_the_data_dir(self, tmp_path):
         shared_dir = tmp_path / "project"
-        data_dir = shared_dir / ".sleap-rtc"
+        data_dir = shared_dir / ".sleap-connect"
         (data_dir).mkdir(parents=True)
         store = SharedFolders(data_dir / "shared_folders.json")
         fm = SharedFolderFileManager(store, data_dir, serve_folder=shared_dir.resolve())

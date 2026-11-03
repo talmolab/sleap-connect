@@ -9,12 +9,12 @@ import websockets.exceptions
 from unittest.mock import AsyncMock, MagicMock, patch, call
 
 
-MODULE = "sleap_rtc.worker.worker_class"
+MODULE = "sleap_connect.worker.worker_class"
 
 
 def _make_worker():
     """Create an RTCWorkerClient without calling __init__."""
-    from sleap_rtc.worker.worker_class import RTCWorkerClient
+    from sleap_connect.worker.worker_class import RTCWorkerClient
 
     worker = RTCWorkerClient.__new__(RTCWorkerClient)
     worker.shutting_down = False
@@ -744,40 +744,40 @@ class TestNormalReturnReconnects:
 # ---------------------------------------------------------------------------
 class TestParseDuration:
     def test_minutes(self):
-        from sleap_rtc.cli import _parse_duration
+        from sleap_connect.cli import _parse_duration
         assert _parse_duration("30m") == 1800
 
     def test_hours(self):
-        from sleap_rtc.cli import _parse_duration
+        from sleap_connect.cli import _parse_duration
         assert _parse_duration("2h") == 7200
 
     def test_compound(self):
-        from sleap_rtc.cli import _parse_duration
+        from sleap_connect.cli import _parse_duration
         assert _parse_duration("1h30m") == 5400
 
     def test_seconds_suffix(self):
-        from sleap_rtc.cli import _parse_duration
+        from sleap_connect.cli import _parse_duration
         assert _parse_duration("90s") == 90
 
     def test_plain_integer(self):
-        from sleap_rtc.cli import _parse_duration
+        from sleap_connect.cli import _parse_duration
         assert _parse_duration("3600") == 3600
 
     def test_zero_raises(self):
         import click
-        from sleap_rtc.cli import _parse_duration
+        from sleap_connect.cli import _parse_duration
         with pytest.raises(click.BadParameter):
             _parse_duration("0")
 
     def test_invalid_string_raises(self):
         import click
-        from sleap_rtc.cli import _parse_duration
+        from sleap_connect.cli import _parse_duration
         with pytest.raises(click.BadParameter):
             _parse_duration("abc")
 
     def test_zero_minutes_raises(self):
         import click
-        from sleap_rtc.cli import _parse_duration
+        from sleap_connect.cli import _parse_duration
         with pytest.raises(click.BadParameter):
             _parse_duration("0m")
 

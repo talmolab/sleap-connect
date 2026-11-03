@@ -1,11 +1,11 @@
-"""Tests for sleap_rtc.api module."""
+"""Tests for sleap_connect.api module."""
 
 import os
 import pytest
 from unittest.mock import patch, MagicMock
 import json
 
-from sleap_rtc.api import (
+from sleap_connect.api import (
     User,
     Room,
     Worker,
@@ -63,24 +63,24 @@ class TestIsAvailable:
 
     def test_available_when_configured(self, mock_config):
         """Should return True when signaling URLs are configured."""
-        with patch("sleap_rtc.config.get_config", return_value=mock_config):
+        with patch("sleap_connect.config.get_config", return_value=mock_config):
             assert is_available() is True
 
     def test_not_available_when_no_ws_url(self, mock_config):
         """Should return False when WS URL is missing."""
         mock_config.signaling_websocket = None
-        with patch("sleap_rtc.config.get_config", return_value=mock_config):
+        with patch("sleap_connect.config.get_config", return_value=mock_config):
             assert is_available() is False
 
     def test_not_available_when_no_http_url(self, mock_config):
         """Should return False when HTTP URL is missing."""
         mock_config.signaling_http = None
-        with patch("sleap_rtc.config.get_config", return_value=mock_config):
+        with patch("sleap_connect.config.get_config", return_value=mock_config):
             assert is_available() is False
 
     def test_not_available_on_exception(self):
         """Should return False when config raises exception."""
-        with patch("sleap_rtc.config.get_config", side_effect=Exception("Config error")):
+        with patch("sleap_connect.config.get_config", side_effect=Exception("Config error")):
             assert is_available() is False
 
 
@@ -94,18 +94,18 @@ class TestIsLoggedIn:
 
     def test_logged_in_with_valid_jwt(self, mock_jwt):
         """Should return True when valid JWT exists."""
-        with patch("sleap_rtc.auth.credentials.get_valid_jwt", return_value=mock_jwt):
+        with patch("sleap_connect.auth.credentials.get_valid_jwt", return_value=mock_jwt):
             assert is_logged_in() is True
 
     def test_not_logged_in_with_no_jwt(self):
         """Should return False when no JWT exists."""
-        with patch("sleap_rtc.auth.credentials.get_valid_jwt", return_value=None):
+        with patch("sleap_connect.auth.credentials.get_valid_jwt", return_value=None):
             assert is_logged_in() is False
 
     def test_not_logged_in_with_expired_jwt(self):
         """Should return False when JWT is expired."""
         # get_valid_jwt returns None for expired JWTs
-        with patch("sleap_rtc.auth.credentials.get_valid_jwt", return_value=None):
+        with patch("sleap_connect.auth.credentials.get_valid_jwt", return_value=None):
             assert is_logged_in() is False
 
 
@@ -119,8 +119,8 @@ class TestGetLoggedInUser:
 
     def test_returns_user_when_logged_in(self, mock_jwt, mock_user_data):
         """Should return User object when logged in."""
-        with patch("sleap_rtc.auth.credentials.get_valid_jwt", return_value=mock_jwt):
-            with patch("sleap_rtc.auth.credentials.get_user", return_value=mock_user_data):
+        with patch("sleap_connect.auth.credentials.get_valid_jwt", return_value=mock_jwt):
+            with patch("sleap_connect.auth.credentials.get_user", return_value=mock_user_data):
                 user = get_logged_in_user()
                 assert user is not None
                 assert user.id == "12345"
@@ -129,13 +129,13 @@ class TestGetLoggedInUser:
 
     def test_returns_none_when_no_jwt(self):
         """Should return None when no JWT exists."""
-        with patch("sleap_rtc.auth.credentials.get_valid_jwt", return_value=None):
+        with patch("sleap_connect.auth.credentials.get_valid_jwt", return_value=None):
             assert get_logged_in_user() is None
 
     def test_returns_none_when_no_user_data(self, mock_jwt):
         """Should return None when no user data exists."""
-        with patch("sleap_rtc.auth.credentials.get_valid_jwt", return_value=mock_jwt):
-            with patch("sleap_rtc.auth.credentials.get_user", return_value=None):
+        with patch("sleap_connect.auth.credentials.get_valid_jwt", return_value=mock_jwt):
+            with patch("sleap_connect.auth.credentials.get_user", return_value=None):
                 assert get_logged_in_user() is None
 
 
@@ -150,9 +150,9 @@ class TestLogin:
     def test_login_success(self, mock_user_data):
         """Should return User on successful login."""
         mock_result = {"jwt": "test-jwt", "user": mock_user_data}
-        with patch("sleap_rtc.auth.github.github_login", return_value=mock_result):
-            with patch("sleap_rtc.auth.credentials.save_jwt") as mock_save:
-                with patch("sleap_rtc.api._ensure_keypair_registered"):
+        with patch("sleap_connect.auth.github.github_login", return_value=mock_result):
+            with patch("sleap_connect.auth.credentials.save_jwt") as mock_save:
+                with patch("sleap_connect.api._ensure_keypair_registered"):
                     user = login()
                     assert user.username == "testuser"
                     mock_save.assert_called_once_with("test-jwt", mock_user_data)
@@ -162,9 +162,9 @@ class TestLogin:
         mock_result = {"jwt": "test-jwt", "user": mock_user_data}
         callback = MagicMock()
 
-        with patch("sleap_rtc.auth.github.github_login", return_value=mock_result) as mock_login:
-            with patch("sleap_rtc.auth.credentials.save_jwt"):
-                with patch("sleap_rtc.api._ensure_keypair_registered"):
+        with patch("sleap_connect.auth.github.github_login", return_value=mock_result) as mock_login:
+            with patch("sleap_connect.auth.credentials.save_jwt"):
+                with patch("sleap_connect.api._ensure_keypair_registered"):
                     login(on_url_ready=callback)
                     mock_login.assert_called_once()
                     call_kwargs = mock_login.call_args[1]
@@ -172,16 +172,16 @@ class TestLogin:
 
     def test_login_failure_raises_auth_error(self):
         """Should raise AuthenticationError on failure."""
-        with patch("sleap_rtc.auth.github.github_login", side_effect=RuntimeError("Timeout")):
+        with patch("sleap_connect.auth.github.github_login", side_effect=RuntimeError("Timeout")):
             with pytest.raises(AuthenticationError, match="Login failed"):
                 login()
 
     def test_login_with_timeout(self, mock_user_data):
         """Should pass timeout to github_login."""
         mock_result = {"jwt": "test-jwt", "user": mock_user_data}
-        with patch("sleap_rtc.auth.github.github_login", return_value=mock_result) as mock_login:
-            with patch("sleap_rtc.auth.credentials.save_jwt"):
-                with patch("sleap_rtc.api._ensure_keypair_registered"):
+        with patch("sleap_connect.auth.github.github_login", return_value=mock_result) as mock_login:
+            with patch("sleap_connect.auth.credentials.save_jwt"):
+                with patch("sleap_connect.api._ensure_keypair_registered"):
                     login(timeout=60)
                     call_kwargs = mock_login.call_args[1]
                     assert call_kwargs["timeout"] == 60
@@ -189,18 +189,18 @@ class TestLogin:
     def test_login_calls_ensure_keypair(self, mock_user_data):
         """Should call _ensure_keypair_registered after saving JWT."""
         mock_result = {"jwt": "test-jwt", "user": mock_user_data}
-        with patch("sleap_rtc.auth.github.github_login", return_value=mock_result):
-            with patch("sleap_rtc.auth.credentials.save_jwt"):
-                with patch("sleap_rtc.api._ensure_keypair_registered") as mock_ensure:
+        with patch("sleap_connect.auth.github.github_login", return_value=mock_result):
+            with patch("sleap_connect.auth.credentials.save_jwt"):
+                with patch("sleap_connect.api._ensure_keypair_registered") as mock_ensure:
                     login()
                     mock_ensure.assert_called_once_with(auth_token="test-jwt")
 
     def test_login_succeeds_even_if_keypair_registration_fails(self, mock_user_data):
         """Login should succeed even if keypair registration raises."""
         mock_result = {"jwt": "test-jwt", "user": mock_user_data}
-        with patch("sleap_rtc.auth.github.github_login", return_value=mock_result):
-            with patch("sleap_rtc.auth.credentials.save_jwt"):
-                with patch("sleap_rtc.api._ensure_keypair_registered", side_effect=Exception("boom")):
+        with patch("sleap_connect.auth.github.github_login", return_value=mock_result):
+            with patch("sleap_connect.auth.credentials.save_jwt"):
+                with patch("sleap_connect.api._ensure_keypair_registered", side_effect=Exception("boom")):
                     user = login()
                     assert user.username == "testuser"
 
@@ -215,11 +215,11 @@ class TestEnsureKeypairRegistered:
 
     def test_generates_keypair_when_none_exists(self):
         """Should generate and save a new keypair if private key is missing."""
-        with patch("sleap_rtc.auth.credentials.get_private_key_b64", return_value=None):
-            with patch("sleap_rtc.auth.credentials.save_private_key_b64") as mock_save:
-                with patch("sleap_rtc.auth.credentials.get_public_key_registered", return_value=False):
-                    with patch("sleap_rtc.auth.credentials.set_public_key_registered"):
-                        with patch("sleap_rtc.api.requests") as mock_requests:
+        with patch("sleap_connect.auth.credentials.get_private_key_b64", return_value=None):
+            with patch("sleap_connect.auth.credentials.save_private_key_b64") as mock_save:
+                with patch("sleap_connect.auth.credentials.get_public_key_registered", return_value=False):
+                    with patch("sleap_connect.auth.credentials.set_public_key_registered"):
+                        with patch("sleap_connect.api.requests") as mock_requests:
                             mock_requests.post.return_value = MagicMock(ok=True)
                             _ensure_keypair_registered(auth_token="test-jwt")
                             mock_save.assert_called_once()
@@ -229,31 +229,31 @@ class TestEnsureKeypairRegistered:
 
     def test_skips_generation_when_keypair_exists(self):
         """Should not generate a new keypair if private key already exists."""
-        with patch("sleap_rtc.auth.credentials.get_private_key_b64", return_value="existing_key_b64"):
-            with patch("sleap_rtc.auth.credentials.save_private_key_b64") as mock_save:
-                with patch("sleap_rtc.auth.credentials.get_public_key_registered", return_value=True):
+        with patch("sleap_connect.auth.credentials.get_private_key_b64", return_value="existing_key_b64"):
+            with patch("sleap_connect.auth.credentials.save_private_key_b64") as mock_save:
+                with patch("sleap_connect.auth.credentials.get_public_key_registered", return_value=True):
                     _ensure_keypair_registered(auth_token="test-jwt")
                     mock_save.assert_not_called()
 
     def test_skips_registration_when_already_registered(self):
         """Should not POST to server if public key is already registered."""
-        with patch("sleap_rtc.auth.credentials.get_private_key_b64", return_value="existing_key_b64"):
-            with patch("sleap_rtc.auth.credentials.get_public_key_registered", return_value=True):
-                with patch("sleap_rtc.api.requests") as mock_requests:
+        with patch("sleap_connect.auth.credentials.get_private_key_b64", return_value="existing_key_b64"):
+            with patch("sleap_connect.auth.credentials.get_public_key_registered", return_value=True):
+                with patch("sleap_connect.api.requests") as mock_requests:
                     _ensure_keypair_registered(auth_token="test-jwt")
                     mock_requests.post.assert_not_called()
 
     def test_registers_public_key_when_not_registered(self, mock_config):
         """Should POST public key to server when not yet registered."""
-        from sleap_rtc.auth.keypair import generate_keypair, private_key_to_b64
+        from sleap_connect.auth.keypair import generate_keypair, private_key_to_b64
         priv, pub = generate_keypair()
         priv_b64 = private_key_to_b64(priv)
 
-        with patch("sleap_rtc.auth.credentials.get_private_key_b64", return_value=priv_b64):
-            with patch("sleap_rtc.auth.credentials.get_public_key_registered", return_value=False):
-                with patch("sleap_rtc.auth.credentials.set_public_key_registered") as mock_set:
-                    with patch("sleap_rtc.config.get_config", return_value=mock_config):
-                        with patch("sleap_rtc.api.requests") as mock_requests:
+        with patch("sleap_connect.auth.credentials.get_private_key_b64", return_value=priv_b64):
+            with patch("sleap_connect.auth.credentials.get_public_key_registered", return_value=False):
+                with patch("sleap_connect.auth.credentials.set_public_key_registered") as mock_set:
+                    with patch("sleap_connect.config.get_config", return_value=mock_config):
+                        with patch("sleap_connect.api.requests") as mock_requests:
                             mock_requests.post.return_value = MagicMock(ok=True)
                             _ensure_keypair_registered(auth_token="test-jwt")
                             mock_requests.post.assert_called_once()
@@ -265,45 +265,45 @@ class TestEnsureKeypairRegistered:
 
     def test_does_not_raise_on_registration_failure(self, mock_config):
         """Should log warning but not raise if server registration fails."""
-        from sleap_rtc.auth.keypair import generate_keypair, private_key_to_b64
+        from sleap_connect.auth.keypair import generate_keypair, private_key_to_b64
         priv, pub = generate_keypair()
         priv_b64 = private_key_to_b64(priv)
 
-        with patch("sleap_rtc.auth.credentials.get_private_key_b64", return_value=priv_b64):
-            with patch("sleap_rtc.auth.credentials.get_public_key_registered", return_value=False):
-                with patch("sleap_rtc.auth.credentials.set_public_key_registered") as mock_set:
-                    with patch("sleap_rtc.config.get_config", return_value=mock_config):
-                        with patch("sleap_rtc.api.requests") as mock_requests:
+        with patch("sleap_connect.auth.credentials.get_private_key_b64", return_value=priv_b64):
+            with patch("sleap_connect.auth.credentials.get_public_key_registered", return_value=False):
+                with patch("sleap_connect.auth.credentials.set_public_key_registered") as mock_set:
+                    with patch("sleap_connect.config.get_config", return_value=mock_config):
+                        with patch("sleap_connect.api.requests") as mock_requests:
                             mock_requests.post.side_effect = ConnectionError("Server down")
                             _ensure_keypair_registered(auth_token="test-jwt")
                             mock_set.assert_not_called()
 
     def test_does_not_mark_registered_on_http_error(self, mock_config):
         """Should not set flag if server returns non-OK status."""
-        from sleap_rtc.auth.keypair import generate_keypair, private_key_to_b64
+        from sleap_connect.auth.keypair import generate_keypair, private_key_to_b64
         priv, pub = generate_keypair()
         priv_b64 = private_key_to_b64(priv)
 
-        with patch("sleap_rtc.auth.credentials.get_private_key_b64", return_value=priv_b64):
-            with patch("sleap_rtc.auth.credentials.get_public_key_registered", return_value=False):
-                with patch("sleap_rtc.auth.credentials.set_public_key_registered") as mock_set:
-                    with patch("sleap_rtc.config.get_config", return_value=mock_config):
-                        with patch("sleap_rtc.api.requests") as mock_requests:
+        with patch("sleap_connect.auth.credentials.get_private_key_b64", return_value=priv_b64):
+            with patch("sleap_connect.auth.credentials.get_public_key_registered", return_value=False):
+                with patch("sleap_connect.auth.credentials.set_public_key_registered") as mock_set:
+                    with patch("sleap_connect.config.get_config", return_value=mock_config):
+                        with patch("sleap_connect.api.requests") as mock_requests:
                             mock_requests.post.return_value = MagicMock(ok=False, status_code=500)
                             _ensure_keypair_registered(auth_token="test-jwt")
                             mock_set.assert_not_called()
 
     def test_uses_custom_device_name(self, mock_config):
         """Should pass device_name to server request."""
-        from sleap_rtc.auth.keypair import generate_keypair, private_key_to_b64
+        from sleap_connect.auth.keypair import generate_keypair, private_key_to_b64
         priv, pub = generate_keypair()
         priv_b64 = private_key_to_b64(priv)
 
-        with patch("sleap_rtc.auth.credentials.get_private_key_b64", return_value=priv_b64):
-            with patch("sleap_rtc.auth.credentials.get_public_key_registered", return_value=False):
-                with patch("sleap_rtc.auth.credentials.set_public_key_registered"):
-                    with patch("sleap_rtc.config.get_config", return_value=mock_config):
-                        with patch("sleap_rtc.api.requests") as mock_requests:
+        with patch("sleap_connect.auth.credentials.get_private_key_b64", return_value=priv_b64):
+            with patch("sleap_connect.auth.credentials.get_public_key_registered", return_value=False):
+                with patch("sleap_connect.auth.credentials.set_public_key_registered"):
+                    with patch("sleap_connect.config.get_config", return_value=mock_config):
+                        with patch("sleap_connect.api.requests") as mock_requests:
                             mock_requests.post.return_value = MagicMock(ok=True)
                             _ensure_keypair_registered(auth_token="test-jwt", device_name="cli")
                             call_kwargs = mock_requests.post.call_args
@@ -320,7 +320,7 @@ class TestLogout:
 
     def test_logout_clears_jwt(self):
         """Should call clear_jwt."""
-        with patch("sleap_rtc.auth.credentials.clear_jwt") as mock_clear:
+        with patch("sleap_connect.auth.credentials.clear_jwt") as mock_clear:
             logout()
             mock_clear.assert_called_once()
 
@@ -355,8 +355,8 @@ class TestListRooms:
             ]
         }
 
-        with patch("sleap_rtc.auth.credentials.get_valid_jwt", return_value=mock_jwt):
-            with patch("sleap_rtc.config.get_config", return_value=mock_config):
+        with patch("sleap_connect.auth.credentials.get_valid_jwt", return_value=mock_jwt):
+            with patch("sleap_connect.config.get_config", return_value=mock_config):
                 with patch("requests.get", return_value=mock_response):
                     rooms = list_rooms()
                     assert len(rooms) == 2
@@ -368,7 +368,7 @@ class TestListRooms:
 
     def test_list_rooms_not_logged_in(self):
         """Should raise AuthenticationError when not logged in."""
-        with patch("sleap_rtc.auth.credentials.get_valid_jwt", return_value=None):
+        with patch("sleap_connect.auth.credentials.get_valid_jwt", return_value=None):
             with pytest.raises(AuthenticationError, match="Not logged in"):
                 list_rooms()
 
@@ -378,8 +378,8 @@ class TestListRooms:
         mock_response.status_code = 200
         mock_response.json.return_value = {"rooms": []}
 
-        with patch("sleap_rtc.auth.credentials.get_valid_jwt", return_value=mock_jwt):
-            with patch("sleap_rtc.config.get_config", return_value=mock_config):
+        with patch("sleap_connect.auth.credentials.get_valid_jwt", return_value=mock_jwt):
+            with patch("sleap_connect.config.get_config", return_value=mock_config):
                 with patch("requests.get", return_value=mock_response) as mock_get:
                     list_rooms(role="owner", sort_by="name", sort_order="desc", search="test")
                     call_kwargs = mock_get.call_args[1]
@@ -394,8 +394,8 @@ class TestListRooms:
         mock_response.status_code = 200
         mock_response.json.return_value = {"rooms": []}
 
-        with patch("sleap_rtc.auth.credentials.get_valid_jwt", return_value=mock_jwt):
-            with patch("sleap_rtc.config.get_config", return_value=mock_config):
+        with patch("sleap_connect.auth.credentials.get_valid_jwt", return_value=mock_jwt):
+            with patch("sleap_connect.config.get_config", return_value=mock_config):
                 with patch("requests.get", return_value=mock_response):
                     rooms = list_rooms()
                     assert rooms == []
@@ -411,7 +411,7 @@ class TestListWorkers:
 
     def test_list_workers_not_logged_in(self):
         """Should raise AuthenticationError when not logged in."""
-        with patch("sleap_rtc.auth.credentials.get_valid_jwt", return_value=None):
+        with patch("sleap_connect.auth.credentials.get_valid_jwt", return_value=None):
             with pytest.raises(AuthenticationError, match="Not logged in"):
                 list_workers("room-1")
 
@@ -425,12 +425,12 @@ class TestListWorkers:
                 status="available",
                 gpu_name="RTX 4090",
                 gpu_memory_mb=24576,
-                metadata={"tags": ["sleap-rtc"]},
+                metadata={"tags": ["sleap-connect"]},
             )
         ]
 
-        with patch("sleap_rtc.auth.credentials.get_valid_jwt", return_value=mock_jwt):
-            with patch("sleap_rtc.config.get_config", return_value=mock_config):
+        with patch("sleap_connect.auth.credentials.get_valid_jwt", return_value=mock_jwt):
+            with patch("sleap_connect.config.get_config", return_value=mock_config):
                 with patch("asyncio.run", return_value=mock_workers):
                     workers = list_workers("room-1")
                     assert len(workers) == 1
@@ -506,7 +506,7 @@ class TestDataClasses:
 # =============================================================================
 
 
-from sleap_rtc.api import (
+from sleap_connect.api import (
     PathCheckResult,
     VideoPathStatus,
     ValidationResult,
@@ -638,7 +638,7 @@ class TestCheckVideoPaths:
 
     def test_check_video_paths_not_logged_in(self):
         """Should raise AuthenticationError when not logged in."""
-        with patch("sleap_rtc.auth.credentials.get_valid_jwt", return_value=None):
+        with patch("sleap_connect.auth.credentials.get_valid_jwt", return_value=None):
             with pytest.raises(AuthenticationError, match="Not logged in"):
                 check_video_paths("/data/project.slp", "room-1")
 
@@ -788,7 +788,7 @@ class TestValidateConfig:
 # =============================================================================
 
 
-from sleap_rtc.api import (
+from sleap_connect.api import (
     ProgressEvent,
     TrainingResult,
     InferenceResult,
@@ -992,7 +992,7 @@ class TestRunTraining:
 
     def test_run_training_not_logged_in(self):
         """Should raise AuthenticationError when not logged in."""
-        with patch("sleap_rtc.auth.credentials.get_valid_jwt", return_value=None):
+        with patch("sleap_connect.auth.credentials.get_valid_jwt", return_value=None):
             with pytest.raises(AuthenticationError, match="Not logged in"):
                 run_training("/config.yaml", "room-1")
 
@@ -1059,7 +1059,7 @@ class TestRunInference:
 
     def test_run_inference_not_logged_in(self):
         """Should raise AuthenticationError when not logged in."""
-        with patch("sleap_rtc.auth.credentials.get_valid_jwt", return_value=None):
+        with patch("sleap_connect.auth.credentials.get_valid_jwt", return_value=None):
             with pytest.raises(AuthenticationError, match="Not logged in"):
                 run_inference("/data.slp", ["/model1"], "room-1")
 
@@ -1073,7 +1073,7 @@ class TestRunInference:
             predictions_path="/data/predictions.slp",
         )
 
-        with patch("sleap_rtc.api.run_inference_batch", return_value=[mock_result]):
+        with patch("sleap_connect.api.run_inference_batch", return_value=[mock_result]):
             result = run_inference("/data.slp", ["/model1"], "room-1")
             assert result.success is True
             assert result.predictions_path == "/data/predictions.slp"
@@ -1215,8 +1215,8 @@ def _capture_on_message(monkeypatch_jwt: str = "fake-jwt"):
 
     fake_data_channel, FakePC, FakeWSConnect = _make_inference_async_mocks()
 
-    from sleap_rtc import api as api_mod
-    from sleap_rtc.jobs.spec import TrackJobSpec
+    from sleap_connect import api as api_mod
+    from sleap_connect.jobs.spec import TrackJobSpec
 
     spec = TrackJobSpec(
         data_path="/data.slp",
@@ -1238,8 +1238,8 @@ def _capture_on_message(monkeypatch_jwt: str = "fake-jwt"):
     mock_cfg.signaling_websocket = "ws://fake"
 
     with (
-        patch("sleap_rtc.auth.credentials.get_valid_jwt", return_value=monkeypatch_jwt),
-        patch("sleap_rtc.config.get_config", return_value=mock_cfg),
+        patch("sleap_connect.auth.credentials.get_valid_jwt", return_value=monkeypatch_jwt),
+        patch("sleap_connect.config.get_config", return_value=mock_cfg),
         patch("websockets.connect", FakeWSConnect),
         patch("aiortc.RTCPeerConnection", FakePC),
     ):
@@ -1426,7 +1426,7 @@ class TestRunInferenceAsyncMessageHandling:
 
 
 class TestStreamedFileReceiver:
-    """Tests for the _StreamedFileReceiver state machine in sleap_rtc.api."""
+    """Tests for the _StreamedFileReceiver state machine in sleap_connect.api."""
 
     def test_predictions_file_written_and_local_path_exposed(self, tmp_path):
         """Given the ordered sequence
@@ -1439,7 +1439,7 @@ class TestStreamedFileReceiver:
          - write the concatenated chunk bytes to it
          - expose the local path via `take_predictions_path()`
         """
-        from sleap_rtc.api import _StreamedFileReceiver
+        from sleap_connect.api import _StreamedFileReceiver
 
         receiver = _StreamedFileReceiver()
         chunk1 = b"the rain in spain"
@@ -1468,7 +1468,7 @@ class TestStreamedFileReceiver:
         receiver must still drain the bytes but must not retain the path as
         'predictions'. The temp file should be unlinked on END_OF_FILE to
         avoid leaking."""
-        from sleap_rtc.api import _StreamedFileReceiver
+        from sleap_connect.api import _StreamedFileReceiver
 
         receiver = _StreamedFileReceiver()
         receiver.handle_string("FILE_META::other.txt:4:/tmp")
@@ -1484,7 +1484,7 @@ class TestStreamedFileReceiver:
         ``resolved_20260427_labels.v003.predictions.slp`` — NOT the bare
         ``predictions.slp``. The receiver must accept any filename ending
         in ``predictions.slp`` and retain its path for the caller."""
-        from sleap_rtc.api import _StreamedFileReceiver
+        from sleap_connect.api import _StreamedFileReceiver
 
         receiver = _StreamedFileReceiver()
         prefixed = "resolved_20260427_labels.v003.predictions.slp"
@@ -1507,7 +1507,7 @@ class TestStreamedFileReceiver:
     def test_unexpected_binary_without_file_meta_is_dropped(self):
         """Binary chunks with no active FILE_META must be silently dropped
         (backward-compatible with the pre-Task-2 behavior)."""
-        from sleap_rtc.api import _StreamedFileReceiver
+        from sleap_connect.api import _StreamedFileReceiver
 
         receiver = _StreamedFileReceiver()
         # Must not raise
@@ -1516,7 +1516,7 @@ class TestStreamedFileReceiver:
 
     def test_end_of_file_without_file_meta_is_ignored(self):
         """A stray END_OF_FILE with no active FILE_META must not crash."""
-        from sleap_rtc.api import _StreamedFileReceiver
+        from sleap_connect.api import _StreamedFileReceiver
 
         receiver = _StreamedFileReceiver()
         # Must not raise
@@ -1536,7 +1536,7 @@ class TestStreamedFileReceiver:
         A subsequent well-formed transfer must still work and the error
         flag must have been consumed by the `take_transfer_error()` call.
         """
-        from sleap_rtc.api import _StreamedFileReceiver
+        from sleap_connect.api import _StreamedFileReceiver
 
         receiver = _StreamedFileReceiver()
         # Malformed — only filename, no size subfield.
@@ -1576,7 +1576,7 @@ class TestStreamedFileReceiver:
         substitute `data['predictions_path']` with a local path in that
         case — the worker-side path is kept as the fallback.
         """
-        from sleap_rtc.api import (
+        from sleap_connect.api import (
             _StreamedFileReceiver,
             _apply_received_predictions,
         )
@@ -1584,7 +1584,7 @@ class TestStreamedFileReceiver:
         receiver = _StreamedFileReceiver()
 
         with patch(
-            "sleap_rtc.api.tempfile.NamedTemporaryFile",
+            "sleap_connect.api.tempfile.NamedTemporaryFile",
             side_effect=OSError("disk full"),
         ):
             receiver.handle_string("FILE_META::predictions.slp:5:/worker/out")
@@ -1603,7 +1603,7 @@ class TestStreamedFileReceiver:
         # worker-side path alone when the stream failed to open.
         receiver2 = _StreamedFileReceiver()
         with patch(
-            "sleap_rtc.api.tempfile.NamedTemporaryFile",
+            "sleap_connect.api.tempfile.NamedTemporaryFile",
             side_effect=OSError("disk full"),
         ):
             receiver2.handle_string("FILE_META::predictions.slp:5:/worker/out")
@@ -1622,7 +1622,7 @@ class TestStreamedFileReceiver:
          - expose a non-empty `take_transfer_error()` string
          - attempt to unlink the partial tempfile
         """
-        from sleap_rtc.api import _StreamedFileReceiver
+        from sleap_connect.api import _StreamedFileReceiver
 
         receiver = _StreamedFileReceiver()
         receiver.handle_string("FILE_META::predictions.slp:5:/worker/out")
@@ -1660,7 +1660,7 @@ class TestStreamedFileReceiver:
         Mirrors the existing close()-failure handling at the END_OF_FILE branch."""
         import os
         from unittest.mock import MagicMock
-        from sleap_rtc.api import _StreamedFileReceiver
+        from sleap_connect.api import _StreamedFileReceiver
 
         receiver = _StreamedFileReceiver()
 
@@ -1713,7 +1713,7 @@ class TestInferenceCompletePathRewrite:
                predictions_path == local temp path and
                worker_predictions_path == original worker path.
         """
-        from sleap_rtc.api import (
+        from sleap_connect.api import (
             _StreamedFileReceiver,
             _apply_received_predictions,
         )
@@ -1742,7 +1742,7 @@ class TestInferenceCompletePathRewrite:
         """If no predictions stream arrived (pre-Task-1 worker, or training
         only with no inference), the INFERENCE_COMPLETE payload passes
         through unchanged."""
-        from sleap_rtc.api import (
+        from sleap_connect.api import (
             _StreamedFileReceiver,
             _apply_received_predictions,
         )
@@ -1776,7 +1776,7 @@ class TestMsgJobCompletePathRewrite:
         4. data["output_path"] becomes the local tempfile, the worker path
            is preserved, and unrelated fields like duration_seconds pass through.
         """
-        from sleap_rtc.api import (
+        from sleap_connect.api import (
             _StreamedFileReceiver,
             _apply_received_predictions,
         )
@@ -1811,7 +1811,7 @@ class TestMsgJobCompletePathRewrite:
         not stream output for a non-track job), the MSG_JOB_COMPLETE payload
         passes through unchanged.
         """
-        from sleap_rtc.api import (
+        from sleap_connect.api import (
             _StreamedFileReceiver,
             _apply_received_predictions,
         )
@@ -1829,7 +1829,7 @@ class TestMsgJobCompletePathRewrite:
         with the 'output_path' field name.
         """
         import inspect
-        from sleap_rtc.api import _run_single_spec_async
+        from sleap_connect.api import _run_single_spec_async
 
         src = inspect.getsource(_run_single_spec_async)
         assert "_apply_received_predictions(" in src, (
@@ -1849,7 +1849,7 @@ class TestApplyReceivedPredictionsGeneralized:
     """
 
     def test_substitutes_output_path_when_field_name_is_output_path(self, tmp_path):
-        from sleap_rtc.api import _StreamedFileReceiver, _apply_received_predictions
+        from sleap_connect.api import _StreamedFileReceiver, _apply_received_predictions
 
         receiver = _StreamedFileReceiver()
         receiver.handle_string("FILE_META::predictions.slp:5:/worker/out")
@@ -1866,7 +1866,7 @@ class TestApplyReceivedPredictionsGeneralized:
     def test_substitutes_predictions_path_with_explicit_field_name(self, tmp_path):
         """Regression: existing INFERENCE_COMPLETE call site (with 'predictions_path')
         still works after the rename."""
-        from sleap_rtc.api import _StreamedFileReceiver, _apply_received_predictions
+        from sleap_connect.api import _StreamedFileReceiver, _apply_received_predictions
 
         receiver = _StreamedFileReceiver()
         receiver.handle_string("FILE_META::predictions.slp:5:/worker/out")
@@ -1882,7 +1882,7 @@ class TestApplyReceivedPredictionsGeneralized:
     def test_no_substitution_when_no_predictions_received(self, tmp_path):
         """If receiver has no captured local path, the data field is left unchanged
         regardless of which field_name is requested."""
-        from sleap_rtc.api import _StreamedFileReceiver, _apply_received_predictions
+        from sleap_connect.api import _StreamedFileReceiver, _apply_received_predictions
 
         receiver = _StreamedFileReceiver()  # nothing was streamed
 
@@ -1910,7 +1910,7 @@ class TestTempPredictionAtexitCleanup:
         The tracking set is process-global; without isolation, tests can
         pollute each other's state.
         """
-        from sleap_rtc import api as api_mod
+        from sleap_connect import api as api_mod
 
         snapshot = set(api_mod._temp_prediction_paths)
         api_mod._temp_prediction_paths.clear()
@@ -1922,8 +1922,8 @@ class TestTempPredictionAtexitCleanup:
 
     def test_track_registers_path_for_cleanup(self, tmp_path):
         """Paths passed to track_temp_prediction are added to the tracking set."""
-        from sleap_rtc import api as api_mod
-        from sleap_rtc.api import track_temp_prediction, untrack_temp_prediction
+        from sleap_connect import api as api_mod
+        from sleap_connect.api import track_temp_prediction, untrack_temp_prediction
 
         target = tmp_path / "some_predictions.slp"
         target.write_bytes(b"dummy")
@@ -1938,8 +1938,8 @@ class TestTempPredictionAtexitCleanup:
 
     def test_untrack_is_idempotent(self):
         """untrack_temp_prediction on an untracked path is a no-op."""
-        from sleap_rtc import api as api_mod
-        from sleap_rtc.api import untrack_temp_prediction
+        from sleap_connect import api as api_mod
+        from sleap_connect.api import untrack_temp_prediction
 
         # Never tracked — must not raise.
         untrack_temp_prediction("/nonexistent/never_tracked.slp")
@@ -1950,8 +1950,8 @@ class TestTempPredictionAtexitCleanup:
 
     def test_cleanup_deletes_tracked_files_and_clears_set(self, tmp_path):
         """_cleanup_temp_prediction_files removes files from disk and empties the set."""
-        from sleap_rtc import api as api_mod
-        from sleap_rtc.api import (
+        from sleap_connect import api as api_mod
+        from sleap_connect.api import (
             _cleanup_temp_prediction_files,
             track_temp_prediction,
         )
@@ -1975,8 +1975,8 @@ class TestTempPredictionAtexitCleanup:
 
     def test_cleanup_silently_ignores_missing_files(self, tmp_path):
         """If a tracked file was already deleted (by the caller), cleanup doesn't raise."""
-        from sleap_rtc import api as api_mod
-        from sleap_rtc.api import (
+        from sleap_connect import api as api_mod
+        from sleap_connect.api import (
             _cleanup_temp_prediction_files,
             track_temp_prediction,
         )
@@ -1998,8 +1998,8 @@ class TestTempPredictionAtexitCleanup:
     def test_cleanup_tolerates_os_error_on_unlink(self, tmp_path):
         """If os.unlink raises OSError during cleanup, we swallow it and still
         clear the set (best-effort at exit time)."""
-        from sleap_rtc import api as api_mod
-        from sleap_rtc.api import (
+        from sleap_connect import api as api_mod
+        from sleap_connect.api import (
             _cleanup_temp_prediction_files,
             track_temp_prediction,
         )
@@ -2010,7 +2010,7 @@ class TestTempPredictionAtexitCleanup:
         track_temp_prediction(path_str)
 
         with patch(
-            "sleap_rtc.api.os.unlink", side_effect=OSError("permission denied")
+            "sleap_connect.api.os.unlink", side_effect=OSError("permission denied")
         ):
             # Must not raise.
             _cleanup_temp_prediction_files()
@@ -2019,8 +2019,8 @@ class TestTempPredictionAtexitCleanup:
 
     def test_receiver_tracks_successful_predictions_path(self, tmp_path):
         """_StreamedFileReceiver.handle_string tracks the path on successful END_OF_FILE."""
-        from sleap_rtc import api as api_mod
-        from sleap_rtc.api import _StreamedFileReceiver
+        from sleap_connect import api as api_mod
+        from sleap_connect.api import _StreamedFileReceiver
 
         receiver = _StreamedFileReceiver()
         receiver.handle_string("FILE_META::predictions.slp:5:/worker/out")
@@ -2045,8 +2045,8 @@ class TestTempPredictionAtexitCleanup:
     def test_receiver_does_not_track_non_predictions_filename(self, tmp_path):
         """Files streamed under a non-predictions.slp filename are unlinked
         immediately on END_OF_FILE and must NOT be added to the tracking set."""
-        from sleap_rtc import api as api_mod
-        from sleap_rtc.api import _StreamedFileReceiver
+        from sleap_connect import api as api_mod
+        from sleap_connect.api import _StreamedFileReceiver
 
         before = set(api_mod._temp_prediction_paths)
         receiver = _StreamedFileReceiver()
@@ -2058,8 +2058,8 @@ class TestTempPredictionAtexitCleanup:
 
     def test_receiver_does_not_track_malformed_file_meta(self):
         """Malformed FILE_META (no size) must not register anything."""
-        from sleap_rtc import api as api_mod
-        from sleap_rtc.api import _StreamedFileReceiver
+        from sleap_connect import api as api_mod
+        from sleap_connect.api import _StreamedFileReceiver
 
         before = set(api_mod._temp_prediction_paths)
         receiver = _StreamedFileReceiver()
@@ -2072,8 +2072,8 @@ class TestTempPredictionAtexitCleanup:
     def test_receiver_does_not_track_close_failure(self):
         """If close() raises OSError on END_OF_FILE, the partial file is
         unlinked in the failure path and must NOT be added to tracking."""
-        from sleap_rtc import api as api_mod
-        from sleap_rtc.api import _StreamedFileReceiver
+        from sleap_connect import api as api_mod
+        from sleap_connect.api import _StreamedFileReceiver
 
         before = set(api_mod._temp_prediction_paths)
         receiver = _StreamedFileReceiver()
@@ -2096,13 +2096,13 @@ class TestTempPredictionAtexitCleanup:
     def test_receiver_does_not_track_tempfile_open_failure(self):
         """If tempfile.NamedTemporaryFile raises, no path is created and
         nothing is added to the tracking set."""
-        from sleap_rtc import api as api_mod
-        from sleap_rtc.api import _StreamedFileReceiver
+        from sleap_connect import api as api_mod
+        from sleap_connect.api import _StreamedFileReceiver
 
         before = set(api_mod._temp_prediction_paths)
         receiver = _StreamedFileReceiver()
         with patch(
-            "sleap_rtc.api.tempfile.NamedTemporaryFile",
+            "sleap_connect.api.tempfile.NamedTemporaryFile",
             side_effect=OSError("disk full"),
         ):
             receiver.handle_string("FILE_META::predictions.slp:5:/worker/out")
@@ -2122,7 +2122,7 @@ class TestRunInferenceAsyncSignature:
 
     def test_run_inference_batch_async_has_on_channel_ready(self):
         import inspect
-        from sleap_rtc.api import _run_inference_batch_async
+        from sleap_connect.api import _run_inference_batch_async
 
         sig = inspect.signature(_run_inference_batch_async)
         assert "on_channel_ready" in sig.parameters
@@ -2130,7 +2130,7 @@ class TestRunInferenceAsyncSignature:
 
     def test_run_inference_batch_async_has_on_log(self):
         import inspect
-        from sleap_rtc.api import _run_inference_batch_async
+        from sleap_connect.api import _run_inference_batch_async
 
         sig = inspect.signature(_run_inference_batch_async)
         assert "on_log" in sig.parameters
@@ -2138,7 +2138,7 @@ class TestRunInferenceAsyncSignature:
 
     def test_run_inference_batch_async_has_on_job_message(self):
         import inspect
-        from sleap_rtc.api import _run_inference_batch_async
+        from sleap_connect.api import _run_inference_batch_async
 
         sig = inspect.signature(_run_inference_batch_async)
         assert "on_job_message" in sig.parameters
@@ -2146,7 +2146,7 @@ class TestRunInferenceAsyncSignature:
 
     def test_run_inference_wrapper_plumbs_through(self):
         import inspect
-        from sleap_rtc.api import run_inference
+        from sleap_connect.api import run_inference
 
         sig = inspect.signature(run_inference)
         for name in ("on_channel_ready", "on_log", "on_job_message"):
@@ -2155,7 +2155,7 @@ class TestRunInferenceAsyncSignature:
 
     def test_run_inference_wrapper_has_frame_filter_and_video_index(self):
         import inspect
-        from sleap_rtc.api import run_inference
+        from sleap_connect.api import run_inference
 
         sig = inspect.signature(run_inference)
         for name in ("frame_filter", "video_index"):
@@ -2165,7 +2165,7 @@ class TestRunInferenceAsyncSignature:
 
 class TestProtocolConstants:
     def test_msg_job_log_exists(self):
-        from sleap_rtc.protocol import MSG_JOB_LOG
+        from sleap_connect.protocol import MSG_JOB_LOG
 
         assert MSG_JOB_LOG == "JOB_LOG"
 
@@ -2176,7 +2176,7 @@ class TestRunInferenceAsyncJobMessageForwarding:
     """
 
     def test_msg_job_progress_forwarded_to_on_job_message(self):
-        from sleap_rtc.api import _dispatch_inference_response
+        from sleap_connect.api import _dispatch_inference_response
 
         events: list[tuple[str, dict]] = []
 
@@ -2192,7 +2192,7 @@ class TestRunInferenceAsyncJobMessageForwarding:
         assert events == [("JOB_PROGRESS", {"frames": 17, "total": 35})]
 
     def test_msg_job_log_forwarded_to_both_callbacks(self):
-        from sleap_rtc.api import _dispatch_inference_response
+        from sleap_connect.api import _dispatch_inference_response
 
         logs: list[str] = []
         events: list[tuple[str, dict]] = []
@@ -2247,8 +2247,8 @@ class TestListWorkersNameResolution:
         mock_config.signaling_websocket = "wss://fake"
 
         with (
-            patch("sleap_rtc.auth.credentials.get_valid_jwt", return_value="fake-jwt"),
-            patch("sleap_rtc.config.get_config", return_value=mock_config),
+            patch("sleap_connect.auth.credentials.get_valid_jwt", return_value="fake-jwt"),
+            patch("sleap_connect.config.get_config", return_value=mock_config),
             patch("websockets.connect", return_value=mock_conn),
         ):
             workers = list_workers("test-room")
@@ -2285,8 +2285,8 @@ class TestListWorkersNameResolution:
         mock_config.signaling_websocket = "wss://fake"
 
         with (
-            patch("sleap_rtc.auth.credentials.get_valid_jwt", return_value="fake-jwt"),
-            patch("sleap_rtc.config.get_config", return_value=mock_config),
+            patch("sleap_connect.auth.credentials.get_valid_jwt", return_value="fake-jwt"),
+            patch("sleap_connect.config.get_config", return_value=mock_config),
             patch("websockets.connect", return_value=mock_conn),
         ):
             workers = list_workers("test-room")
@@ -2304,13 +2304,13 @@ class TestRunSingleSpecAsync:
     """Verify the extracted _run_single_spec_async helper exists with expected signature."""
 
     def test_helper_exists_and_is_callable(self):
-        from sleap_rtc.api import _run_single_spec_async
+        from sleap_connect.api import _run_single_spec_async
         import inspect
         assert inspect.iscoroutinefunction(_run_single_spec_async)
 
     def test_helper_accepts_required_params(self):
         import inspect
-        from sleap_rtc.api import _run_single_spec_async
+        from sleap_connect.api import _run_single_spec_async
         sig = inspect.signature(_run_single_spec_async)
         param_names = set(sig.parameters.keys())
         required = {
@@ -2329,47 +2329,47 @@ class TestRunInferenceBatchSignature:
     """Verify run_inference_batch exists with the expected signature."""
 
     def test_batch_is_importable(self):
-        from sleap_rtc.api import run_inference_batch
+        from sleap_connect.api import run_inference_batch
         assert callable(run_inference_batch)
 
     def test_batch_in_all_exports(self):
-        from sleap_rtc import api
+        from sleap_connect import api
         assert "run_inference_batch" in api.__all__
 
     def test_batch_accepts_specs_list(self):
         import inspect
-        from sleap_rtc.api import run_inference_batch
+        from sleap_connect.api import run_inference_batch
         sig = inspect.signature(run_inference_batch)
         assert "specs" in sig.parameters
 
     def test_batch_accepts_on_spec_complete(self):
         import inspect
-        from sleap_rtc.api import run_inference_batch
+        from sleap_connect.api import run_inference_batch
         sig = inspect.signature(run_inference_batch)
         assert "on_spec_complete" in sig.parameters
 
     def test_batch_accepts_on_job_message(self):
         import inspect
-        from sleap_rtc.api import run_inference_batch
+        from sleap_connect.api import run_inference_batch
         sig = inspect.signature(run_inference_batch)
         assert "on_job_message" in sig.parameters
 
     def test_batch_accepts_on_log(self):
         import inspect
-        from sleap_rtc.api import run_inference_batch
+        from sleap_connect.api import run_inference_batch
         sig = inspect.signature(run_inference_batch)
         assert "on_log" in sig.parameters
 
     def test_batch_accepts_room_id_and_worker_id(self):
         import inspect
-        from sleap_rtc.api import run_inference_batch
+        from sleap_connect.api import run_inference_batch
         sig = inspect.signature(run_inference_batch)
         assert "room_id" in sig.parameters
         assert "worker_id" in sig.parameters
 
     def test_batch_accepts_on_channel_ready(self):
         import inspect
-        from sleap_rtc.api import run_inference_batch
+        from sleap_connect.api import run_inference_batch
         sig = inspect.signature(run_inference_batch)
         assert "on_channel_ready" in sig.parameters
 
@@ -2379,7 +2379,7 @@ class TestEnrichedJobMessageWrapper:
 
     def test_job_log_enriched_with_index(self):
         """Wrapper injects job_index and jobs_total before forwarding."""
-        from sleap_rtc.api import _enriched_job_message_wrapper
+        from sleap_connect.api import _enriched_job_message_wrapper
         captured = []
         def on_msg(msg_type, data):
             captured.append((msg_type, data.copy()))
@@ -2395,7 +2395,7 @@ class TestEnrichedJobMessageWrapper:
 
     def test_enrichment_with_none_callback_does_not_crash(self):
         """When on_job_message is None, wrapper still enriches (no-op forward)."""
-        from sleap_rtc.api import _enriched_job_message_wrapper
+        from sleap_connect.api import _enriched_job_message_wrapper
         wrapper = _enriched_job_message_wrapper(None, job_index=0, jobs_total=1)
         # Should not raise
         data = {"text": "test"}
@@ -2406,7 +2406,7 @@ class TestEnrichedJobMessageWrapper:
 
     def test_enrichment_preserves_existing_payload_fields(self):
         """Existing fields in the data dict are not lost."""
-        from sleap_rtc.api import _enriched_job_message_wrapper
+        from sleap_connect.api import _enriched_job_message_wrapper
         captured = []
         wrapper = _enriched_job_message_wrapper(
             lambda t, d: captured.append(d.copy()), job_index=2, jobs_total=5,
@@ -2419,7 +2419,7 @@ class TestEnrichedJobMessageWrapper:
 
     def test_different_indices_produce_different_wrappers(self):
         """Each wrapper instance captures its own job_index."""
-        from sleap_rtc.api import _enriched_job_message_wrapper
+        from sleap_connect.api import _enriched_job_message_wrapper
         results = []
         cb = lambda t, d: results.append(d.copy())
         w0 = _enriched_job_message_wrapper(cb, job_index=0, jobs_total=3)
@@ -2433,7 +2433,7 @@ class TestEnrichedJobMessageWrapper:
 
     def test_enrichment_works_for_job_complete(self):
         """JOB_COMPLETE payloads are also enriched."""
-        from sleap_rtc.api import _enriched_job_message_wrapper
+        from sleap_connect.api import _enriched_job_message_wrapper
         captured = []
         wrapper = _enriched_job_message_wrapper(
             lambda t, d: captured.append((t, d.copy())), job_index=0, jobs_total=1,
@@ -2445,7 +2445,7 @@ class TestEnrichedJobMessageWrapper:
 
     def test_enrichment_works_for_job_failed(self):
         """JOB_FAILED payloads are also enriched."""
-        from sleap_rtc.api import _enriched_job_message_wrapper
+        from sleap_connect.api import _enriched_job_message_wrapper
         captured = []
         wrapper = _enriched_job_message_wrapper(
             lambda t, d: captured.append((t, d.copy())), job_index=1, jobs_total=2,
@@ -2462,7 +2462,7 @@ class TestRunInferenceDelegatesToBatch:
     def test_run_inference_signature_unchanged(self):
         """run_inference still accepts all its original parameters."""
         import inspect
-        from sleap_rtc.api import run_inference
+        from sleap_connect.api import run_inference
         sig = inspect.signature(run_inference)
         expected = {
             "data_path", "model_paths", "room_id", "worker_id",
@@ -2477,7 +2477,7 @@ class TestRunInferenceDelegatesToBatch:
     def test_run_inference_return_type_is_single_result(self):
         """Return annotation should be InferenceResult, not a list."""
         import inspect
-        from sleap_rtc.api import run_inference
+        from sleap_connect.api import run_inference
         sig = inspect.signature(run_inference)
         annotation = str(sig.return_annotation)
         assert "list" not in annotation.lower()
