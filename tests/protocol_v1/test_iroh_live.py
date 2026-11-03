@@ -15,10 +15,10 @@ import iroh
 import pytest
 from click.testing import CliRunner
 
-from sleap_rtc.protocol_v1 import iroh_live
-from sleap_rtc.protocol_v1.cli import pair
-from sleap_rtc.protocol_v1.envelope import Hello, parse_envelope
-from sleap_rtc.protocol_v1.iroh_live import (
+from sleap_connect.protocol_v1 import iroh_live
+from sleap_connect.protocol_v1.cli import pair
+from sleap_connect.protocol_v1.envelope import Hello, parse_envelope
+from sleap_connect.protocol_v1.iroh_live import (
     build_iroh_section,
     iroh_live_path,
     keep_iroh_live_updated,
@@ -26,9 +26,9 @@ from sleap_rtc.protocol_v1.iroh_live import (
     remove_iroh_live,
     write_iroh_live,
 )
-from sleap_rtc.protocol_v1.iroh_transport import ALPN, IrohStreamTransport
-from sleap_rtc.protocol_v1.pair_code import decode_pair_code
-from sleap_rtc.protocol_v1.runner import start_worker_server
+from sleap_connect.protocol_v1.iroh_transport import ALPN, IrohStreamTransport
+from sleap_connect.protocol_v1.pair_code import decode_pair_code
+from sleap_connect.protocol_v1.runner import start_worker_server
 
 NODE = "node-abc"
 
@@ -201,7 +201,7 @@ class TestServeToPairBridge:
 
         # Rebuild a dialable address from the ticket alone: the iroh
         # endpoint id is the identity's raw public key.
-        from sleap_rtc.auth.keypair import public_key_from_b64
+        from sleap_connect.auth.keypair import public_key_from_b64
 
         raw = public_key_from_b64(section["node_id"]).public_bytes_raw()
         addr = iroh.EndpointAddr(

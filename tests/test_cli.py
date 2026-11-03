@@ -12,7 +12,7 @@ from unittest import mock
 import pytest
 from click.testing import CliRunner
 
-from sleap_rtc.cli import cli
+from sleap_connect.cli import cli
 
 
 @pytest.fixture
@@ -24,12 +24,12 @@ def runner():
 @pytest.fixture
 def temp_credentials(tmp_path):
     """Create temporary credentials file for testing."""
-    creds_dir = tmp_path / ".sleap-rtc"
+    creds_dir = tmp_path / ".sleap-connect"
     creds_dir.mkdir()
     creds_path = creds_dir / "credentials.json"
 
     # Import credentials module to patch
-    from sleap_rtc.auth import credentials
+    from sleap_connect.auth import credentials
 
     with mock.patch.object(credentials, "CREDENTIALS_DIR", creds_dir):
         with mock.patch.object(credentials, "CREDENTIALS_PATH", creds_path):
@@ -37,7 +37,7 @@ def temp_credentials(tmp_path):
 
 
 class TestDoctorCommand:
-    """Tests for 'sleap-rtc doctor' command."""
+    """Tests for 'sleap-connect doctor' command."""
 
     def test_doctor_runs(self, runner):
         """Should run doctor checks without crashing."""
@@ -54,7 +54,7 @@ class TestDoctorCommand:
 
 
 class TestTuiCommand:
-    """Tests for 'sleap-rtc tui' command."""
+    """Tests for 'sleap-connect tui' command."""
 
     def test_tui_help(self, runner):
         """Should show help text for TUI command."""
@@ -104,7 +104,7 @@ class TestCommandAliases:
 
 
 class TestTrainCommand:
-    """Tests for 'sleap-rtc train' command."""
+    """Tests for 'sleap-connect train' command."""
 
     def test_train_help(self, runner):
         """Should show help text for train command."""
@@ -129,7 +129,7 @@ class TestTrainCommand:
 
 
 class TestTrackCommand:
-    """Tests for 'sleap-rtc track' command."""
+    """Tests for 'sleap-connect track' command."""
 
     def test_track_help(self, runner):
         """Should show help text for track command."""
@@ -155,7 +155,7 @@ class TestTrackCommand:
 
 
 class TestTestSubcommand:
-    """Tests for 'sleap-rtc test' subcommand group."""
+    """Tests for 'sleap-connect test' subcommand group."""
 
     def test_test_group_help(self, runner):
         """Should show help for test command group."""
@@ -277,7 +277,7 @@ class TestVerbosityFlags:
 
 
 class TestCredentialsCommand:
-    """Tests for 'sleap-rtc credentials' command group."""
+    """Tests for 'sleap-connect credentials' command group."""
 
     def test_credentials_help(self, runner):
         """Should show help for credentials command group."""
@@ -365,7 +365,7 @@ class TestCredentialsCommand:
 
 
 class TestConfigCommand:
-    """Tests for 'sleap-rtc config' command group."""
+    """Tests for 'sleap-connect config' command group."""
 
     def test_config_help(self, runner):
         """Should show help for config command group."""

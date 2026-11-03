@@ -12,20 +12,20 @@ import aiohttp  # ensure aiohttp is in sys.modules before patching
 
 import pytest
 
-from sleap_rtc.auth.keypair import (
+from sleap_connect.auth.keypair import (
     generate_keypair,
     private_key_to_b64,
     public_key_to_b64,
     verify_signature,
     public_key_from_b64,
 )
-from sleap_rtc.auth.psk import compute_hmac, generate_nonce
-from sleap_rtc.protocol import (
+from sleap_connect.auth.psk import compute_hmac, generate_nonce
+from sleap_connect.protocol import (
     MSG_AUTH_CHALLENGE,
     MSG_AUTH_RESPONSE,
     MSG_SEPARATOR,
 )
-from sleap_rtc.worker.worker_class import RTCWorkerClient
+from sleap_connect.worker.worker_class import RTCWorkerClient
 
 
 # =============================================================================
@@ -39,7 +39,7 @@ def _mock_progress_reporter():
     mock_reporter = MagicMock()
     mock_reporter.async_cleanup = AsyncMock()
     with patch(
-        "sleap_rtc.worker.worker_class.ProgressReporter", return_value=mock_reporter
+        "sleap_connect.worker.worker_class.ProgressReporter", return_value=mock_reporter
     ):
         yield
 
@@ -285,14 +285,14 @@ class TestClientAuthChallenge:
         return f"{MSG_AUTH_CHALLENGE}{MSG_SEPARATOR}{nonce}"
 
     def test_ed25519_path_sends_valid_signature(self, monkeypatch):
-        from sleap_rtc.client.client_class import RTCClient
+        from sleap_connect.client.client_class import RTCClient
 
         private_key, public_key = generate_keypair()
         priv_b64 = private_key_to_b64(private_key)
         pub_b64 = public_key_to_b64(public_key)
 
         monkeypatch.setattr(
-            "sleap_rtc.auth.credentials.get_private_key_b64", lambda: priv_b64
+            "sleap_connect.auth.credentials.get_private_key_b64", lambda: priv_b64
         )
 
         channel = _make_open_channel()
@@ -309,11 +309,11 @@ class TestClientAuthChallenge:
         assert verify_signature(public_key_from_b64(pub_b64), nonce, signature)
 
     def test_psk_fallback_when_no_private_key(self, monkeypatch):
-        from sleap_rtc.client.client_class import RTCClient
+        from sleap_connect.client.client_class import RTCClient
 
         room_secret = "dGVzdHNlY3JldA=="
         monkeypatch.setattr(
-            "sleap_rtc.auth.credentials.get_private_key_b64", lambda: None
+            "sleap_connect.auth.credentials.get_private_key_b64", lambda: None
         )
 
         channel = _make_open_channel()
@@ -331,10 +331,10 @@ class TestClientAuthChallenge:
         assert sent == expected
 
     def test_missing_sent_when_no_credentials(self, monkeypatch):
-        from sleap_rtc.client.client_class import RTCClient
+        from sleap_connect.client.client_class import RTCClient
 
         monkeypatch.setattr(
-            "sleap_rtc.auth.credentials.get_private_key_b64", lambda: None
+            "sleap_connect.auth.credentials.get_private_key_b64", lambda: None
         )
 
         channel = _make_open_channel()
@@ -350,12 +350,12 @@ class TestClientAuthChallenge:
 
     def test_ed25519_takes_priority_over_psk(self, monkeypatch):
         """Ed25519 is used even when room_secret is also configured."""
-        from sleap_rtc.client.client_class import RTCClient
+        from sleap_connect.client.client_class import RTCClient
 
         private_key, _ = generate_keypair()
         priv_b64 = private_key_to_b64(private_key)
         monkeypatch.setattr(
-            "sleap_rtc.auth.credentials.get_private_key_b64", lambda: priv_b64
+            "sleap_connect.auth.credentials.get_private_key_b64", lambda: priv_b64
         )
 
         channel = _make_open_channel()
@@ -376,14 +376,14 @@ class TestClientTrackAuthChallenge:
     """Phase 7: Same logic verified for RTCTrackClient."""
 
     def test_ed25519_path(self, monkeypatch):
-        from sleap_rtc.client.client_track_class import RTCTrackClient
+        from sleap_connect.client.client_track_class import RTCTrackClient
 
         private_key, public_key = generate_keypair()
         priv_b64 = private_key_to_b64(private_key)
         pub_b64 = public_key_to_b64(public_key)
 
         monkeypatch.setattr(
-            "sleap_rtc.auth.credentials.get_private_key_b64", lambda: priv_b64
+            "sleap_connect.auth.credentials.get_private_key_b64", lambda: priv_b64
         )
 
         channel = _make_open_channel()
@@ -399,10 +399,10 @@ class TestClientTrackAuthChallenge:
         assert verify_signature(public_key_from_b64(pub_b64), nonce, signature)
 
     def test_missing_when_no_credentials(self, monkeypatch):
-        from sleap_rtc.client.client_track_class import RTCTrackClient
+        from sleap_connect.client.client_track_class import RTCTrackClient
 
         monkeypatch.setattr(
-            "sleap_rtc.auth.credentials.get_private_key_b64", lambda: None
+            "sleap_connect.auth.credentials.get_private_key_b64", lambda: None
         )
 
         channel = _make_open_channel()

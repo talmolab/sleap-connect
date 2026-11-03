@@ -14,7 +14,7 @@ import time
 import pytest
 import zmq
 
-from sleap_rtc.protocol_v1.metrics import JobMetricsConsumer, downsample_m4
+from sleap_connect.protocol_v1.metrics import JobMetricsConsumer, downsample_m4
 
 # Distinct from the real DEFAULT_ZMQ_PORTS (9000/9001) to avoid colliding
 # with anything else that might be using those during a test run.

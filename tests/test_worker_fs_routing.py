@@ -3,8 +3,8 @@
 import json
 import pytest
 
-from sleap_rtc.config import MountConfig
-from sleap_rtc.protocol import (
+from sleap_connect.config import MountConfig
+from sleap_connect.protocol import (
     MSG_FS_GET_INFO,
     MSG_FS_INFO_RESPONSE,
     MSG_FS_GET_MOUNTS,
@@ -19,7 +19,7 @@ from sleap_rtc.protocol import (
     FS_ERROR_INVALID_REQUEST,
     FS_ERROR_PATTERN_TOO_BROAD,
 )
-from sleap_rtc.worker.worker_class import RTCWorkerClient
+from sleap_connect.worker.worker_class import RTCWorkerClient
 
 
 @pytest.fixture

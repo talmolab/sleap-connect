@@ -17,7 +17,7 @@ from unittest.mock import AsyncMock, MagicMock, patch, call
 
 import pytest
 
-from sleap_rtc.worker.job_executor import JobExecutor
+from sleap_connect.worker.job_executor import JobExecutor
 
 
 class TestStopEarlySendsSignal:
@@ -133,7 +133,7 @@ class TestStopRequestedFlag:
     async def test_exit_code_1_after_stop_sends_job_complete(self):
         """When stop was requested and process exits with code 1 (PL graceful
         shutdown), JOB_COMPLETE must be sent — not JOB_FAILED."""
-        from sleap_rtc.protocol import MSG_JOB_COMPLETE, MSG_JOB_FAILED, MSG_SEPARATOR
+        from sleap_connect.protocol import MSG_JOB_COMPLETE, MSG_JOB_FAILED, MSG_SEPARATOR
 
         executor = JobExecutor(worker=MagicMock(), capabilities=MagicMock())
         mock_channel = MagicMock()
@@ -171,7 +171,7 @@ class TestStopRequestedFlag:
     @pytest.mark.asyncio
     async def test_exit_code_1_without_stop_sends_job_failed(self):
         """Exit code 1 with no prior stop command must still send JOB_FAILED."""
-        from sleap_rtc.protocol import MSG_JOB_FAILED
+        from sleap_connect.protocol import MSG_JOB_FAILED
 
         executor = JobExecutor(worker=MagicMock(), capabilities=MagicMock())
         mock_channel = MagicMock()
@@ -200,7 +200,7 @@ class TestStopRequestedFlag:
         """_stop_requested must be False at the start of each execute_from_spec
         so a stop for model 1 does not make model 2's genuine failure look like
         a clean stop."""
-        from sleap_rtc.protocol import MSG_JOB_FAILED
+        from sleap_connect.protocol import MSG_JOB_FAILED
 
         executor = JobExecutor(worker=MagicMock(), capabilities=MagicMock())
         mock_channel = MagicMock()
@@ -297,7 +297,7 @@ class TestWatchdogSigintFallback:
         with (
             patch("os.killpg", side_effect=fake_killpg),
             patch("os.getpgid", return_value=99999),
-            patch("sleap_rtc.worker.job_executor._WATCHDOG_INTERVAL_SECS", 0),
+            patch("sleap_connect.worker.job_executor._WATCHDOG_INTERVAL_SECS", 0),
             patch(
                 "asyncio.create_subprocess_exec",
                 new=AsyncMock(return_value=linger_process),

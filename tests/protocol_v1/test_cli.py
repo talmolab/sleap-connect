@@ -13,14 +13,14 @@ import json
 
 from click.testing import CliRunner
 
-from sleap_rtc.protocol_v1.cli import (
+from sleap_connect.protocol_v1.cli import (
     pair,
     print_doctor_section,
 )
-from sleap_rtc.protocol_v1.pair_code import decode_pair_code
-from sleap_rtc.protocol_v1.pairing import PendingPairings
-from sleap_rtc.protocol_v1.runner import identity_path
-from sleap_rtc.protocol_v1.shared_folders import parse_mount
+from sleap_connect.protocol_v1.pair_code import decode_pair_code
+from sleap_connect.protocol_v1.pairing import PendingPairings
+from sleap_connect.protocol_v1.runner import identity_path
+from sleap_connect.protocol_v1.shared_folders import parse_mount
 
 
 class TestParseMount:
@@ -41,7 +41,7 @@ class TestParseMount:
 
 
 class TestPairCommand:
-    """Tests for the `sleap-rtc pair` command."""
+    """Tests for the `sleap-connect pair` command."""
 
     def test_prints_a_one_line_pairing_code_by_default(self, tmp_path):
         runner = CliRunner()
@@ -71,7 +71,7 @@ class TestPairCommand:
         assert identity_path(tmp_path).exists()
 
     def test_printed_ticket_is_claimable_by_a_separate_instance(self, tmp_path):
-        # Simulates: `sleap-rtc pair` mints it, a running `serve` process
+        # Simulates: `sleap-connect pair` mints it, a running `serve` process
         # (a different PendingPairings instance, same data dir) claims it.
         runner = CliRunner()
         result = runner.invoke(pair, ["--data-dir", str(tmp_path)])
@@ -81,7 +81,7 @@ class TestPairCommand:
         )
         ticket = decode_pair_code(code)
 
-        from sleap_rtc.protocol_v1.runner import pairing_path
+        from sleap_connect.protocol_v1.runner import pairing_path
 
         claimer = PendingPairings(path=pairing_path(tmp_path))
         assert claimer.claim(ticket.secret) is True
@@ -120,7 +120,7 @@ class TestDoctorSection:
         assert "not yet generated" in captured.out
 
     def test_reports_the_node_id_once_an_identity_exists(self, tmp_path, capsys):
-        from sleap_rtc.protocol_v1.identity import WorkerIdentity
+        from sleap_connect.protocol_v1.identity import WorkerIdentity
 
         identity = WorkerIdentity(identity_path(tmp_path))
 
@@ -130,7 +130,7 @@ class TestDoctorSection:
         assert identity.node_id in captured.out
 
     def test_reports_paired_client_count(self, tmp_path, capsys):
-        from sleap_rtc.protocol_v1.runner import open_trust_store
+        from sleap_connect.protocol_v1.runner import open_trust_store
 
         open_trust_store(tmp_path).add_trusted("some-node-id")
 
@@ -144,7 +144,7 @@ class TestStatusCommand:
     def _run(self, *args):
         from click.testing import CliRunner
 
-        from sleap_rtc.protocol_v1.cli import status
+        from sleap_connect.protocol_v1.cli import status
 
         return CliRunner().invoke(status, list(args))
 
@@ -153,15 +153,15 @@ class TestStatusCommand:
 
         assert result.exit_code == 1
         assert "not running" in result.output
-        assert "sleap-rtc serve" in result.output
+        assert "sleap-connect serve" in result.output
 
     def test_reports_a_running_worker(self, tmp_path):
         import asyncio
 
-        from sleap_rtc.jobs.spec import TrainJobSpec
-        from sleap_rtc.jobs.store import JobStore
-        from sleap_rtc.protocol_v1 import daemon
-        from sleap_rtc.protocol_v1.runner import open_shared_folders, open_trust_store
+        from sleap_connect.jobs.spec import TrainJobSpec
+        from sleap_connect.jobs.store import JobStore
+        from sleap_connect.protocol_v1 import daemon
+        from sleap_connect.protocol_v1.runner import open_shared_folders, open_trust_store
 
         folder = tmp_path / "data"
         folder.mkdir()
@@ -194,7 +194,7 @@ class TestStatusCommand:
         assert str(tmp_path) in result.output
 
     def test_finds_workers_through_the_registry(self, tmp_path):
-        from sleap_rtc.protocol_v1 import daemon
+        from sleap_connect.protocol_v1 import daemon
 
         daemon.acquire_pidfile(tmp_path, {"background": False})
         try:
@@ -209,8 +209,8 @@ class TestStatusCommand:
 
 class TestClientsCommand:
     def test_lists_paired_devices(self, tmp_path):
-        from sleap_rtc.protocol_v1.cli import clients
-        from sleap_rtc.protocol_v1.runner import open_trust_store
+        from sleap_connect.protocol_v1.cli import clients
+        from sleap_connect.protocol_v1.runner import open_trust_store
 
         store = open_trust_store(tmp_path)
         store.add_trusted(
@@ -229,7 +229,7 @@ class TestClientsCommand:
         assert "2 paired devices." in result.output
 
     def test_no_devices_yet(self, tmp_path):
-        from sleap_rtc.protocol_v1.cli import clients
+        from sleap_connect.protocol_v1.cli import clients
 
         result = CliRunner().invoke(clients, ["--data-dir", str(tmp_path)])
         assert "No paired devices yet" in result.output
@@ -237,7 +237,7 @@ class TestClientsCommand:
 
 class TestClientsRemove:
     def _store(self, tmp_path):
-        from sleap_rtc.protocol_v1.runner import open_trust_store
+        from sleap_connect.protocol_v1.runner import open_trust_store
 
         store = open_trust_store(tmp_path)
         store.add_trusted("aaaa1111", {"device_name": "Rig 1", "platform": "tauri"})
@@ -247,7 +247,7 @@ class TestClientsRemove:
         return store
 
     def _run(self, tmp_path, *args, input=None):
-        from sleap_rtc.protocol_v1.cli import clients
+        from sleap_connect.protocol_v1.cli import clients
 
         return CliRunner().invoke(
             clients, ["remove", *args, "--data-dir", str(tmp_path)], input=input
@@ -288,8 +288,8 @@ class TestClientsRemove:
         assert 'No paired device matches "nope"' in result.output
 
     def test_all_removes_devices_and_unused_pairing_codes(self, tmp_path):
-        from sleap_rtc.protocol_v1.pairing import PendingPairings
-        from sleap_rtc.protocol_v1.runner import pairing_path
+        from sleap_connect.protocol_v1.pairing import PendingPairings
+        from sleap_connect.protocol_v1.runner import pairing_path
 
         store = self._store(tmp_path)
         ticket = PendingPairings(path=pairing_path(tmp_path)).create("worker", [])
@@ -311,7 +311,7 @@ class TestClientsRemove:
         assert self._run(tmp_path, "Rig 1", "--all").exit_code != 0
 
     def test_listing_still_works_without_a_subcommand(self, tmp_path):
-        from sleap_rtc.protocol_v1.cli import clients
+        from sleap_connect.protocol_v1.cli import clients
 
         self._store(tmp_path)
         result = CliRunner().invoke(clients, ["--data-dir", str(tmp_path)])

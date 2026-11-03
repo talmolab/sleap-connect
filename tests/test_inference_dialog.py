@@ -16,7 +16,7 @@ def qapp():
 
 @pytest.fixture
 def dialog(qapp):
-    from sleap_rtc.gui.widgets import InferenceProgressDialog
+    from sleap_connect.gui.widgets import InferenceProgressDialog
 
     dlg = InferenceProgressDialog()
     yield dlg
@@ -173,26 +173,26 @@ class TestInferenceProgressDialogShowError:
 
 class TestFormatEta:
     def test_seconds(self):
-        from sleap_rtc.gui.widgets import InferenceProgressDialog
+        from sleap_connect.gui.widgets import InferenceProgressDialog
 
         assert InferenceProgressDialog._format_eta(45) == "45s"
 
     def test_minutes_seconds(self):
-        from sleap_rtc.gui.widgets import InferenceProgressDialog
+        from sleap_connect.gui.widgets import InferenceProgressDialog
 
         assert InferenceProgressDialog._format_eta(200) == "3m 20s"
 
     def test_hours_minutes(self):
-        from sleap_rtc.gui.widgets import InferenceProgressDialog
+        from sleap_connect.gui.widgets import InferenceProgressDialog
 
         assert InferenceProgressDialog._format_eta(3661) == "1h 01m"
 
     def test_zero(self):
-        from sleap_rtc.gui.widgets import InferenceProgressDialog
+        from sleap_connect.gui.widgets import InferenceProgressDialog
 
         assert InferenceProgressDialog._format_eta(0) == "0s"
 
     def test_invalid(self):
-        from sleap_rtc.gui.widgets import InferenceProgressDialog
+        from sleap_connect.gui.widgets import InferenceProgressDialog
 
         assert InferenceProgressDialog._format_eta(None) == "?"

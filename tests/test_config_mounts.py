@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from sleap_rtc.config import MountConfig, WorkerIOConfig
+from sleap_connect.config import MountConfig, WorkerIOConfig
 
 
 class TestMountConfig:

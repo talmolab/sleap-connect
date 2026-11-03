@@ -2,7 +2,7 @@
 
 import pytest
 
-from sleap_rtc.auth.keypair import (
+from sleap_connect.auth.keypair import (
     generate_keypair,
     sign_nonce,
     verify_signature,

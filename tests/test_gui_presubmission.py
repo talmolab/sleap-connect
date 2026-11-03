@@ -1,15 +1,15 @@
-"""Tests for sleap_rtc.gui.presubmission module."""
+"""Tests for sleap_connect.gui.presubmission module."""
 
 import pytest
 from unittest.mock import MagicMock, patch
 
-from sleap_rtc.api import (
+from sleap_connect.api import (
     ValidationResult,
     ValidationIssue,
     PathCheckResult,
     VideoPathStatus,
 )
-from sleap_rtc.gui.presubmission import (
+from sleap_connect.gui.presubmission import (
     PresubmissionResult,
     PresubmissionFlow,
     run_presubmission_checks,
@@ -27,7 +27,7 @@ from sleap_rtc.gui.presubmission import (
 class TestCheckAuthentication:
     """Tests for check_authentication function."""
 
-    @patch("sleap_rtc.api.is_logged_in")
+    @patch("sleap_connect.api.is_logged_in")
     def test_already_logged_in(self, mock_is_logged_in):
         """Should succeed if already logged in."""
         mock_is_logged_in.return_value = True
@@ -38,7 +38,7 @@ class TestCheckAuthentication:
         assert result.cancelled is False
         assert result.error is None
 
-    @patch("sleap_rtc.api.is_logged_in")
+    @patch("sleap_connect.api.is_logged_in")
     def test_not_logged_in_no_callback(self, mock_is_logged_in):
         """Should fail if not logged in and no callback provided."""
         mock_is_logged_in.return_value = False
@@ -49,7 +49,7 @@ class TestCheckAuthentication:
         assert result.cancelled is False
         assert "Not logged in" in result.error
 
-    @patch("sleap_rtc.api.is_logged_in")
+    @patch("sleap_connect.api.is_logged_in")
     def test_not_logged_in_login_succeeds(self, mock_is_logged_in):
         """Should succeed if login callback returns True."""
         mock_is_logged_in.return_value = False
@@ -61,7 +61,7 @@ class TestCheckAuthentication:
         assert result.cancelled is False
         callback.assert_called_once()
 
-    @patch("sleap_rtc.api.is_logged_in")
+    @patch("sleap_connect.api.is_logged_in")
     def test_not_logged_in_login_cancelled(self, mock_is_logged_in):
         """Should fail with cancelled=True if login callback returns False."""
         mock_is_logged_in.return_value = False
@@ -82,7 +82,7 @@ class TestCheckAuthentication:
 class TestCheckConfigValidation:
     """Tests for check_config_validation function."""
 
-    @patch("sleap_rtc.api.validate_config")
+    @patch("sleap_connect.api.validate_config")
     def test_valid_config_no_warnings(self, mock_validate):
         """Should succeed if config is valid with no warnings."""
         mock_validate.return_value = ValidationResult(
@@ -98,7 +98,7 @@ class TestCheckConfigValidation:
         assert result.validation_result is not None
         assert result.validation_result.valid is True
 
-    @patch("sleap_rtc.api.validate_config")
+    @patch("sleap_connect.api.validate_config")
     def test_config_with_errors_no_parent(self, mock_validate):
         """Should fail with errors when no parent widget provided."""
         mock_validate.return_value = ValidationResult(
@@ -120,7 +120,7 @@ class TestCheckConfigValidation:
         assert "Invalid value" in result.error
         assert result.validation_result is not None
 
-    @patch("sleap_rtc.api.validate_config")
+    @patch("sleap_connect.api.validate_config")
     def test_config_with_warnings_only_no_parent(self, mock_validate):
         """Should succeed with warnings when no parent widget provided."""
         mock_validate.return_value = ValidationResult(
@@ -142,10 +142,10 @@ class TestCheckConfigValidation:
         assert result.success is True
         assert result.validation_result is not None
 
-    @patch("sleap_rtc.api.validate_config")
+    @patch("sleap_connect.api.validate_config")
     def test_config_read_error(self, mock_validate):
         """Should fail with error if config cannot be read."""
-        from sleap_rtc.api import ConfigurationError
+        from sleap_connect.api import ConfigurationError
 
         mock_validate.side_effect = ConfigurationError("File not found")
 
@@ -154,8 +154,8 @@ class TestCheckConfigValidation:
         assert result.success is False
         assert "Cannot read config file" in result.error
 
-    @patch("sleap_rtc.gui.widgets.ConfigValidationDialog")
-    @patch("sleap_rtc.api.validate_config")
+    @patch("sleap_connect.gui.widgets.ConfigValidationDialog")
+    @patch("sleap_connect.api.validate_config")
     def test_config_with_errors_dialog_shown(self, mock_validate, mock_dialog_class):
         """Should show dialog and fail when config has errors."""
         mock_validate.return_value = ValidationResult(
@@ -182,8 +182,8 @@ class TestCheckConfigValidation:
         mock_dialog_class.assert_called_once()
         mock_dialog.exec.assert_called_once()
 
-    @patch("sleap_rtc.gui.widgets.ConfigValidationDialog")
-    @patch("sleap_rtc.api.validate_config")
+    @patch("sleap_connect.gui.widgets.ConfigValidationDialog")
+    @patch("sleap_connect.api.validate_config")
     def test_config_with_warnings_user_continues(self, mock_validate, mock_dialog_class):
         """Should succeed when user clicks Continue Anyway for warnings."""
         mock_validate.return_value = ValidationResult(
@@ -210,8 +210,8 @@ class TestCheckConfigValidation:
         assert result.success is True
         mock_dialog_class.assert_called_once()
 
-    @patch("sleap_rtc.gui.widgets.ConfigValidationDialog")
-    @patch("sleap_rtc.api.validate_config")
+    @patch("sleap_connect.gui.widgets.ConfigValidationDialog")
+    @patch("sleap_connect.api.validate_config")
     def test_config_with_warnings_user_cancels(self, mock_validate, mock_dialog_class):
         """Should fail with cancelled=True when user cancels on warnings."""
         mock_validate.return_value = ValidationResult(
@@ -247,7 +247,7 @@ class TestCheckConfigValidation:
 class TestCheckVideoPaths:
     """Tests for check_video_paths function."""
 
-    @patch("sleap_rtc.api.check_video_paths")
+    @patch("sleap_connect.api.check_video_paths")
     def test_all_paths_found(self, mock_check):
         """Should succeed if all video paths are found."""
         mock_check.return_value = PathCheckResult(
@@ -280,7 +280,7 @@ class TestCheckVideoPaths:
             "/local/video2.mp4": "/data/video2.mp4",
         }
 
-    @patch("sleap_rtc.api.check_video_paths")
+    @patch("sleap_connect.api.check_video_paths")
     def test_missing_paths_no_parent(self, mock_check):
         """Should fail with error if paths missing and no parent widget."""
         mock_check.return_value = PathCheckResult(
@@ -309,10 +309,10 @@ class TestCheckVideoPaths:
         assert result.success is False
         assert "video2.mp4" in result.error
 
-    @patch("sleap_rtc.api.check_video_paths")
+    @patch("sleap_connect.api.check_video_paths")
     def test_auth_error(self, mock_check):
         """Should fail with auth error."""
-        from sleap_rtc.api import AuthenticationError
+        from sleap_connect.api import AuthenticationError
 
         mock_check.side_effect = AuthenticationError("Not logged in")
 
@@ -321,10 +321,10 @@ class TestCheckVideoPaths:
         assert result.success is False
         assert "Authentication error" in result.error
 
-    @patch("sleap_rtc.api.check_video_paths")
+    @patch("sleap_connect.api.check_video_paths")
     def test_room_not_found(self, mock_check):
         """Should fail with room not found error."""
-        from sleap_rtc.api import RoomNotFoundError
+        from sleap_connect.api import RoomNotFoundError
 
         mock_check.side_effect = RoomNotFoundError("Room not found")
 
@@ -333,7 +333,7 @@ class TestCheckVideoPaths:
         assert result.success is False
         assert "Room error" in result.error
 
-    @patch("sleap_rtc.api.check_video_paths")
+    @patch("sleap_connect.api.check_video_paths")
     def test_network_error_allows_proceeding(self, mock_check):
         """Should allow proceeding if network error occurs."""
         mock_check.side_effect = Exception("Network timeout")
@@ -344,7 +344,7 @@ class TestCheckVideoPaths:
         assert result.success is True
         assert result.path_mappings == {}
 
-    @patch("sleap_rtc.api.check_video_paths")
+    @patch("sleap_connect.api.check_video_paths")
     def test_missing_paths_user_resolves(self, mock_check):
         """Should succeed when user resolves missing paths via on_videos_missing."""
         # Video resolution now happens inside the API callback, so the
@@ -371,10 +371,10 @@ class TestCheckVideoPaths:
         assert result.success is True
         assert result.path_mappings == {"/local/video.mp4": "/worker/video.mp4"}
 
-    @patch("sleap_rtc.api.check_video_paths")
+    @patch("sleap_connect.api.check_video_paths")
     def test_missing_paths_user_cancels(self, mock_check):
         """Should fail with cancelled=True when user cancels path resolution."""
-        from sleap_rtc.api import ConfigurationError
+        from sleap_connect.api import ConfigurationError
 
         # When user cancels, the on_videos_missing callback returns None,
         # causing the API to raise ConfigurationError.
@@ -388,7 +388,7 @@ class TestCheckVideoPaths:
         assert result.success is False
         assert result.cancelled is True
 
-    @patch("sleap_rtc.api.check_video_paths")
+    @patch("sleap_connect.api.check_video_paths")
     def test_fully_embedded_pkg_slp_skips_dialog(self, mock_check):
         """Should succeed immediately for fully-embedded pkg.slp without showing
         PathResolutionDialog (missing == 0 and embedded > 0)."""
@@ -411,7 +411,7 @@ class TestCheckVideoPaths:
         # No video path mappings needed — all embedded
         assert result.path_mappings == {}
 
-    @patch("sleap_rtc.api.check_video_paths")
+    @patch("sleap_connect.api.check_video_paths")
     def test_embedded_zero_falls_through_to_normal_path(self, mock_check):
         """Should not trigger the embedded-skip path when embedded_count == 0."""
         mock_check.return_value = PathCheckResult(
@@ -455,9 +455,9 @@ class TestCheckVideoPaths:
 class TestRunPresubmissionChecks:
     """Tests for run_presubmission_checks function."""
 
-    @patch("sleap_rtc.gui.presubmission.check_video_paths")
-    @patch("sleap_rtc.gui.presubmission.check_config_validation")
-    @patch("sleap_rtc.gui.presubmission.check_authentication")
+    @patch("sleap_connect.gui.presubmission.check_video_paths")
+    @patch("sleap_connect.gui.presubmission.check_config_validation")
+    @patch("sleap_connect.gui.presubmission.check_authentication")
     def test_all_checks_pass(self, mock_auth, mock_config, mock_paths):
         """Should succeed when all checks pass."""
         mock_auth.return_value = PresubmissionResult(success=True)
@@ -484,8 +484,8 @@ class TestRunPresubmissionChecks:
         mock_config.assert_called_once()
         mock_paths.assert_called_once()
 
-    @patch("sleap_rtc.gui.presubmission.check_config_validation")
-    @patch("sleap_rtc.gui.presubmission.check_authentication")
+    @patch("sleap_connect.gui.presubmission.check_config_validation")
+    @patch("sleap_connect.gui.presubmission.check_authentication")
     def test_auth_fails_stops_flow(self, mock_auth, mock_config):
         """Should stop at auth if it fails."""
         mock_auth.return_value = PresubmissionResult(
@@ -504,9 +504,9 @@ class TestRunPresubmissionChecks:
         mock_auth.assert_called_once()
         mock_config.assert_not_called()
 
-    @patch("sleap_rtc.gui.presubmission.check_video_paths")
-    @patch("sleap_rtc.gui.presubmission.check_config_validation")
-    @patch("sleap_rtc.gui.presubmission.check_authentication")
+    @patch("sleap_connect.gui.presubmission.check_video_paths")
+    @patch("sleap_connect.gui.presubmission.check_config_validation")
+    @patch("sleap_connect.gui.presubmission.check_authentication")
     def test_config_validation_fails_stops_flow(self, mock_auth, mock_config, mock_paths):
         """Should stop at config validation if it fails."""
         mock_auth.return_value = PresubmissionResult(success=True)
@@ -527,9 +527,9 @@ class TestRunPresubmissionChecks:
         mock_config.assert_called_once()
         mock_paths.assert_not_called()
 
-    @patch("sleap_rtc.gui.presubmission.check_video_paths")
-    @patch("sleap_rtc.gui.presubmission.check_config_validation")
-    @patch("sleap_rtc.gui.presubmission.check_authentication")
+    @patch("sleap_connect.gui.presubmission.check_video_paths")
+    @patch("sleap_connect.gui.presubmission.check_config_validation")
+    @patch("sleap_connect.gui.presubmission.check_authentication")
     def test_path_check_fails_stops_flow(self, mock_auth, mock_config, mock_paths):
         """Should fail if path check fails."""
         mock_auth.return_value = PresubmissionResult(success=True)
@@ -549,7 +549,7 @@ class TestRunPresubmissionChecks:
         assert result.success is False
         assert result.cancelled is True
 
-    @patch("sleap_rtc.gui.presubmission.check_authentication")
+    @patch("sleap_connect.gui.presubmission.check_authentication")
     def test_login_callback_passed(self, mock_auth):
         """Should pass login callback to check_authentication."""
         mock_auth.return_value = PresubmissionResult(success=False)
@@ -573,7 +573,7 @@ class TestRunPresubmissionChecks:
 class TestPresubmissionFlow:
     """Tests for PresubmissionFlow class."""
 
-    @patch("sleap_rtc.gui.presubmission.run_presubmission_checks")
+    @patch("sleap_connect.gui.presubmission.run_presubmission_checks")
     def test_run_success(self, mock_checks):
         """Should run checks and store results."""
         mock_checks.return_value = PresubmissionResult(
@@ -597,7 +597,7 @@ class TestPresubmissionFlow:
         assert flow.validation_result is not None
         assert flow.result.success is True
 
-    @patch("sleap_rtc.gui.presubmission.run_presubmission_checks")
+    @patch("sleap_connect.gui.presubmission.run_presubmission_checks")
     def test_run_failure(self, mock_checks):
         """Should handle failure and provide error message."""
         mock_checks.return_value = PresubmissionResult(
@@ -616,7 +616,7 @@ class TestPresubmissionFlow:
         assert result is False
         assert flow.get_error_message() == "Validation failed"
 
-    @patch("sleap_rtc.gui.presubmission.run_presubmission_checks")
+    @patch("sleap_connect.gui.presubmission.run_presubmission_checks")
     def test_was_cancelled(self, mock_checks):
         """Should report if user cancelled."""
         mock_checks.return_value = PresubmissionResult(
@@ -634,7 +634,7 @@ class TestPresubmissionFlow:
 
         assert flow.was_cancelled() is True
 
-    @patch("sleap_rtc.gui.presubmission.run_presubmission_checks")
+    @patch("sleap_connect.gui.presubmission.run_presubmission_checks")
     def test_on_auth_required_callback_passed(self, mock_checks):
         """Should pass on_auth_required callback to run_presubmission_checks."""
         mock_checks.return_value = PresubmissionResult(success=True)
@@ -664,8 +664,8 @@ class TestPresubmissionFlow:
 class TestSendFnThreading:
     """Tests for send_fn parameter threading through presubmission flow."""
 
-    @patch("sleap_rtc.api.check_video_paths")
-    @patch("sleap_rtc.api.is_logged_in")
+    @patch("sleap_connect.api.check_video_paths")
+    @patch("sleap_connect.api.is_logged_in")
     def test_send_fn_passed_to_check_video_paths(self, mock_logged_in, mock_check):
         """send_fn should be passed through run_presubmission_checks."""
         mock_logged_in.return_value = True
@@ -687,9 +687,9 @@ class TestSendFnThreading:
 
         assert result.success is True
 
-    @patch("sleap_rtc.gui.widgets.SlpPathDialog")
-    @patch("sleap_rtc.api.check_video_paths")
-    @patch("sleap_rtc.api.is_logged_in")
+    @patch("sleap_connect.gui.widgets.SlpPathDialog")
+    @patch("sleap_connect.api.check_video_paths")
+    @patch("sleap_connect.api.is_logged_in")
     def test_send_fn_passed_to_slp_dialog(
         self, mock_logged_in, mock_check, mock_dialog_cls
     ):
@@ -750,9 +750,9 @@ class TestSendFnThreading:
         assert result.success is True
 
     @pytest.mark.xfail(reason="QDialog rejects MagicMock parent; needs real QWidget fixture")
-    @patch("sleap_rtc.gui.widgets.PathResolutionDialog")
-    @patch("sleap_rtc.api.check_video_paths")
-    @patch("sleap_rtc.api.is_logged_in")
+    @patch("sleap_connect.gui.widgets.PathResolutionDialog")
+    @patch("sleap_connect.api.check_video_paths")
+    @patch("sleap_connect.api.is_logged_in")
     def test_send_fn_passed_to_path_resolution_dialog(
         self, mock_logged_in, mock_check, mock_dialog_cls
     ):

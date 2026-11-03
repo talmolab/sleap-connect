@@ -1,4 +1,4 @@
-"""Smoke tests for the sleap-rtc package.
+"""Smoke tests for the sleap-connect package.
 
 These tests verify that the installed package is structurally sound — all
 subpackages importable, the CLI entry point reachable, and required data
@@ -10,7 +10,7 @@ invocation and plain imports for module-level checks.
 
 The primary failure mode these tests guard against is a packaging bug
 where subpackages or data files are missing from the published wheel
-(as happened in v0.0.1, where sleap_rtc.worker was not included).
+(as happened in v0.0.1, where sleap_connect.worker was not included).
 """
 
 from pathlib import Path
@@ -18,50 +18,50 @@ from pathlib import Path
 import pytest
 from click.testing import CliRunner
 
-from sleap_rtc.cli import cli
+from sleap_connect.cli import cli
 
 
 # ── Subpackage imports ────────────────────────────────────────────────────────
 
 
 class TestSubpackageImports:
-    """Each sleap_rtc subpackage must be importable without error.
+    """Each sleap_connect subpackage must be importable without error.
 
     If any of these fail, the wheel is missing __init__.py files or the
     package was not correctly included in the distribution.
     """
 
     def test_import_worker(self):
-        """sleap_rtc.worker must be importable."""
-        import sleap_rtc.worker  # noqa: F401
+        """sleap_connect.worker must be importable."""
+        import sleap_connect.worker  # noqa: F401
 
     def test_import_worker_class(self):
-        """RTCWorkerClient must be importable from sleap_rtc.worker."""
-        from sleap_rtc.worker.worker_class import RTCWorkerClient  # noqa: F401
+        """RTCWorkerClient must be importable from sleap_connect.worker."""
+        from sleap_connect.worker.worker_class import RTCWorkerClient  # noqa: F401
 
     def test_import_client(self):
-        """sleap_rtc.client must be importable."""
-        import sleap_rtc.client  # noqa: F401
+        """sleap_connect.client must be importable."""
+        import sleap_connect.client  # noqa: F401
 
     def test_import_client_class(self):
-        """RTCClient must be importable from sleap_rtc.client."""
-        from sleap_rtc.client.client_class import RTCClient  # noqa: F401
+        """RTCClient must be importable from sleap_connect.client."""
+        from sleap_connect.client.client_class import RTCClient  # noqa: F401
 
     def test_import_auth(self):
-        """sleap_rtc.auth must be importable."""
-        import sleap_rtc.auth  # noqa: F401
+        """sleap_connect.auth must be importable."""
+        import sleap_connect.auth  # noqa: F401
 
     def test_import_jobs(self):
-        """sleap_rtc.jobs must be importable."""
-        import sleap_rtc.jobs  # noqa: F401
+        """sleap_connect.jobs must be importable."""
+        import sleap_connect.jobs  # noqa: F401
 
     def test_import_gui(self):
-        """sleap_rtc.gui must be importable."""
-        import sleap_rtc.gui  # noqa: F401
+        """sleap_connect.gui must be importable."""
+        import sleap_connect.gui  # noqa: F401
 
     def test_import_tui(self):
-        """sleap_rtc.tui must be importable."""
-        import sleap_rtc.tui  # noqa: F401
+        """sleap_connect.tui must be importable."""
+        import sleap_connect.tui  # noqa: F401
 
 
 # ── CLI entry point ───────────────────────────────────────────────────────────
@@ -71,7 +71,7 @@ class TestCLIEntryPoint:
     """The CLI entry point must be reachable and respond to --help."""
 
     def test_main_help(self):
-        """sleap-rtc --help must exit 0 and list core commands."""
+        """sleap-connect --help must exit 0 and list core commands."""
         runner = CliRunner()
         result = runner.invoke(cli, ["--help"])
         assert result.exit_code == 0
@@ -81,25 +81,25 @@ class TestCLIEntryPoint:
         assert "login" in result.output
 
     def test_worker_help(self):
-        """sleap-rtc worker --help must exit 0."""
+        """sleap-connect worker --help must exit 0."""
         runner = CliRunner()
         result = runner.invoke(cli, ["worker", "--help"])
         assert result.exit_code == 0
 
     def test_train_help(self):
-        """sleap-rtc train --help must exit 0."""
+        """sleap-connect train --help must exit 0."""
         runner = CliRunner()
         result = runner.invoke(cli, ["train", "--help"])
         assert result.exit_code == 0
 
     def test_track_help(self):
-        """sleap-rtc track --help must exit 0."""
+        """sleap-connect track --help must exit 0."""
         runner = CliRunner()
         result = runner.invoke(cli, ["track", "--help"])
         assert result.exit_code == 0
 
     def test_key_help(self):
-        """sleap-rtc key --help must exit 0 and list subcommands."""
+        """sleap-connect key --help must exit 0 and list subcommands."""
         runner = CliRunner()
         result = runner.invoke(cli, ["key", "--help"])
         assert result.exit_code == 0
@@ -110,38 +110,38 @@ class TestCLIEntryPoint:
         assert "use" in result.output
 
     def test_key_list_help(self):
-        """sleap-rtc key list --help must exit 0."""
+        """sleap-connect key list --help must exit 0."""
         runner = CliRunner()
         result = runner.invoke(cli, ["key", "list", "--help"])
         assert result.exit_code == 0
 
     def test_key_create_help(self):
-        """sleap-rtc key create --help must exit 0."""
+        """sleap-connect key create --help must exit 0."""
         runner = CliRunner()
         result = runner.invoke(cli, ["key", "create", "--help"])
         assert result.exit_code == 0
 
     def test_key_revoke_help(self):
-        """sleap-rtc key revoke --help must exit 0."""
+        """sleap-connect key revoke --help must exit 0."""
         runner = CliRunner()
         result = runner.invoke(cli, ["key", "revoke", "--help"])
         assert result.exit_code == 0
 
     def test_key_use_help(self):
-        """sleap-rtc key use --help must exit 0."""
+        """sleap-connect key use --help must exit 0."""
         runner = CliRunner()
         result = runner.invoke(cli, ["key", "use", "--help"])
         assert result.exit_code == 0
 
     def test_worker_account_key_option(self):
-        """sleap-rtc worker --help must show --account-key option."""
+        """sleap-connect worker --help must show --account-key option."""
         runner = CliRunner()
         result = runner.invoke(cli, ["worker", "--help"])
         assert result.exit_code == 0
         assert "account-key" in result.output
 
     def test_room_set_default_help(self):
-        """sleap-rtc room set-default --help must exit 0."""
+        """sleap-connect room set-default --help must exit 0."""
         runner = CliRunner()
         result = runner.invoke(cli, ["room", "set-default", "--help"])
         assert result.exit_code == 0
@@ -160,7 +160,7 @@ class TestRequiredDataFiles:
 
     def test_fs_viewer_html_present(self):
         """fs_viewer.html must be bundled with the package."""
-        import sleap_rtc.client.fs_viewer_server as mod
+        import sleap_connect.client.fs_viewer_server as mod
 
         html_path = Path(mod.__file__).parent / "static" / "fs_viewer.html"
         assert html_path.exists(), (
@@ -170,7 +170,7 @@ class TestRequiredDataFiles:
 
     def test_fs_resolve_html_present(self):
         """fs_resolve.html must be bundled with the package."""
-        import sleap_rtc.client.fs_viewer_server as mod
+        import sleap_connect.client.fs_viewer_server as mod
 
         html_path = Path(mod.__file__).parent / "static" / "fs_resolve.html"
         assert html_path.exists(), (

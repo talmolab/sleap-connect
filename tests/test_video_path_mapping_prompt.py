@@ -7,8 +7,8 @@ from unittest.mock import patch, MagicMock
 import pytest
 from qtpy.QtWidgets import QApplication, QDialog
 
-from sleap_rtc.config import Config
-from sleap_rtc.gui.widgets import show_save_mapping_prompt
+from sleap_connect.config import Config
+from sleap_connect.gui.widgets import show_save_mapping_prompt
 
 
 @pytest.fixture(scope="session")
@@ -84,12 +84,12 @@ class TestPresubmissionVideoPrompt:
         def fake_prompt(local_dir, worker_dir, config, parent=None):
             calls.append((local_dir, worker_dir))
 
-        with patch("sleap_rtc.config.get_config", return_value=cfg):
-            with patch("sleap_rtc.gui.widgets.show_save_mapping_prompt", fake_prompt):
+        with patch("sleap_connect.config.get_config", return_value=cfg):
+            with patch("sleap_connect.gui.widgets.show_save_mapping_prompt", fake_prompt):
                 # Simulate what presubmission does
                 from pathlib import Path
-                from sleap_rtc.config import get_config
-                from sleap_rtc.gui.widgets import show_save_mapping_prompt as smp
+                from sleap_connect.config import get_config
+                from sleap_connect.gui.widgets import show_save_mapping_prompt as smp
                 _cfg = get_config()
                 for orig, worker in resolved.items():
                     local_dir = str(Path(orig).parent)
@@ -116,8 +116,8 @@ class TestPresubmissionVideoPrompt:
             calls.append((local_dir, worker_dir))
 
         from pathlib import Path
-        from sleap_rtc.config import get_config
-        with patch("sleap_rtc.config.get_config", return_value=cfg):
+        from sleap_connect.config import get_config
+        with patch("sleap_connect.config.get_config", return_value=cfg):
             _cfg = cfg
             for orig, worker in resolved.items():
                 local_dir = str(Path(orig).parent)
@@ -134,7 +134,7 @@ class TestPresubmissionVideoPrompt:
             "/Users/alice/repos/data/videos/cam1.mp4": "/root/vast/amick/videos/cam1.mp4",
         }
         with patch.object(QDialog, "exec", return_value=QDialog.DialogCode.Accepted):
-            with patch("sleap_rtc.config.get_config", return_value=cfg):
+            with patch("sleap_connect.config.get_config", return_value=cfg):
                 from pathlib import Path
                 _cfg = cfg
                 for orig, worker in resolved.items():

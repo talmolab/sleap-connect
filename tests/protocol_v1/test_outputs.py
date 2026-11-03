@@ -8,12 +8,12 @@ from pathlib import Path
 
 import pytest
 
-from sleap_rtc.jobs.queue import JobQueue
-from sleap_rtc.jobs.spec import TrainJobSpec
-from sleap_rtc.jobs.store import JobStore
-from sleap_rtc.protocol_v1 import job_methods as job_methods_module
-from sleap_rtc.protocol_v1.job_methods import JobMethods
-from sleap_rtc.protocol_v1.outputs import (
+from sleap_connect.jobs.queue import JobQueue
+from sleap_connect.jobs.spec import TrainJobSpec
+from sleap_connect.jobs.store import JobStore
+from sleap_connect.protocol_v1 import job_methods as job_methods_module
+from sleap_connect.protocol_v1.job_methods import JobMethods
+from sleap_connect.protocol_v1.outputs import (
     bare_run_name,
     predictions_path,
     read_model_dir,
@@ -21,7 +21,7 @@ from sleap_rtc.protocol_v1.outputs import (
     train_output_root,
     write_outputs_record,
 )
-from sleap_rtc.protocol_v1.server import ProtocolV1Server
+from sleap_connect.protocol_v1.server import ProtocolV1Server
 
 NOW = datetime(2026, 10, 28, 10, 30, 0)
 

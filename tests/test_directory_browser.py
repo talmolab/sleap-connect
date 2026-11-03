@@ -5,13 +5,13 @@ import json
 import pytest
 from unittest.mock import MagicMock, AsyncMock
 
-from sleap_rtc.client.directory_browser import (
+from sleap_connect.client.directory_browser import (
     DirectoryBrowser,
     DirectoryEntry,
     _format_size,
     browse_for_file,
 )
-from sleap_rtc.protocol import MSG_FS_LIST_RESPONSE, MSG_FS_ERROR, MSG_SEPARATOR
+from sleap_connect.protocol import MSG_FS_LIST_RESPONSE, MSG_FS_ERROR, MSG_SEPARATOR
 
 
 class TestFormatSize:

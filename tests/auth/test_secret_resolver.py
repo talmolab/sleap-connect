@@ -7,9 +7,9 @@ from unittest import mock
 
 import pytest
 
-from sleap_rtc.auth import credentials
-from sleap_rtc.auth import secret_resolver
-from sleap_rtc.auth.secret_resolver import (
+from sleap_connect.auth import credentials
+from sleap_connect.auth import secret_resolver
+from sleap_connect.auth.secret_resolver import (
     ENV_ROOM_SECRET,
     ENV_SECRET_PATH,
     get_secret_base_path,
@@ -21,7 +21,7 @@ from sleap_rtc.auth.secret_resolver import (
 @pytest.fixture
 def temp_credentials_dir(tmp_path):
     """Create a temporary credentials directory for testing."""
-    creds_dir = tmp_path / ".sleap-rtc"
+    creds_dir = tmp_path / ".sleap-connect"
     creds_dir.mkdir()
     creds_path = creds_dir / "credentials.json"
 
@@ -189,7 +189,7 @@ class TestSecretBasePath:
     def test_returns_default_when_env_not_set(self, clean_env):
         """Should return default path when SLEAP_SECRET_PATH not set."""
         result = get_secret_base_path()
-        assert result == Path.home() / ".sleap-rtc" / "room-secrets"
+        assert result == Path.home() / ".sleap-connect" / "room-secrets"
 
 
 class TestGetSecretSources:

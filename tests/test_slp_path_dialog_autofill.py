@@ -6,8 +6,8 @@ from unittest.mock import MagicMock, patch
 import pytest
 from qtpy.QtWidgets import QApplication, QDialog
 
-from sleap_rtc.config import Config, PathMapping
-from sleap_rtc.gui.widgets import SlpPathDialog
+from sleap_connect.config import Config, PathMapping
+from sleap_connect.gui.widgets import SlpPathDialog
 
 
 @pytest.fixture(scope="session")
@@ -27,7 +27,7 @@ def _cfg_with_mapping(tmp_path, monkeypatch, local, worker):
 
 
 def _make_dialog(local_path, config, qapp):
-    with patch("sleap_rtc.config.get_config", return_value=config):
+    with patch("sleap_connect.config.get_config", return_value=config):
         dlg = SlpPathDialog(
             local_path=local_path,
             error_message="not found",
@@ -91,7 +91,7 @@ class TestAutoFill:
 
 class TestSaveMappingPrompt:
     def _make_dialog_with_cfg(self, local_path, cfg, qapp):
-        with patch("sleap_rtc.config.get_config", return_value=cfg):
+        with patch("sleap_connect.config.get_config", return_value=cfg):
             dlg = SlpPathDialog(
                 local_path=local_path,
                 error_message="not found",
@@ -106,7 +106,7 @@ class TestSaveMappingPrompt:
         )
         dlg._path_edit.setText("/root/vast/amick/data/labels.slp")
 
-        with patch("sleap_rtc.config.get_config", return_value=cfg):
+        with patch("sleap_connect.config.get_config", return_value=cfg):
             with patch.object(QDialog, "exec", return_value=QDialog.DialogCode.Rejected):
                 dlg._on_accept()
 
@@ -122,7 +122,7 @@ class TestSaveMappingPrompt:
         )
         dlg._path_edit.setText("/root/vast/amick/data/labels.slp")
 
-        with patch("sleap_rtc.config.get_config", return_value=cfg):
+        with patch("sleap_connect.config.get_config", return_value=cfg):
             with patch.object(QDialog, "exec", return_value=QDialog.DialogCode.Accepted):
                 dlg._on_accept()
 
@@ -139,7 +139,7 @@ class TestSaveMappingPrompt:
         )
         dlg._path_edit.setText("/root/vast/amick/data/labels.slp")
 
-        with patch("sleap_rtc.config.get_config", return_value=cfg):
+        with patch("sleap_connect.config.get_config", return_value=cfg):
             with patch.object(QDialog, "exec", return_value=QDialog.DialogCode.Rejected):
                 dlg._on_accept()
 
@@ -161,7 +161,7 @@ class TestSaveMappingPrompt:
             exec_calls.append(True)
             return QDialog.DialogCode.Rejected
 
-        with patch("sleap_rtc.config.get_config", return_value=cfg):
+        with patch("sleap_connect.config.get_config", return_value=cfg):
             with patch.object(QDialog, "exec", track_exec):
                 dlg._on_accept()
 
@@ -188,7 +188,7 @@ class TestSaveMappingPrompt:
             exec_calls.append(True)
             return QDialog.DialogCode.Rejected
 
-        with patch("sleap_rtc.config.get_config", return_value=cfg):
+        with patch("sleap_connect.config.get_config", return_value=cfg):
             with patch.object(QDialog, "exec", track_exec):
                 dlg._on_accept()
 

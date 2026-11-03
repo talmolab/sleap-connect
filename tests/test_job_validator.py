@@ -4,8 +4,8 @@ import pytest
 from dataclasses import dataclass
 from pathlib import Path
 
-from sleap_rtc.jobs.spec import TrainJobSpec, TrackJobSpec
-from sleap_rtc.jobs.validator import (
+from sleap_connect.jobs.spec import TrainJobSpec, TrackJobSpec
+from sleap_connect.jobs.validator import (
     JobValidator,
     ValidationError,
     NUMERIC_CONSTRAINTS,

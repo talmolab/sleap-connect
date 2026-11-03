@@ -4,8 +4,8 @@ import asyncio
 
 import pytest
 
-from sleap_rtc.jobs.spec import TrainJobSpec
-from sleap_rtc.jobs.store import JobStore, JobStoreError
+from sleap_connect.jobs.spec import TrainJobSpec
+from sleap_connect.jobs.store import JobStore, JobStoreError
 
 
 @pytest.fixture

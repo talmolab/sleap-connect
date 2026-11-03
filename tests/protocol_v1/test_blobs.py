@@ -3,7 +3,7 @@
 import hashlib
 import threading
 
-from sleap_rtc.protocol_v1.blobs import (
+from sleap_connect.protocol_v1.blobs import (
     VERIFY_CHUNK_SIZE,
     BlobIndex,
     compute_chunk_hashes,

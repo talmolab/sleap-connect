@@ -17,15 +17,15 @@ from pathlib import Path
 import pytest
 import zmq
 
-from sleap_rtc.jobs.queue import JobQueue
-from sleap_rtc.jobs.spec import TrackJobSpec, TrainJobSpec
-from sleap_rtc.jobs.store import JobStore
-from sleap_rtc.protocol_v1.blobs import BlobIndex
-from sleap_rtc.protocol_v1.errors import JOB_NOT_FOUND, ProtocolError
-from sleap_rtc.protocol_v1.outputs import bare_run_name
-from sleap_rtc.protocol_v1.job_methods import JobMethods
-from sleap_rtc.protocol_v1 import job_methods as job_methods_module
-from sleap_rtc.protocol_v1.server import Connection, ProtocolV1Server
+from sleap_connect.jobs.queue import JobQueue
+from sleap_connect.jobs.spec import TrackJobSpec, TrainJobSpec
+from sleap_connect.jobs.store import JobStore
+from sleap_connect.protocol_v1.blobs import BlobIndex
+from sleap_connect.protocol_v1.errors import JOB_NOT_FOUND, ProtocolError
+from sleap_connect.protocol_v1.outputs import bare_run_name
+from sleap_connect.protocol_v1.job_methods import JobMethods
+from sleap_connect.protocol_v1 import job_methods as job_methods_module
+from sleap_connect.protocol_v1.server import Connection, ProtocolV1Server
 
 TERMINAL_STATES = ("completed", "failed", "canceled")
 
@@ -522,7 +522,7 @@ class TestMaterializeConfigContents:
         # The actual bug this closes: build_train_command only ever read
         # config_paths[config_index], and the client only ever sends
         # config_contents — so this raised IndexError before the fix.
-        from sleap_rtc.jobs.builder import CommandBuilder
+        from sleap_connect.jobs.builder import CommandBuilder
 
         spec = TrainJobSpec(config_contents=["centroid: yaml"])
 
@@ -911,7 +911,7 @@ class TestStopEarly:
         # sleap-nn outlives a worker restart; the new worker rebinds the
         # controller socket and sleap-nn's SUB reconnects on its own, so stop
         # still arrives over ZMQ (the fake exits 1 on SIGINT).
-        from sleap_rtc.jobs.process import reattach_all
+        from sleap_connect.jobs.process import reattach_all
 
         ports = {
             "controller": self._CONTROL_PORT + 2,
@@ -1161,7 +1161,7 @@ class TestResumeReattached:
         ]
 
     async def _start_then_restart_worker(self, store, tmp_path, spec, cmd):
-        from sleap_rtc.jobs.process import reattach_all
+        from sleap_connect.jobs.process import reattach_all
 
         first = _make_methods(store, tmp_path, cmd)
         job_id = (await first.submit({"spec": spec.to_dict()}, conn=None))["job_id"]
@@ -1225,7 +1225,7 @@ class TestResumeReattached:
     async def test_a_job_that_finished_while_no_worker_ran_is_finalized(
         self, store, spec, tmp_path
     ):
-        from sleap_rtc.jobs.process import is_alive
+        from sleap_connect.jobs.process import is_alive
 
         go = tmp_path / "go"
         cmd = self._job_cmd(go)
@@ -1725,7 +1725,7 @@ class TestReattachedEpochBackfill:
     async def test_epochs_logged_while_no_worker_ran_are_backfilled_once(
         self, store, tmp_path
     ):
-        from sleap_rtc.jobs.process import reattach_all
+        from sleap_connect.jobs.process import reattach_all
 
         go = tmp_path / "go"
         script = lambda ckpt_dir, run="centroid": _write_run(  # noqa: E731
@@ -2030,7 +2030,7 @@ class TestResumeQueued:
     submission order, by the next worker, rather than sitting "queued" forever."""
 
     async def _restart_with_one_running_two_queued(self, store, spec, tmp_path):
-        from sleap_rtc.jobs.process import reattach_all
+        from sleap_connect.jobs.process import reattach_all
 
         go = tmp_path / "go"
         blocker = [
@@ -2092,7 +2092,7 @@ class TestResumeQueued:
         # The running model's process didn't survive (marked failed by
         # reattach_all): its run's waiting models aren't re-queued; another
         # run's are.
-        from sleap_rtc.jobs.process import reattach_all
+        from sleap_connect.jobs.process import reattach_all
 
         lost = await store.create_job(
             "job-lost",

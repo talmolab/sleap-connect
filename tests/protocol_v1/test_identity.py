@@ -4,8 +4,8 @@ import sys
 
 import pytest
 
-from sleap_rtc.auth.keypair import public_key_from_b64, verify_signature
-from sleap_rtc.protocol_v1.identity import WorkerIdentity
+from sleap_connect.auth.keypair import public_key_from_b64, verify_signature
+from sleap_connect.protocol_v1.identity import WorkerIdentity
 
 
 class TestWorkerIdentity:

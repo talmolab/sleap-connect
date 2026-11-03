@@ -13,8 +13,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from sleap_rtc.jobs.spec import TrackJobSpec
-from sleap_rtc.worker.job_executor import JobExecutor
+from sleap_connect.jobs.spec import TrackJobSpec
+from sleap_connect.worker.job_executor import JobExecutor
 
 
 def _make_process(returncode: int = 0):
@@ -537,7 +537,7 @@ class TestCancelGraceConstant:
     """The SIGTERM→SIGKILL grace must be 5 seconds (brainstorm decision)."""
 
     def test_grace_constant_is_five_seconds(self):
-        from sleap_rtc.worker.job_executor import _CANCEL_GRACE_SECS
+        from sleap_connect.worker.job_executor import _CANCEL_GRACE_SECS
 
         assert _CANCEL_GRACE_SECS == 5, (
             "Brainstorm locked in 5 s grace before SIGKILL escalation. "
@@ -557,8 +557,8 @@ class TestCancelDuringTrack:
     async def test_cancel_during_track_emits_msg_job_failed(self, tmp_path):
         import signal as _signal
 
-        from sleap_rtc.jobs.spec import TrackJobSpec
-        from sleap_rtc.worker.job_executor import JobExecutor
+        from sleap_connect.jobs.spec import TrackJobSpec
+        from sleap_connect.worker.job_executor import JobExecutor
 
         spec = TrackJobSpec(
             data_path=str(tmp_path / "video.mp4"),
@@ -610,7 +610,7 @@ class TestCancelDuringTrack:
 
     def test_cancel_running_job_no_op_when_no_process(self):
         """``cancel_running_job`` must be a safe no-op when no process is running."""
-        from sleap_rtc.worker.job_executor import JobExecutor
+        from sleap_connect.worker.job_executor import JobExecutor
 
         executor = JobExecutor(worker=MagicMock(), capabilities=MagicMock())
         assert executor._running_process is None
@@ -625,8 +625,8 @@ class TestExecuteFromSpecTrackJobLogEmission:
 
     @pytest.mark.asyncio
     async def test_track_lines_emitted_as_msg_job_log(self, tmp_path):
-        from sleap_rtc.jobs.spec import TrackJobSpec
-        from sleap_rtc.worker.job_executor import JobExecutor
+        from sleap_connect.jobs.spec import TrackJobSpec
+        from sleap_connect.worker.job_executor import JobExecutor
 
         spec = TrackJobSpec(
             data_path=str(tmp_path / "video.mp4"),
@@ -700,7 +700,7 @@ class TestExecuteFromSpecTrackJobLogEmission:
         """Regression: training jobs must keep the legacy bare-line format
         because _run_training_async's on_log callback expects it.
         """
-        from sleap_rtc.worker.job_executor import JobExecutor
+        from sleap_connect.worker.job_executor import JobExecutor
 
         channel = MagicMock()
         channel.readyState = "open"

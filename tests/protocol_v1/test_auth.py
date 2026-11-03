@@ -1,6 +1,6 @@
 """Integration tests for pair.claim / auth.prove against a real WS server.
 
-Uses real Ed25519 keypairs (via sleap_rtc.auth.keypair) for the test
+Uses real Ed25519 keypairs (via sleap_connect.auth.keypair) for the test
 "client" side, and a real WorkerIdentity/TrustStore/PendingPairings backing
 a real ProtocolV1Server — the whole point is verifying real signatures
 against a real nonce exchanged over a real connection.
@@ -11,13 +11,13 @@ import asyncio
 import pytest
 import websockets
 
-from sleap_rtc.auth.keypair import generate_keypair, public_key_to_b64, sign_nonce
-from sleap_rtc.protocol_v1.auth import AuthMethods
-from sleap_rtc.protocol_v1.envelope import Hello, Req, parse_envelope
-from sleap_rtc.protocol_v1.identity import WorkerIdentity
-from sleap_rtc.protocol_v1.pairing import PendingPairings
-from sleap_rtc.protocol_v1.server import ProtocolV1Server
-from sleap_rtc.protocol_v1.trust_store import TrustStore
+from sleap_connect.auth.keypair import generate_keypair, public_key_to_b64, sign_nonce
+from sleap_connect.protocol_v1.auth import AuthMethods
+from sleap_connect.protocol_v1.envelope import Hello, Req, parse_envelope
+from sleap_connect.protocol_v1.identity import WorkerIdentity
+from sleap_connect.protocol_v1.pairing import PendingPairings
+from sleap_connect.protocol_v1.server import ProtocolV1Server
+from sleap_connect.protocol_v1.trust_store import TrustStore
 
 
 @pytest.fixture
@@ -325,7 +325,7 @@ class TestUnpairing:
             "echoed": {"x": 1}
         }
 
-        # As `sleap-rtc clients remove` would, from another process.
+        # As `sleap-connect clients remove` would, from another process.
         TrustStore(trust_store._path).remove([node_id])
 
         reply = await _call(ws, 3, "test.echo", {"x": 1})
@@ -346,7 +346,7 @@ class TestUnpairing:
         ws = await _paired(port, identity, pending_pairings, node_id)
         await _call(ws, 2, "test.subscribe")
 
-        from sleap_rtc.protocol_v1.envelope import Event
+        from sleap_connect.protocol_v1.envelope import Event
 
         await server_obj.events.publish(
             "job_1", Event(topic="job.log", seq=1, job_id="job_1", data={})

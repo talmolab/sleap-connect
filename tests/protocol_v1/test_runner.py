@@ -8,11 +8,11 @@ import iroh
 import pytest
 import websockets
 
-from sleap_rtc.auth.keypair import generate_keypair, public_key_to_b64
-from sleap_rtc.jobs.builder import DEFAULT_ZMQ_PORTS
-from sleap_rtc.protocol_v1.envelope import Hello, Req, parse_envelope
-from sleap_rtc.protocol_v1.iroh_transport import ALPN, IrohStreamTransport
-from sleap_rtc.protocol_v1.runner import start_worker_server
+from sleap_connect.auth.keypair import generate_keypair, public_key_to_b64
+from sleap_connect.jobs.builder import DEFAULT_ZMQ_PORTS
+from sleap_connect.protocol_v1.envelope import Hello, Req, parse_envelope
+from sleap_connect.protocol_v1.iroh_transport import ALPN, IrohStreamTransport
+from sleap_connect.protocol_v1.runner import start_worker_server
 
 
 async def _pair_and_call(ws_port, ticket_secret, node_id, method, params=None):
@@ -78,8 +78,8 @@ class TestStartWorkerServer:
     ):
         # Simulate a previous instance's job store showing a job as
         # "running" with no real process behind it (e.g. after a crash).
-        from sleap_rtc.jobs.spec import TrainJobSpec
-        from sleap_rtc.jobs.store import JobStore
+        from sleap_connect.jobs.spec import TrainJobSpec
+        from sleap_connect.jobs.store import JobStore
 
         async with JobStore(tmp_path / "jobs.sqlite") as store:
             await store.create_job("job-1", TrainJobSpec(config_path="/x.yaml"))
@@ -96,14 +96,14 @@ class TestStartWorkerServer:
 
 class TestFileManagerWiring:
     """fs.mounts/fs.list must be reachable once a FileManager is passed
-    through — this is what `sleap-rtc serve` does today (always, even with
+    through — this is what `sleap-connect serve` does today (always, even with
     zero configured mounts), after previously never passing one at all,
     which left every real client's unconditional fsMounts() call during
     pairing hitting `proto.unknown_method`.
     """
 
     async def test_fs_mounts_responds_instead_of_unknown_method(self, tmp_path):
-        from sleap_rtc.worker.file_manager import FileManager
+        from sleap_connect.worker.file_manager import FileManager
 
         worker = await start_worker_server(
             host="127.0.0.1", port=0, data_dir=tmp_path, file_manager=FileManager()
@@ -124,8 +124,8 @@ class TestFileManagerWiring:
             await worker.close()
 
     async def test_fs_mounts_reports_a_configured_mount(self, tmp_path):
-        from sleap_rtc.config import MountConfig
-        from sleap_rtc.worker.file_manager import FileManager
+        from sleap_connect.config import MountConfig
+        from sleap_connect.worker.file_manager import FileManager
 
         mount_dir = tmp_path / "data"
         mount_dir.mkdir()
@@ -311,7 +311,7 @@ class TestBlobServing:
             content = b"real end-to-end predictions bytes"
             f = tmp_path / "predictions.slp"
             f.write_bytes(content)
-            from sleap_rtc.protocol_v1.blobs import hash_file
+            from sleap_connect.protocol_v1.blobs import hash_file
 
             sha256, size = await hash_file(f)
             await worker.blob_index.register(sha256, str(f), size)
@@ -438,7 +438,7 @@ class TestAgentInfo:
 
 class TestWorkerInfoWiring:
     async def test_worker_info_is_served(self, tmp_path, monkeypatch):
-        from sleap_rtc.protocol_v1 import worker_info
+        from sleap_connect.protocol_v1 import worker_info
 
         monkeypatch.setattr(
             worker_info,

@@ -11,10 +11,10 @@ These tests verify that:
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from sleap_rtc.config import MountConfig
-from sleap_rtc.worker.job_executor import JobExecutor
-from sleap_rtc.worker.worker_class import RTCWorkerClient
-from sleap_rtc.protocol import MSG_JOB_SUBMIT, MSG_SEPARATOR
+from sleap_connect.config import MountConfig
+from sleap_connect.worker.job_executor import JobExecutor
+from sleap_connect.worker.worker_class import RTCWorkerClient
+from sleap_connect.protocol import MSG_JOB_SUBMIT, MSG_SEPARATOR
 
 
 # ── helpers ──────────────────────────────────────────────────────────────────
@@ -82,7 +82,7 @@ class TestExecuteFromSpecReporterOwnership:
         external_reporter = MagicMock()
         external_reporter.async_cleanup = AsyncMock()
 
-        with patch("sleap_rtc.worker.job_executor.ProgressReporter") as mock_cls, \
+        with patch("sleap_connect.worker.job_executor.ProgressReporter") as mock_cls, \
              patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=mock_process)):
             await executor.execute_from_spec(
                 mock_channel, ["echo", "done"], "job_1",
@@ -119,7 +119,7 @@ class TestExecuteFromSpecReporterOwnership:
         owned_reporter = MagicMock()
         owned_reporter.async_cleanup = AsyncMock()
 
-        with patch("sleap_rtc.worker.job_executor.ProgressReporter", return_value=owned_reporter), \
+        with patch("sleap_connect.worker.job_executor.ProgressReporter", return_value=owned_reporter), \
              patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=mock_process)):
             await executor.execute_from_spec(
                 mock_channel, ["echo", "done"], "job_1",
@@ -162,7 +162,7 @@ class TestPipelineReporter:
         pipeline_reporter.async_cleanup = AsyncMock()
         pipeline_reporter.restart_progress_listener = AsyncMock()
 
-        with patch("sleap_rtc.worker.worker_class.ProgressReporter", return_value=pipeline_reporter):
+        with patch("sleap_connect.worker.worker_class.ProgressReporter", return_value=pipeline_reporter):
             await worker.handle_job_submit(mock_channel, message)
 
         assert len(captured_reporters) == 2
@@ -188,7 +188,7 @@ class TestPipelineReporter:
         pipeline_reporter = MagicMock()
         pipeline_reporter.async_cleanup = AsyncMock()
 
-        with patch("sleap_rtc.worker.worker_class.ProgressReporter", return_value=pipeline_reporter):
+        with patch("sleap_connect.worker.worker_class.ProgressReporter", return_value=pipeline_reporter):
             await worker.handle_job_submit(mock_channel, message)
 
         pipeline_reporter.async_cleanup.assert_called_once()

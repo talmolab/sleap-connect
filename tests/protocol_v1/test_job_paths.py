@@ -5,23 +5,23 @@ from pathlib import Path
 
 import pytest
 
-from sleap_rtc.config import MountConfig
-from sleap_rtc.jobs.builder import CommandBuilder
-from sleap_rtc.jobs.queue import JobQueue
-from sleap_rtc.jobs.spec import TrackJobSpec, TrainJobSpec
-from sleap_rtc.jobs.store import JobStore
-from sleap_rtc.protocol_v1.errors import ProtocolError
-from sleap_rtc.protocol_v1.job_methods import JobMethods
-from sleap_rtc.protocol_v1.job_paths import JobPathPolicy, run_name_escapes
-from sleap_rtc.protocol_v1.server import ProtocolV1Server
-from sleap_rtc.protocol_v1.shared_folders import SharedFolderFileManager, SharedFolders
+from sleap_connect.config import MountConfig
+from sleap_connect.jobs.builder import CommandBuilder
+from sleap_connect.jobs.queue import JobQueue
+from sleap_connect.jobs.spec import TrackJobSpec, TrainJobSpec
+from sleap_connect.jobs.store import JobStore
+from sleap_connect.protocol_v1.errors import ProtocolError
+from sleap_connect.protocol_v1.job_methods import JobMethods
+from sleap_connect.protocol_v1.job_paths import JobPathPolicy, run_name_escapes
+from sleap_connect.protocol_v1.server import ProtocolV1Server
+from sleap_connect.protocol_v1.shared_folders import SharedFolderFileManager, SharedFolders
 
 
 @pytest.fixture
 def layout(tmp_path):
     """shared/ (shared, holds the worker's data dir), outside/, data dir with job-runs/."""
     shared = tmp_path / "shared"
-    data_dir = shared / ".sleap-rtc"
+    data_dir = shared / ".sleap-connect"
     runs = data_dir / "job-runs"
     outside = tmp_path / "outside"
     for d in (shared, runs, outside):
@@ -83,7 +83,7 @@ class TestRunNameOnWindows:
     def test_same_answers_with_windows_path_rules(self, monkeypatch):
         import ntpath
 
-        from sleap_rtc.protocol_v1 import job_paths
+        from sleap_connect.protocol_v1 import job_paths
 
         monkeypatch.setattr(job_paths.os, "path", ntpath)
         assert run_name_escapes("centroid") is False
@@ -100,7 +100,7 @@ class TestTrain:
         shared, outside, *_, policy = layout
         err = _refused(policy, Train(labels_path=str(outside / "labels.slp")))
         assert str(shared) in str(err)
-        assert f'sleap-rtc add-folder "{outside}"' in str(err)
+        assert f'sleap-connect add-folder "{outside}"' in str(err)
         assert err.data["field"] == "labels_path"
 
     def test_an_upload_without_a_path_is_allowed(self, layout):
@@ -281,7 +281,7 @@ class TestStatOutsideSharedFolders:
         shared, outside, data_dir = (
             tmp_path / "s",
             tmp_path / "o",
-            tmp_path / "s" / ".sleap-rtc",
+            tmp_path / "s" / ".sleap-connect",
         )
         data_dir.mkdir(parents=True)
         outside.mkdir()

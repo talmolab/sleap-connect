@@ -6,9 +6,9 @@ import cv2
 import numpy as np
 import pytest
 
-from sleap_rtc.protocol_v1.errors import FS_NOT_FOUND, MEDIA_UNREADABLE, ProtocolError
-from sleap_rtc.protocol_v1.media import MediaMethods, read_frame_jpeg
-from sleap_rtc.protocol_v1.server import ProtocolV1Server
+from sleap_connect.protocol_v1.errors import FS_NOT_FOUND, MEDIA_UNREADABLE, ProtocolError
+from sleap_connect.protocol_v1.media import MediaMethods, read_frame_jpeg
+from sleap_connect.protocol_v1.server import ProtocolV1Server
 
 N_FRAMES = 12
 

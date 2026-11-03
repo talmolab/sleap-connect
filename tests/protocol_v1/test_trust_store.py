@@ -1,6 +1,6 @@
 """Tests for TrustStore (persisted trusted-client allowlist)."""
 
-from sleap_rtc.protocol_v1.trust_store import TrustStore
+from sleap_connect.protocol_v1.trust_store import TrustStore
 
 
 class TestTrustStore:

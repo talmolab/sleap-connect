@@ -2,8 +2,8 @@
 
 import pytest
 
-from sleap_rtc.jobs.spec import TrainJobSpec, TrackJobSpec
-from sleap_rtc.jobs.builder import CommandBuilder, DEFAULT_ZMQ_PORTS
+from sleap_connect.jobs.spec import TrainJobSpec, TrackJobSpec
+from sleap_connect.jobs.builder import CommandBuilder, DEFAULT_ZMQ_PORTS
 
 
 class TestBuildTrainCommand:
