@@ -61,8 +61,9 @@ The full guide (connection routes, the Connect window, troubleshooting) is in th
 | `sleap-connect remove-folder FOLDER` | Stop sharing a folder (by path or label). |
 | `sleap-connect clients` | List paired devices: name, app, when paired, last seen. |
 | `sleap-connect clients remove NAME` | Unpair a device (by name or ID prefix). `--all` unpairs every device and cancels unused pairing codes. |
-| `sleap-connect doctor` | Check the machine's setup. |
+| `sleap-connect doctor` | Check this machine is ready to run a worker: Python, dependencies, GPU, sleap-nn. |
 | `sleap-connect shell-hook uninstall` | Remove the new-terminal reminder (`install` adds it back; set `SLEAP_CONNECT_NO_SHELL_HOOK=1` to never add it). |
+| `sleap-connect legacy …` | The older signaling-server workflow (accounts, rooms, `train`/`track`), being retired. The old top-level names still work. |
 
 ## How it works
 
@@ -104,7 +105,7 @@ To update, run the same command again with `--reinstall`.
 
 The older workflow connects through a signaling server with GitHub login and rooms, over WebRTC.
 It's still used by the [dashboard](https://talmolab.github.io/sleap-rtc/dashboard/index.html), the
-SLEAP GUI's Remote Training dialog, and the `sleap-connect train` / `sleap-connect track` commands. It
+SLEAP GUI's Remote Training dialog, and the `sleap-connect legacy train` / `sleap-connect legacy track` commands. It
 will be retired; sleap-app uses the pairing workflow above.
 
 <details>
@@ -118,9 +119,9 @@ will be retired; sleap-app uses the pairing workflow above.
 4. **Deploy a worker** — On your GPU machine:
 
    ```bash
-   sleap-connect login
-   sleap-connect config add-mount /path/to/your/data
-   sleap-connect worker --room <room-id>
+   sleap-connect legacy login
+   sleap-connect legacy config add-mount /path/to/your/data
+   sleap-connect legacy worker --room <room-id>
    ```
 
 5. **Submit a job** — In the dashboard, click **Submit Job** on your room card, select the worker, upload a config, and submit.
@@ -128,11 +129,11 @@ will be retired; sleap-app uses the pairing workflow above.
 **CLI**
 
 ```bash
-sleap-connect login                              # GitHub login (opens browser)
-sleap-connect config add-mount /path/to/your/data
-sleap-connect worker --room <room-id>            # on the GPU machine
-sleap-connect train --room <room-id> ...         # from your machine
-sleap-connect track --room <room-id> ...
+sleap-connect legacy login                       # GitHub login (opens browser)
+sleap-connect legacy config add-mount /path/to/your/data
+sleap-connect legacy worker --room <room-id>     # on the GPU machine
+sleap-connect legacy train --room <room-id> ...  # from your machine
+sleap-connect legacy track --room <room-id> ...
 ```
 
 **Docker**

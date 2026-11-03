@@ -1,4 +1,4 @@
-"""Remote inference client for sleap-RTC.
+"""Remote inference client for sleap-connect.
 
 Similar structure to RTCClient in client_class.py but specialized for inference.
 """

@@ -75,10 +75,12 @@ class TestCLIEntryPoint:
         runner = CliRunner()
         result = runner.invoke(cli, ["--help"])
         assert result.exit_code == 0
-        assert "worker" in result.output
-        assert "train" in result.output
-        assert "track" in result.output
-        assert "login" in result.output
+        for command in ("serve", "pair", "status", "legacy"):
+            assert command in result.output
+        legacy = runner.invoke(cli, ["legacy", "--help"])
+        assert legacy.exit_code == 0
+        for command in ("worker", "train", "track", "login"):
+            assert command in legacy.output
 
     def test_worker_help(self):
         """sleap-connect worker --help must exit 0."""
