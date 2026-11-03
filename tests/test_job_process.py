@@ -84,6 +84,34 @@ class TestSpawnDetached:
 
         assert log_path.exists()
 
+    async def test_a_process_that_already_exited_is_still_recorded(
+        self, store, spec, tmp_path, monkeypatch
+    ):
+        """On Windows a command that ends at once can be gone before its
+        start time is read (POSIX keeps a zombie). That must not fail the
+        job: it's recorded, and wait() still reports how it exited."""
+        import psutil
+
+        from sleap_connect.jobs import process as process_module
+
+        def _gone(pid):
+            raise psutil.NoSuchProcess(pid)
+
+        monkeypatch.setattr(process_module.psutil, "Process", _gone)
+        await store.create_job("job-1", spec)
+
+        process = await spawn_detached(
+            [sys.executable, "-c", "raise SystemExit(3)"],
+            job_id="job-1",
+            store=store,
+            log_path=tmp_path / "job-1.log",
+        )
+
+        assert await process.wait() == 3
+        record = await store.get_job("job-1")
+        assert record.pid == process.pid
+        assert record.process_started_at is not None
+
     async def test_kills_the_process_if_recording_it_fails(self, store, spec, tmp_path):
         """If store.set_process_info raises after the subprocess is already
         running, we have no other way to find it later — spawn_detached

@@ -35,6 +35,7 @@ import logging
 import os
 import signal
 import sys
+import time
 from pathlib import Path
 from typing import Dict, Optional, Sequence, Union
 
@@ -185,6 +186,14 @@ async def spawn_detached(
 
     try:
         started_at = psutil.Process(process.pid).create_time()
+    except psutil.NoSuchProcess:
+        # Already exited: a command that ends at once (an immediate error, or
+        # a test's no-op). On Windows its PID is gone straight away (POSIX
+        # keeps a zombie until it's waited on). Nothing is left to orphan,
+        # and the caller's wait() still reports its exit status, so record it
+        # and carry on rather than failing the job with a misleading error.
+        started_at = time.time()
+    try:
         await store.set_process_info(job_id, process.pid, started_at, str(log_path))
     except Exception:
         logging.warning(
