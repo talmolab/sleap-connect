@@ -132,6 +132,16 @@ class TestMigration:
         assert ".sleap-rtc" not in text
 
 
+def _plain(output: str) -> str:
+    """CLI output with colors, rich-click's box borders and line wrapping
+    removed, so a message can be matched however wide the terminal is."""
+    import re
+
+    text = re.sub(r"\x1b\[[0-9;]*m", "", output)
+    text = re.sub(r"[│╭╮╰╯─]", " ", text)
+    return " ".join(text.split())
+
+
 class TestCli:
     def test_says_what_moved(self, fake_home):
         from sleap_connect.cli import cli
@@ -139,7 +149,7 @@ class TestCli:
         _old_home(fake_home)
         result = CliRunner().invoke(cli, ["shell-hook", "status"])
         assert result.exit_code == 0, result.output
-        assert "Moved sleap-rtc's settings" in result.output
+        assert "Moved sleap-rtc's settings" in _plain(result.output)
         assert (fake_home / ".sleap-connect").is_dir()
 
     def test_stateful_commands_refuse_while_an_old_worker_runs(
@@ -152,10 +162,10 @@ class TestCli:
         try:
             result = CliRunner().invoke(cli, ["folders"])
             assert result.exit_code != 0
-            assert "sleap-connect serve --stop" in result.output
+            assert "sleap-connect serve --stop" in _plain(result.output)
             # Read-only commands still run, with the warning.
             result = CliRunner().invoke(cli, ["shell-hook", "status"])
             assert result.exit_code == 0
-            assert "still running" in result.output
+            assert "still running" in _plain(result.output)
         finally:
             daemon.release_pidfile(home.legacy_data_dir())
