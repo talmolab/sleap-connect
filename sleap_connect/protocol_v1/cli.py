@@ -666,7 +666,8 @@ def pair(addrs: tuple, ttl: int, data_dir: str, as_json: bool):
     click.echo(click.style("Pairing code", bold=True))
     click.echo(encode_pair_code(ticket))
     click.echo("")
-    click.echo("In SLEAP: Connect → Pair a worker → paste the code")
+    arrow = _glyph("→", "->")
+    click.echo(f"In SLEAP: Connect {arrow} Pair a worker {arrow} paste the code")
     click.echo(f"Expires in {ttl} seconds.")
     _warn_if_unreachable(data_dir_path, iroh_section, addrs)
 
@@ -703,7 +704,8 @@ def _print_startup_pair_code(data_dir: Path) -> None:
     mins = PAIR_CODE_TTL_SECS // 60
     click.echo(
         click.style("  Pair a device", bold=True)
-        + " — in SLEAP: Connect → Pair a worker → paste this code:"
+        + f" {_glyph('—', '-')} in SLEAP: Connect {_glyph('→', '->')} Pair a worker "
+        f"{_glyph('→', '->')} paste this code:"
     )
     click.echo(f"    {encode_pair_code(ticket)}")
     click.echo(
