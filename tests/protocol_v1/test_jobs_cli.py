@@ -19,8 +19,10 @@ from sleap_connect.jobs.spec import TrackJobSpec, TrainJobSpec
 from sleap_connect.jobs.store import JobStore
 from sleap_connect.protocol_v1 import daemon
 from sleap_connect.protocol_v1 import job_methods as job_methods_module
+from sleap_connect.protocol_v1.identity import WorkerIdentity
 from sleap_connect.protocol_v1.jobs_cli import jobs
 from sleap_connect.protocol_v1.runner import (
+    identity_path,
     job_log_dir,
     job_store_path,
     open_trust_store,
@@ -40,7 +42,19 @@ def _invoke(data_dir, *args):
     return CliRunner().invoke(jobs, [*args, "--data-dir", str(data_dir)])
 
 
+def _text(result) -> str:
+    """Output with rich's error-box borders and line wrapping undone."""
+    return " ".join(result.output.replace("│", " ").split())
+
+
+def _set_up_worker(data_dir):
+    """What `serve`/`pair` leave behind on the worker machine."""
+    WorkerIdentity(identity_path(data_dir))
+    return data_dir
+
+
 async def _seed_async(data_dir):
+    _set_up_worker(data_dir)
     log_dir = job_log_dir(data_dir)
     log_dir.mkdir(parents=True)
     async with JobStore(job_store_path(data_dir)) as store:
@@ -148,7 +162,7 @@ class TestJobsList:
         assert "labels_content" not in json.dumps(listing)
 
     def test_no_jobs_yet_creates_nothing(self, tmp_path):
-        result = _invoke(tmp_path)
+        result = _invoke(_set_up_worker(tmp_path))
 
         assert result.exit_code == 0
         assert "No jobs yet" in result.output
@@ -179,7 +193,31 @@ class TestJobsQueue:
         ]
 
     def test_empty(self, tmp_path):
-        assert "Nothing running or waiting" in _invoke(tmp_path, "queue").output
+        result = _invoke(_set_up_worker(tmp_path), "queue")
+
+        assert "Nothing running or waiting" in result.output
+
+
+class TestNotTheWorkerMachine:
+    @pytest.mark.parametrize(
+        "args",
+        [
+            (),
+            ("--json",),
+            ("queue",),
+            ("show", "job_x"),
+            ("logs", "job_x"),
+            ("stop", "job_x"),
+            ("cancel", "--queued"),
+        ],
+    )
+    def test_says_to_run_it_on_the_worker(self, tmp_path, args):
+        result = _invoke(tmp_path / "nothing-here", *args)
+
+        assert result.exit_code == 1
+        assert "No sleap-connect worker is set up on this machine" in _text(result)
+        assert "on the worker machine" in _text(result)
+        assert not (tmp_path / "nothing-here").exists()
 
 
 class TestJobsShow:
@@ -201,13 +239,13 @@ class TestJobsShow:
         result = _invoke(seeded, "show", "job_wait")
 
         assert result.exit_code == 1
-        assert "matches 2 jobs" in result.output
+        assert "matches 2 jobs" in _text(result)
 
     def test_unknown(self, seeded):
         result = _invoke(seeded, "show", "nope")
 
         assert result.exit_code == 1
-        assert 'No job matches "nope"' in result.output
+        assert 'No job matches "nope"' in _text(result)
 
     def test_json_has_the_spec_without_inline_labels(self, seeded):
         shown = json.loads(_invoke(seeded, "show", "job_done1", "--json").output)
@@ -249,8 +287,8 @@ class TestStopCancelWithoutWorker:
         result = _invoke(seeded, *args)
 
         assert result.exit_code == 1
-        assert "No worker is running" in result.output
-        assert "sleap-connect serve" in result.output
+        assert "No worker is running" in _text(result)
+        assert "sleap-connect serve" in _text(result)
 
     def test_already_finished_needs_no_worker(self, seeded):
         result = _invoke(seeded, "cancel", "job_done1")

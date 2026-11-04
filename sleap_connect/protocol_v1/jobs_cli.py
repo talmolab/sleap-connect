@@ -239,7 +239,7 @@ def jobs(ctx: click.Context, limit: int, as_json: bool, data_dir: Optional[str])
     ctx.obj = {"data_dir": data_dir}
     if ctx.invoked_subcommand is not None:
         return
-    data_dir_path = _data_dir(data_dir)
+    data_dir_path = _worker_data_dir(_data_dir(data_dir))
     records = _load_jobs(data_dir_path)
     shown = records[:limit] if limit > 0 else records
     names = _device_names(data_dir_path)
@@ -287,7 +287,23 @@ def _print_job_table(records: List[JobRecord], names: Dict[str, str]) -> None:
 
 def _parent_data_dir(ctx: click.Context, data_dir: Optional[str]) -> Path:
     """--data-dir given to the subcommand, else to `jobs` itself."""
-    return _data_dir(data_dir or (ctx.obj or {}).get("data_dir"))
+    return _worker_data_dir(_data_dir(data_dir or (ctx.obj or {}).get("data_dir")))
+
+
+def _worker_data_dir(data_dir: Path) -> Path:
+    """`data_dir`, if a worker has been set up there.
+
+    The jobs commands read the worker's own files, so they only work on the
+    worker machine. Run anywhere else, say so rather than "No jobs yet".
+    """
+    if not identity_path(data_dir).exists():
+        raise click.ClickException(
+            f"No sleap-connect worker is set up on this machine (nothing in "
+            f"{data_dir}). Run 'sleap-connect jobs' on the worker machine — the "
+            "one where you ran 'sleap-connect serve' — or manage jobs from "
+            "SLEAP's Connect window."
+        )
+    return data_dir
 
 
 # --- `jobs queue` ------------------------------------------------------------
