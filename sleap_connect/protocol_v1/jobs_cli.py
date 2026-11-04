@@ -641,7 +641,7 @@ async def _call_worker(data_dir: Path, calls: List[Tuple[str, dict]]) -> list:
 
     from sleap_connect.protocol_v1.envelope import Hello, Req, Res, parse_envelope
     from sleap_connect.protocol_v1.identity import WorkerIdentity
-    from sleap_connect.protocol_v1.runner import _package_version
+    from sleap_connect.protocol_v1.runner import worker_version
 
     identity = WorkerIdentity(identity_path(data_dir))
     address = _worker_address(data_dir)
@@ -669,7 +669,7 @@ async def _call_worker(data_dir: Path, calls: List[Tuple[str, dict]]) -> list:
                     proto={"min": 1, "max": 1},
                     agent={
                         "name": "sleap-connect-cli",
-                        "version": _package_version("sleap-connect"),
+                        "version": worker_version(),
                         "platform": sys.platform,
                     },
                     node_id=identity.node_id,

@@ -22,12 +22,14 @@ import signal
 import subprocess
 import sys
 import textwrap
+import threading
 from pathlib import Path
 import time
 from typing import Optional
 
 import rich_click as click
 
+from sleap_connect.jobs.sleap_nn import SleapNNCheck, check_sleap_nn
 from sleap_connect.protocol_v1 import daemon, shell_hook
 from sleap_connect.protocol_v1.runner import (
     DEFAULT_DATA_DIR,
@@ -268,6 +270,8 @@ def serve(
         )
 
     if not foreground and ready_file is None:
+        # Runs while the worker starts: importing sleap-nn takes seconds.
+        sleap_nn_result = _start_sleap_nn_check()
         _daemonize(
             daemon.serve_argv(
                 host=host,
@@ -281,6 +285,7 @@ def serve(
             ),
             data_dir_path,
         )
+        _print_sleap_nn_check(sleap_nn_result())
         message = shell_hook.auto_install(interactive=_can_ask())
         if message:
             click.echo("")
@@ -315,6 +320,104 @@ def serve(
         )
     finally:
         daemon.release_pidfile(data_dir_path)
+
+
+def _start_sleap_nn_check():
+    """Start `check_sleap_nn` in a thread; returns a function that waits for
+    its result (None when SLEAP_CONNECT_SKIP_SLEAP_NN_CHECK is set).
+    """
+    if os.environ.get("SLEAP_CONNECT_SKIP_SLEAP_NN_CHECK"):
+        return lambda: None
+    result: dict = {}
+    thread = threading.Thread(
+        target=lambda: result.update(check=check_sleap_nn()), daemon=True
+    )
+    thread.start()
+
+    def wait() -> Optional[SleapNNCheck]:
+        thread.join()
+        return result.get("check")
+
+    return wait
+
+
+async def _report_sleap_nn() -> None:
+    wait = _start_sleap_nn_check()
+    _print_sleap_nn_check(await asyncio.to_thread(wait))
+
+
+def _sleap_nn_device(check: SleapNNCheck) -> Optional[str]:
+    if check.torch is None:
+        return None
+    if check.cuda:
+        return f"GPU: {check.gpu}"
+    if check.mps:
+        return "Apple GPU"
+    return "no GPU found, jobs run on the CPU"
+
+
+def _print_sleap_nn_check(check: Optional[SleapNNCheck]) -> None:
+    """The line `serve` prints about the sleap-nn its jobs will run."""
+    if check is None:
+        return
+    click.echo("")
+    if check.ok:
+        where = "installed with the worker" if check.bundled else check.path
+        parts = [f"sleap-nn {check.version or '(version unknown)'} ({where})"]
+        device = _sleap_nn_device(check)
+        if device:
+            parts.append(device)
+        click.echo("  " + " · ".join(parts))
+        return
+    problem = "isn't installed" if check.path is None else f"can't start: {check.error}"
+    click.echo(
+        click.style(_glyph("⚠", "!") + f" sleap-nn {problem}", fg="yellow", bold=True)
+    )
+    click.echo("  Training and inference jobs will fail until this is fixed.")
+    hint = check.hint()
+    if hint:
+        click.echo(f"  {hint}")
+
+
+def print_sleap_nn_doctor_section() -> bool:
+    """The `doctor` sections on the GPU and the sleap-nn jobs run with.
+
+    Returns:
+        False if jobs can't run (no sleap-nn, or it can't start).
+    """
+    from sleap_connect.protocol_v1.worker_info import _detect_gpus
+
+    ok_mark = click.style("✓", fg="green")
+    click.echo("")
+    click.echo(click.style("GPU:", bold=True))
+    gpus = _detect_gpus()
+    if gpus["gpu_count"]:
+        click.echo(f"  GPU: {gpus['gpu_model']} {ok_mark}")
+        click.echo(f"  Memory: {gpus['gpu_memory_mb']} MB")
+        click.echo(f"  CUDA: {gpus['cuda_version']}")
+    else:
+        click.echo(f"  GPU: {click.style('none found', fg='yellow')}")
+
+    click.echo("")
+    click.echo(click.style("sleap-nn (runs the jobs):", bold=True))
+    check = check_sleap_nn()
+    if check.path is None:
+        click.echo(f"  sleap-nn: {click.style('✗ not installed', fg='red')}")
+        click.echo(f"  {check.hint()}")
+        return False
+    where = " (installed with sleap-connect)" if check.bundled else ""
+    click.echo(f"  Command: {check.path}{where}")
+    if check.error:
+        click.echo(f"  Starts: {click.style('✗ ' + check.error, fg='red')}")
+        click.echo(f"  {check.hint()}")
+        return False
+    click.echo(f"  Version: {check.version or 'unknown'} {ok_mark}")
+    if check.torch:
+        click.echo(f"  PyTorch: {check.torch}")
+        device = _sleap_nn_device(check)
+        style = "green" if check.cuda or check.mps else "yellow"
+        click.echo(f"  Trains on: {click.style(device, fg=style)}")
+    return True
 
 
 def _already_running_message(e: daemon.AlreadyRunningError, data_dir: Path) -> str:
@@ -418,6 +521,7 @@ async def _serve_async(
         enable_metrics=enable_metrics,
         iroh_online_timeout=IROH_ONLINE_TIMEOUT_SECS,
     )
+    sleap_nn_task = None
     try:
         click.echo(click.style("sleap-connect worker", bold=True))
         click.echo(f"  node_id:   {worker.identity.node_id}")
@@ -459,6 +563,9 @@ async def _serve_async(
 
         click.echo("")
         click.echo("Listening. Press Ctrl-C to stop.")
+        if ready_file is None:
+            # In the foreground (the background child's parent checks instead).
+            sleap_nn_task = asyncio.create_task(_report_sleap_nn())
         if ready_file is not None:
             daemon.write_ready(
                 ready_file,
@@ -473,6 +580,8 @@ async def _serve_async(
     except (KeyboardInterrupt, asyncio.CancelledError):
         pass
     finally:
+        if sleap_nn_task is not None:
+            sleap_nn_task.cancel()
         await worker.close()
 
 

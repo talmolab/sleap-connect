@@ -53,6 +53,19 @@ DEFAULT_PORT = 9631
 DEFAULT_BLOB_PORT_OFFSET = 1
 
 
+# The names this package has been published under (see pyproject.toml).
+DISTRIBUTION_NAMES = ("sleap-rtc", "sleap-connect")
+
+
+def worker_version() -> str:
+    """This worker's installed version, whichever name it was installed as."""
+    for name in DISTRIBUTION_NAMES:
+        version = _package_version(name)
+        if version != "unknown":
+            return version
+    return "unknown"
+
+
 def _package_version(name: str) -> str:
     """An installed package's version, or "unknown" (e.g. a bare checkout)."""
     try:
@@ -256,7 +269,7 @@ async def start_worker_server(
             blob_port=blob_port,
             blob_index=blob_index,
             sign_nonce=identity.sign,
-            agent_version=_package_version("sleap-connect"),
+            agent_version=worker_version(),
             agent_platform=sys.platform,
         )
         AuthMethods(server, identity, trust_store, pending_pairings)
