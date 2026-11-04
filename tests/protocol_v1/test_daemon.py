@@ -269,6 +269,54 @@ class TestDaemonize:
         assert not _accepts_connections(port)
         assert "Listening." in daemon.log_path(tmp_path).read_text()
 
+    def test_prints_a_pairing_code_that_pairs_with_it(self, tmp_path):
+        """Setup is one command: `serve` prints a code the worker accepts,
+        and the code isn't written to the background worker's log."""
+        import asyncio
+        import re
+
+        import websockets
+
+        from sleap_connect.auth.keypair import generate_keypair, public_key_to_b64
+        from sleap_connect.protocol_v1.envelope import Hello, Req, parse_envelope
+        from sleap_connect.protocol_v1.pair_code import decode_pair_code
+
+        port = _free_port()
+        started = _run_cli(*_serve_args(tmp_path, port))
+        assert started.returncode == 0, started.stdout + started.stderr
+        try:
+            codes = re.findall(r"sleap1[a-z2-7]+", started.stdout)
+            assert len(codes) == 1, started.stdout
+            assert "sleap-connect pair" in started.stdout
+            ticket = decode_pair_code(codes[0])
+
+            async def claim():
+                _, public_key = generate_keypair()
+                node_id = public_key_to_b64(public_key)
+                async with websockets.connect(f"ws://127.0.0.1:{port}") as ws:
+                    await ws.send(
+                        Hello(
+                            proto={"min": 1, "max": 1},
+                            agent={"name": "t", "version": "0", "platform": "t"},
+                            node_id=node_id,
+                            nonce="n",
+                        ).to_json()
+                    )
+                    await ws.recv()
+                    await ws.send(
+                        Req(
+                            id=1,
+                            method="pair.claim",
+                            params={"secret": ticket.secret, "node_id": node_id},
+                        ).to_json()
+                    )
+                    return parse_envelope(await ws.recv())
+
+            assert asyncio.run(claim()).result == {}
+            assert codes[0] not in daemon.log_path(tmp_path).read_text()
+        finally:
+            _run_cli("serve", "--stop", "--data-dir", str(tmp_path))
+
     def test_refuses_a_second_worker_on_the_same_data_dir(self, tmp_path):
         started = _run_cli(*_serve_args(tmp_path, _free_port()))
         assert started.returncode == 0, started.stdout + started.stderr
