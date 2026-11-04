@@ -3,7 +3,8 @@
 Remote training and inference for [SLEAP](https://sleap.ai): run `sleap-nn` on a GPU machine
 from [sleap-app](https://app.sleap.ai), with no account or server in between.
 
-> Formerly `sleap-rtc`. The `sleap-rtc` command still works as an alias, and an existing `~/.sleap-rtc`
+> Formerly `sleap-rtc`, and still installed from PyPI under that name (`sleap-rtc`), for now. It
+> installs the `sleap-connect` command, with `sleap-rtc` as an alias. An existing `~/.sleap-rtc`
 > folder (paired devices, shared folders, jobs) moves to `~/.sleap-connect` the first time you run `sleap-connect`.
 
 ## Quick start
@@ -13,7 +14,7 @@ the training and inference jobs, along with the worker; `--torch-backend auto` p
 for your GPU:
 
 ```bash
-uv tool install --python 3.11 "sleap-connect[nn]" --torch-backend auto
+uv tool install --python 3.11 "sleap-rtc[nn]" --torch-backend auto
 ```
 
 Check the machine is ready with `sleap-connect doctor`: it shows the GPU, and whether sleap-nn can start.
@@ -90,24 +91,25 @@ Pick a PyTorch build explicitly instead of `--torch-backend auto`:
 
 ```bash
 # CUDA GPU (here CUDA 12.8)
-uv tool install --python 3.11 "sleap-connect[nn]" --torch-backend cu128
+uv tool install --python 3.11 "sleap-rtc[nn]" --torch-backend cu128
 
 # CPU only
-uv tool install --python 3.11 "sleap-connect[nn]" --torch-backend cpu
+uv tool install --python 3.11 "sleap-rtc[nn]" --torch-backend cpu
 ```
 
 Already have sleap-nn installed on its own (`uv tool install sleap-nn`)? Install the worker without the
-extra, `uv tool install sleap-connect`, and it runs the `sleap-nn` on your PATH. One installed with the
+extra, `uv tool install sleap-rtc`, and it runs the `sleap-nn` on your PATH. One installed with the
 worker is used first.
 
 The latest development version, from `main`:
 
 ```bash
-uv tool install --python 3.11 "sleap-connect[nn] @ git+https://github.com/talmolab/sleap-connect" \
+uv tool install --python 3.11 "sleap-rtc[nn] @ git+https://github.com/talmolab/sleap-connect" \
   --torch-backend auto
 ```
 
-To update, run the same command again with `--reinstall`. On a fresh Linux container, sleap-nn may
+To update, run the same command again with `--reinstall`. If you installed it from git as
+`sleap-connect` before, remove that first (`uv tool uninstall sleap-connect`): both install the same commands. On a fresh Linux container, sleap-nn may
 also need system libraries: `apt-get install -y libegl1 libgl1 libfontconfig1` (`sleap-connect
 doctor` names the one that's missing).
 

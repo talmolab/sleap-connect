@@ -1,7 +1,7 @@
 """Which `sleap-nn` the worker runs its jobs with, and whether it can start.
 
 Two ways to have one: installed together with the worker (`uv tool install
-"sleap-connect[nn]"`), which puts it next to this Python but not on PATH
+"sleap-rtc[nn]"`), which puts it next to this Python but not on PATH
 (uv only exposes the tool's own commands), or installed on its own (`uv tool
 install sleap-nn`), which puts it on PATH. The bundled one wins: it's the
 one installed for this worker.
@@ -90,7 +90,7 @@ class SleapNNCheck:
         """What to do about a problem, in a sentence."""
         if self.path is None:
             return (
-                'Install it with the worker: uv tool install "sleap-connect[nn]" '
+                'Install it with the worker: uv tool install "sleap-rtc[nn]" '
                 "--torch-backend auto --reinstall"
             )
         if self.error and "cannot open shared object file" in self.error:
