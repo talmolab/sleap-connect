@@ -1,5 +1,7 @@
-"""Unified CLI for sleap-RTC using rich-click."""
+"""Unified CLI for sleap-connect using rich-click."""
 
+import copy
+import functools
 import json
 import logging
 import os
@@ -34,41 +36,30 @@ click.rich_click.GROUP_ARGUMENTS_OPTIONS = True
 click.rich_click.SHOW_METAVARS_COLUMN = True
 click.rich_click.APPEND_METAVARS_HELP = True
 
-# Command groups for organized help output
-click.rich_click.COMMAND_GROUPS = {
-    "sleap-connect": [
-        {
-            "name": "Authentication",
-            "commands": ["login", "logout", "whoami", "key"],
-        },
-        {
-            "name": "Rooms & Tokens",
-            "commands": ["room", "token"],
-        },
-        {
-            "name": "Worker & Client",
-            "commands": ["worker", "train", "track"],
-        },
-        {
-            "name": "Protocol v1 Worker (no signaling server)",
-            "commands": ["serve", "pair"],
-        },
-        {
-            "name": "Utilities",
-            "commands": ["tui", "status", "doctor", "credentials", "config"],
-        },
-        {
-            "name": "Experimental",
-            "commands": ["test"],
-        },
-    ],
-    "sleap-connect test": [
-        {
-            "name": "File Browser Tools",
-            "commands": ["browse", "resolve-paths"],
-        },
-    ],
-}
+# Command groups for organized help output. Keyed by the command path as
+# typed, so the `sleap-rtc` alias gets the same layout.
+_TOP_GROUPS = [
+    {"name": "Worker", "commands": ["serve", "status", "doctor", "shell-hook"]},
+    {"name": "Devices", "commands": ["pair", "clients"]},
+    {"name": "Shared folders", "commands": ["folders", "add-folder", "remove-folder"]},
+    {"name": "Legacy", "commands": ["legacy"]},
+]
+_LEGACY_GROUPS = [
+    {
+        "name": "Accounts",
+        "commands": ["login", "logout", "whoami", "key", "credentials"],
+    },
+    {"name": "Rooms & tokens", "commands": ["room", "token"]},
+    {"name": "Worker & jobs", "commands": ["worker", "train", "track"]},
+    {"name": "Tools", "commands": ["doctor", "config", "tui", "test"]},
+]
+_TEST_GROUPS = [{"name": "File Browser Tools", "commands": ["browse", "resolve-paths"]}]
+click.rich_click.COMMAND_GROUPS = {}
+for _prog in ("sleap-connect", "sleap-rtc"):
+    click.rich_click.COMMAND_GROUPS[_prog] = _TOP_GROUPS
+    click.rich_click.COMMAND_GROUPS[f"{_prog} legacy"] = _LEGACY_GROUPS
+    click.rich_click.COMMAND_GROUPS[f"{_prog} legacy test"] = _TEST_GROUPS
+    click.rich_click.COMMAND_GROUPS[f"{_prog} test"] = _TEST_GROUPS
 
 from sleap_connect.rtc_worker import run_RTCworker
 from sleap_connect.rtc_client import run_RTCclient, run_job_submit
@@ -192,6 +183,16 @@ _STATEFUL_COMMANDS = {
 @click.group()
 @click.pass_context
 def cli(ctx):
+    """Run sleap-nn training and inference on this machine for sleap-app.
+
+    Start the worker in your data folder, pair sleap-app with the code
+    'pair' prints, then train or run inference from the app.
+
+    Example:
+        cd /path/to/data && sleap-connect serve
+        sleap-connect pair
+        sleap-connect status
+    """
     from sleap_connect import home
 
     try:
@@ -1500,14 +1501,14 @@ def key_show():
 def show_worker_help():
     """Display"""
     help_text = """
-    sleap-connect worker - Set this machine as a sleap-RTC worker node.
+    sleap-connect worker - Set this machine as a sleap-connect worker node.
 
     Usage:
       sleap-connect worker
 
     Tips:
       - This machine should have a GPU available for optimal model inference.
-      - Ensure that the sleap-RTC Client is running and accessible.
+      - Ensure that the sleap-connect Client is running and accessible.
       - Make sure to copy the session-string after connecting to the signaling
         server.
     """
@@ -1583,7 +1584,7 @@ def worker(
     room_secret,
     max_reconnect_time,
 ):
-    """Start the sleap-RTC worker node.
+    """Start the sleap-connect worker node.
 
     Authentication (recommended setup):
 
@@ -2693,19 +2694,21 @@ def tui(room, room_secret):
 
 @cli.command(name="doctor")
 def doctor():
-    """Check system configuration and connectivity.
+    """Check that this machine is ready to run a worker.
 
-    Runs diagnostic checks to verify:
-    - Python version and environment
-    - Required dependencies
-    - Network connectivity to signaling server
-    - Credential file permissions
-    - Configuration file status
-
-    Use this command to troubleshoot connection issues.
+    Checks Python, the worker's dependencies, the GPU, sleap-nn, and the
+    worker's own state (identity, paired devices). The older signaling-server
+    workflow's checks are under 'sleap-connect legacy doctor'.
 
     Example:
         sleap-connect doctor
+    """
+    _run_doctor(include_legacy=False)
+
+
+def _run_doctor(include_legacy: bool) -> None:
+    """The doctor checks; `include_legacy` adds the signaling-server,
+    credentials, config-file and mounts checks of the older workflow.
     """
     import platform
 
@@ -2742,95 +2745,98 @@ def doctor():
             click.echo(f"  {dep}: {click.style('✗ missing', fg='red')}")
             all_ok = False
 
-    # Network connectivity
-    click.echo("")
-    click.echo(click.style("Network Connectivity:", bold=True))
-    from sleap_connect.config import get_config
+    if include_legacy:
+        # Network connectivity
+        click.echo("")
+        click.echo(click.style("Network Connectivity:", bold=True))
+        from sleap_connect.config import get_config
 
-    config = get_config()
-    server_url = config.get_http_url()
-    click.echo(f"  Signaling server: {server_url}")
+        config = get_config()
+        server_url = config.get_http_url()
+        click.echo(f"  Signaling server: {server_url}")
 
-    try:
-        response = requests.get(f"{server_url}/health", timeout=10)
-        if response.status_code == 200:
-            click.echo(f"  Health check: {click.style('✓ reachable', fg='green')}")
-        else:
+        try:
+            response = requests.get(f"{server_url}/health", timeout=10)
+            if response.status_code == 200:
+                click.echo(f"  Health check: {click.style('✓ reachable', fg='green')}")
+            else:
+                click.echo(
+                    f"  Health check: {click.style(f'✗ HTTP {response.status_code}', fg='yellow')}"
+                )
+                all_ok = False
+        except requests.exceptions.Timeout:
+            click.echo(f"  Health check: {click.style('✗ timeout', fg='red')}")
+            all_ok = False
+        except requests.exceptions.ConnectionError:
             click.echo(
-                f"  Health check: {click.style(f'✗ HTTP {response.status_code}', fg='yellow')}"
+                f"  Health check: {click.style('✗ connection failed', fg='red')}"
             )
             all_ok = False
-    except requests.exceptions.Timeout:
-        click.echo(f"  Health check: {click.style('✗ timeout', fg='red')}")
-        all_ok = False
-    except requests.exceptions.ConnectionError:
-        click.echo(f"  Health check: {click.style('✗ connection failed', fg='red')}")
-        all_ok = False
-    except Exception as e:
-        click.echo(f"  Health check: {click.style(f'✗ {e}', fg='red')}")
-        all_ok = False
+        except Exception as e:
+            click.echo(f"  Health check: {click.style(f'✗ {e}', fg='red')}")
+            all_ok = False
 
-    # Credential file
-    click.echo("")
-    click.echo(click.style("Credentials:", bold=True))
-    from sleap_connect.auth.credentials import CREDENTIALS_PATH, is_logged_in
+        # Credential file
+        click.echo("")
+        click.echo(click.style("Credentials:", bold=True))
+        from sleap_connect.auth.credentials import CREDENTIALS_PATH, is_logged_in
 
-    click.echo(f"  File: {CREDENTIALS_PATH}")
+        click.echo(f"  File: {CREDENTIALS_PATH}")
 
-    if CREDENTIALS_PATH.exists():
-        click.echo(f"  Exists: {click.style('✓', fg='green')}")
-        # Check permissions
-        import stat
+        if CREDENTIALS_PATH.exists():
+            click.echo(f"  Exists: {click.style('✓', fg='green')}")
+            # Check permissions
+            import stat
 
-        file_stat = CREDENTIALS_PATH.stat()
-        mode = file_stat.st_mode
-        if mode & stat.S_IRWXO:  # Others have any permissions
+            file_stat = CREDENTIALS_PATH.stat()
+            mode = file_stat.st_mode
+            if mode & stat.S_IRWXO:  # Others have any permissions
+                click.echo(
+                    f"  Permissions: {click.style('✗ world-readable (insecure)', fg='yellow')}"
+                )
+            else:
+                click.echo(f"  Permissions: {click.style('✓ secure', fg='green')}")
+
+            if is_logged_in():
+                click.echo(f"  Logged in: {click.style('✓', fg='green')}")
+            else:
+                click.echo(f"  Logged in: {click.style('✗ no valid JWT', fg='yellow')}")
+        else:
+            click.echo(f"  Exists: {click.style('✗ not found', fg='yellow')}")
+            click.echo("  Run 'sleap-connect login' to create credentials")
+
+        # Account key
+        from sleap_connect.auth.credentials import get_account_key
+
+        env_key = os.environ.get("SLEAP_RTC_ACCOUNT_KEY")
+        stored_key = get_account_key()
+        if env_key:
+            masked = env_key[:16] + "..." if len(env_key) > 16 else env_key
             click.echo(
-                f"  Permissions: {click.style('✗ world-readable (insecure)', fg='yellow')}"
+                f"  Account key: {masked} {click.style('✓ (from env var)', fg='green')}"
+            )
+        elif stored_key:
+            masked = stored_key[:16] + "..." if len(stored_key) > 16 else stored_key
+            click.echo(
+                f"  Account key: {masked} {click.style('✓ (from credentials file)', fg='green')}"
             )
         else:
-            click.echo(f"  Permissions: {click.style('✓ secure', fg='green')}")
+            click.echo(f"  Account key: {click.style('✗ not found', fg='yellow')}")
+            click.echo(
+                "  Run 'sleap-connect login' then 'sleap-connect key create --save', "
+                "or set SLEAP_RTC_ACCOUNT_KEY env var"
+            )
 
-        if is_logged_in():
-            click.echo(f"  Logged in: {click.style('✓', fg='green')}")
+        # Config file
+        click.echo("")
+        click.echo(click.style("Configuration:", bold=True))
+        config_file = Path("sleap-rtc.toml")
+        if config_file.exists():
+            click.echo(
+                f"  Config file: {config_file.absolute()} {click.style('✓', fg='green')}"
+            )
         else:
-            click.echo(f"  Logged in: {click.style('✗ no valid JWT', fg='yellow')}")
-    else:
-        click.echo(f"  Exists: {click.style('✗ not found', fg='yellow')}")
-        click.echo("  Run 'sleap-connect login' to create credentials")
-
-    # Account key
-    from sleap_connect.auth.credentials import get_account_key
-
-    env_key = os.environ.get("SLEAP_RTC_ACCOUNT_KEY")
-    stored_key = get_account_key()
-    if env_key:
-        masked = env_key[:16] + "..." if len(env_key) > 16 else env_key
-        click.echo(
-            f"  Account key: {masked} {click.style('✓ (from env var)', fg='green')}"
-        )
-    elif stored_key:
-        masked = stored_key[:16] + "..." if len(stored_key) > 16 else stored_key
-        click.echo(
-            f"  Account key: {masked} {click.style('✓ (from credentials file)', fg='green')}"
-        )
-    else:
-        click.echo(f"  Account key: {click.style('✗ not found', fg='yellow')}")
-        click.echo(
-            "  Run 'sleap-connect login' then 'sleap-connect key create --save', "
-            "or set SLEAP_RTC_ACCOUNT_KEY env var"
-        )
-
-    # Config file
-    click.echo("")
-    click.echo(click.style("Configuration:", bold=True))
-    config_file = Path("sleap-rtc.toml")
-    if config_file.exists():
-        click.echo(
-            f"  Config file: {config_file.absolute()} {click.style('✓', fg='green')}"
-        )
-    else:
-        click.echo(f"  Config file: {click.style('using defaults', fg='cyan')}")
+            click.echo(f"  Config file: {click.style('using defaults', fg='cyan')}")
 
     # GPU
     click.echo("")
@@ -2874,42 +2880,45 @@ def doctor():
         click.echo(f"  sleap-nn: {click.style('⚠ not installed', fg='yellow')}")
         click.echo("  Required for training jobs. Install with: pip install sleap-nn")
 
-    # Data mounts & working directory
-    click.echo("")
-    click.echo(click.style("Data Mounts & Working Directory:", bold=True))
-    worker_io = config.get_worker_io_config()
+    if include_legacy:
+        # Data mounts & working directory
+        click.echo("")
+        click.echo(click.style("Data Mounts & Working Directory:", bold=True))
+        worker_io = config.get_worker_io_config()
 
-    if worker_io.working_dir:
-        wd = Path(worker_io.working_dir)
-        if wd.exists() and wd.is_dir():
-            click.echo(f"  Working dir: {wd} {click.style('✓', fg='green')}")
-        else:
-            click.echo(f"  Working dir: {wd} {click.style('✗ not found', fg='red')}")
-            all_ok = False
-    else:
-        click.echo(
-            f"  Working dir: {click.style('not configured (using cwd)', fg='cyan')}"
-        )
-
-    mounts = worker_io.mounts
-    if mounts:
-        for mount in mounts:
-            mount_path = Path(mount.path)
-            label = mount.label or mount.path
-            if mount_path.exists() and mount_path.is_dir():
-                click.echo(
-                    f"  Mount '{label}': {mount.path} {click.style('✓', fg='green')}"
-                )
+        if worker_io.working_dir:
+            wd = Path(worker_io.working_dir)
+            if wd.exists() and wd.is_dir():
+                click.echo(f"  Working dir: {wd} {click.style('✓', fg='green')}")
             else:
                 click.echo(
-                    f"  Mount '{label}': {mount.path} {click.style('✗ not found', fg='red')}"
+                    f"  Working dir: {wd} {click.style('✗ not found', fg='red')}"
                 )
                 all_ok = False
-    else:
-        click.echo(f"  Mounts: {click.style('none configured', fg='cyan')}")
-        click.echo(
-            "  Use 'sleap-connect config add-mount /path \"Label\"' to add data directories"
-        )
+        else:
+            click.echo(
+                f"  Working dir: {click.style('not configured (using cwd)', fg='cyan')}"
+            )
+
+        mounts = worker_io.mounts
+        if mounts:
+            for mount in mounts:
+                mount_path = Path(mount.path)
+                label = mount.label or mount.path
+                if mount_path.exists() and mount_path.is_dir():
+                    click.echo(
+                        f"  Mount '{label}': {mount.path} {click.style('✓', fg='green')}"
+                    )
+                else:
+                    click.echo(
+                        f"  Mount '{label}': {mount.path} {click.style('✗ not found', fg='red')}"
+                    )
+                    all_ok = False
+        else:
+            click.echo(f"  Mounts: {click.style('none configured', fg='cyan')}")
+            click.echo(
+                "  Use 'sleap-connect config add-mount /path \"Label\"' to add data directories"
+            )
 
     # Protocol v1 worker (item 1.5/1.6 — pairing/jobs, no signaling server)
     from sleap_connect.protocol_v1.cli import print_doctor_section
@@ -3879,6 +3888,83 @@ cli.add_command(protocol_v1_remove_folder)
 cli.add_command(protocol_v1_folders)
 cli.add_command(protocol_v1_status)
 cli.add_command(protocol_v1_shell_hook)
+
+
+# =============================================================================
+# Legacy group: the older signaling-server workflow (accounts, rooms,
+# train/track), being retired. Its commands live under `sleap-connect legacy`;
+# the old top-level names keep working but are hidden from the main help.
+# =============================================================================
+
+LEGACY_COMMANDS = [
+    "login",
+    "logout",
+    "whoami",
+    "key",
+    "credentials",
+    "room",
+    "token",
+    "worker",
+    "train",
+    "track",
+    "config",
+    "tui",
+    "test",
+    # Already hidden aliases of the above.
+    "client-train",
+    "client",
+    "client-track",
+    "browse",
+    "resolve-paths",
+]
+
+
+@cli.group(name="legacy")
+def legacy():
+    """The older workflow through the signaling server (being retired).
+
+    Accounts, rooms and tokens, the room-based worker, and the 'train' /
+    'track' commands that submit to it. sleap-app pairs with
+    'sleap-connect serve' instead and doesn't need any of these.
+    """
+
+
+@legacy.command(name="doctor")
+def legacy_doctor():
+    """Check this machine, including the older workflow's setup.
+
+    Everything 'sleap-connect doctor' checks, plus connectivity to the
+    signaling server, credentials, config files and data mounts.
+    """
+    _run_doctor(include_legacy=True)
+
+
+def _moved_to_legacy(command: click.Command, name: str) -> click.Command:
+    """A hidden top-level copy of legacy `command` that still works, and says
+    where it lives now.
+    """
+    alias = copy.copy(command)
+    alias.hidden = True
+    callback = command.callback
+
+    def noted(*args, **kwargs):
+        click.echo(
+            click.style(
+                f"Note: 'sleap-connect {name}' is now 'sleap-connect legacy {name}'.",
+                dim=True,
+            ),
+            err=True,
+        )
+        return callback(*args, **kwargs) if callback else None
+
+    alias.callback = functools.update_wrapper(noted, callback) if callback else noted
+    return alias
+
+
+for _name in LEGACY_COMMANDS:
+    _command = cli.commands[_name]
+    legacy.add_command(_command, _name)
+    cli.commands[_name] = _moved_to_legacy(_command, _name)
 
 
 if __name__ == "__main__":

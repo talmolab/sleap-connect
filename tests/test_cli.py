@@ -184,14 +184,37 @@ class TestCommandGroups:
     """Tests for CLI command organization."""
 
     def test_main_help_shows_command_groups(self, runner):
-        """Should show organized command groups in main help."""
-        result = runner.invoke(cli, ["--help"])
+        """Main help is organized around the worker; legacy commands are
+        grouped under `legacy`."""
+        # Help groups are keyed by the program name, as when installed.
+        result = runner.invoke(cli, ["--help"], prog_name="sleap-connect")
         assert result.exit_code == 0
-        # Should have major command groups
-        assert "login" in result.output
-        assert "train" in result.output
-        assert "track" in result.output
-        assert "worker" in result.output
+        for group in ("Worker", "Devices", "Shared folders", "Legacy"):
+            assert group in result.output
+        for command in ("serve", "status", "pair", "clients", "add-folder", "legacy"):
+            assert command in result.output
+        # Legacy commands are listed under `legacy`, not at the top.
+        assert "login" not in result.output
+        assert "track" not in result.output
+        legacy = runner.invoke(cli, ["legacy", "--help"], prog_name="sleap-connect")
+        assert "Rooms & tokens" in legacy.output
+        for command in ("login", "train", "track", "worker", "room", "token"):
+            assert command in legacy.output
+
+    def test_old_top_level_legacy_names_still_work(self, runner):
+        """The legacy commands' old top-level names still run, and say
+        where they live now."""
+        result = runner.invoke(cli, ["worker", "--help"])
+        assert result.exit_code == 0
+        assert "--room" in result.output
+        result = runner.invoke(cli, ["config", "path"])
+        assert "is now 'sleap-connect legacy config'" in result.output
+
+    def test_alias_gets_the_same_help_groups(self):
+        """`sleap-rtc` (the old name) shows the same layout."""
+        result = CliRunner().invoke(cli, ["--help"], prog_name="sleap-rtc")
+        assert result.exit_code == 0
+        assert "Shared folders" in result.output
 
     def test_hidden_aliases_not_in_main_help(self, runner):
         """Deprecated aliases should be hidden from main help."""
@@ -386,7 +409,7 @@ class TestConfigCommand:
 
     def test_config_show_json(self, runner):
         """Should output JSON when --json flag used."""
-        result = runner.invoke(cli, ["config", "show", "--json"])
+        result = runner.invoke(cli, ["legacy", "config", "show", "--json"])
         assert result.exit_code == 0
         # Should be valid JSON
         import json as json_module

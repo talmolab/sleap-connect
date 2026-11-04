@@ -14,7 +14,7 @@ def test_doctor_runs_without_error(mock_requests):
     mock_requests.get.return_value = mock_response
 
     runner = CliRunner()
-    result = runner.invoke(cli, ["doctor"])
+    result = runner.invoke(cli, ["legacy", "doctor"])
     assert result.exit_code == 0
 
 
@@ -26,7 +26,7 @@ def test_doctor_shows_gpu_section(mock_requests):
     mock_requests.get.return_value = mock_response
 
     runner = CliRunner()
-    result = runner.invoke(cli, ["doctor"])
+    result = runner.invoke(cli, ["legacy", "doctor"])
     assert "GPU:" in result.output
 
 
@@ -38,7 +38,7 @@ def test_doctor_shows_training_deps_section(mock_requests):
     mock_requests.get.return_value = mock_response
 
     runner = CliRunner()
-    result = runner.invoke(cli, ["doctor"])
+    result = runner.invoke(cli, ["legacy", "doctor"])
     assert "Training Dependencies:" in result.output
 
 
@@ -50,7 +50,7 @@ def test_doctor_shows_mounts_section(mock_requests):
     mock_requests.get.return_value = mock_response
 
     runner = CliRunner()
-    result = runner.invoke(cli, ["doctor"])
+    result = runner.invoke(cli, ["legacy", "doctor"])
     assert "Data Mounts" in result.output
 
 
@@ -63,7 +63,7 @@ def test_doctor_shows_account_key_from_env(mock_requests):
 
     runner = CliRunner()
     result = runner.invoke(
-        cli, ["doctor"], env={"SLEAP_RTC_ACCOUNT_KEY": "slp_acct_test123456789"}
+        cli, ["legacy", "doctor"], env={"SLEAP_RTC_ACCOUNT_KEY": "slp_acct_test123456789"}
     )
     assert "from env var" in result.output
 
@@ -77,6 +77,20 @@ def test_doctor_shows_account_key_missing(mock_requests):
 
     with patch("sleap_connect.auth.credentials.get_account_key", return_value=None):
         runner = CliRunner()
-        result = runner.invoke(cli, ["doctor"], env={"SLEAP_RTC_ACCOUNT_KEY": ""})
+        result = runner.invoke(cli, ["legacy", "doctor"], env={"SLEAP_RTC_ACCOUNT_KEY": ""})
     # Should show not found or the fix instructions
     assert "Account key:" in result.output
+
+
+@patch("sleap_connect.cli.requests")
+def test_doctor_checks_the_worker_without_the_legacy_setup(mock_requests):
+    """`sleap-connect doctor` covers what a worker needs; the signaling
+    server, credentials, config and mounts are `legacy doctor`'s."""
+    runner = CliRunner()
+    result = runner.invoke(cli, ["doctor"])
+    assert result.exit_code == 0
+    for section in ("Python Environment", "Dependencies", "GPU", "Worker:"):
+        assert section in result.output
+    for section in ("Network Connectivity", "Credentials", "Data Mounts"):
+        assert section not in result.output
+    mock_requests.get.assert_not_called()

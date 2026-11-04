@@ -26,7 +26,7 @@ from pathlib import Path
 import time
 from typing import Optional
 
-import click
+import rich_click as click
 
 from sleap_connect.protocol_v1 import daemon, shell_hook
 from sleap_connect.protocol_v1.runner import (
@@ -211,33 +211,26 @@ def serve(
     stop: bool,
     ready_file: Optional[str],
 ):
-    """Run this machine as a sleap-connect worker (protocol v1).
+    """Start the worker on this machine, sharing a folder with paired devices.
 
-    Starts the worker's own server directly — no signaling server, no
-    rooms. A client pairs with this worker (see `sleap-connect pair`) and
-    connects straight to it over localhost/LAN/Tailscale, or via iroh if
-    it can't reach this machine directly (see --iroh).
+    It runs in the background: you get your prompt back, and it keeps running
+    after you close the terminal or log out, until 'sleap-connect serve --stop'.
+    (It doesn't come back after a reboot.) Check on it with 'sleap-connect
+    status'. New terminals show a one-line reminder while it runs ('sleap-connect
+    shell-hook uninstall' removes it). Use --foreground to keep it in this
+    terminal instead; Ctrl-C stops it.
 
-    Runs in the background: it returns once the worker is listening, and
-    keeps running after you close the terminal or log out, until 'serve
-    --stop'. (It does not come back after a reboot — that needs an OS
-    service, a planned follow-up.) Check on it with 'sleap-connect status'. The
-    first time, it also adds a one-line reminder to your shell's startup
-    file, shown in new terminals while the worker runs (remove it with
-    'sleap-connect shell-hook uninstall'). With --foreground it stays attached
-    to this terminal instead; press Ctrl-C to stop.
+    FOLDER (default: the folder you run it in) is shared with paired devices:
+    they can browse it, and their jobs can read and write inside it. You're asked
+    the first time, then it's remembered. Share more with --mount or
+    'sleap-connect add-folder'. Only one worker runs per --data-dir.
 
-    Only one worker can run per --data-dir at a time.
-
-    FOLDER (default: the folder you run it in) is shared with paired
-    devices — asked the first time (y/N), then remembered. Point it at your
-    data folder. Share more with --mount or 'sleap-connect add-folder'.
+    Devices connect over your network when they can reach this machine, and
+    through a relay when they can't (--no-iroh turns the relay off).
 
     Examples:
         cd /data/project && sleap-connect serve
-        sleap-connect serve /data/project
         sleap-connect serve /data/project --mount /data/videos:lab-data
-        sleap-connect status
         sleap-connect serve --stop
     """
     data_dir_path = Path(data_dir).expanduser()
@@ -515,25 +508,15 @@ async def _serve_async(
     "without going through a relay first.",
 )
 def pair(addrs: tuple, ttl: int, data_dir: str, as_json: bool):
-    """Generate a pairing ticket for a new client.
+    """Print a one-time code to pair a device (sleap-app) with this worker.
 
-    By default, prints a single-line pairing code (`sleap1...`) — select
-    and copy that one line, paste it into the app's Connect tab. Pass
-    --json to print the full ticket as JSON instead (today's format;
-    scripts/back-compat).
+    Copy the one-line code (it starts with sleap1) and paste it into sleap-app's
+    Connect window. It works once and expires after --ttl seconds. The worker
+    doesn't have to be running when you make the code. Pass --json for the full
+    pairing details as JSON, for scripts.
 
-    The ticket's secret is single-use and expires after --ttl seconds. If
-    a 'sleap-connect serve --iroh' worker is running against the same
-    --data-dir, a client with no direct route can still dial it: the
-    pairing code carries the worker's current relay, and --json's ticket
-    additionally carries iroh's node_id/relay_url/direct_addrs.
-
-    Works whether or not 'sleap-connect serve' is currently running: pending
-    tickets are shared via a small file under --data-dir, so a running
-    serve process picks up tickets minted here without needing to be
-    restarted (see PendingPairings).
-
-    Example:
+    Examples:
+        sleap-connect pair
         sleap-connect pair --addr ws://192.168.1.42:9631
     """
     from sleap_connect.protocol_v1.identity import WorkerIdentity
@@ -634,12 +617,15 @@ def _describe(d) -> str:
 @_DATA_DIR_OPTION
 @click.pass_context
 def clients(ctx: click.Context, data_dir: Optional[str]):
-    """List the devices paired with this worker: who can use it.
+    """List the devices paired with this worker.
 
-    Each device's name (as its app reports it), platform and app version,
-    when it paired and when it was last seen (connected or disconnected).
-    Works whether or not 'sleap-connect serve' is running. To unpair devices,
-    see 'sleap-connect clients remove --help'.
+    Shows each device's name, app and version, when it paired and when it was
+    last seen. Works whether or not the worker is running. Unpair with
+    'sleap-connect clients remove'.
+
+    Examples:
+        sleap-connect clients
+        sleap-connect clients remove "Rig 4"
     """
     ctx.obj = {"data_dir": data_dir}
     if ctx.invoked_subcommand is not None:
@@ -693,17 +679,14 @@ def clients_remove(
 ):
     """Unpair devices, by name or ID prefix (as 'sleap-connect clients' shows).
 
-    A removed device can't use this worker any more: if it's connected
-    right now, its next request or job update is refused and it's
-    disconnected. Jobs it submitted keep running. It can pair again with a
-    new code from 'sleap-connect pair'. Works whether or not 'sleap-connect serve'
-    is running.
+    A removed device can't use this worker any more; if it's connected now, it's
+    disconnected. Jobs it submitted keep running. It can pair again with a new
+    code from 'sleap-connect pair'. Works whether or not the worker is running.
 
-    \b
     Examples:
-      sleap-connect clients remove "Rig 4"
-      sleap-connect clients remove 7HV7KAOR
-      sleap-connect clients remove --all
+        sleap-connect clients remove "Rig 4"
+        sleap-connect clients remove 7HV7KAOR
+        sleap-connect clients remove --all
     """
     data_dir_path = Path(
         data_dir or (ctx.obj or {}).get("data_dir") or DEFAULT_DATA_DIR
@@ -774,7 +757,7 @@ def _match_devices(devices, target: str) -> list:
 
 
 def print_doctor_section(data_dir: Path = DEFAULT_DATA_DIR) -> bool:
-    """Print a "Protocol v1 Worker" section for the `doctor` command.
+    """Print the "Worker" section for the `doctor` command.
 
     Args:
         data_dir: Same default `serve`/`pair` use.
@@ -786,7 +769,7 @@ def print_doctor_section(data_dir: Path = DEFAULT_DATA_DIR) -> bool:
     all_ok = True
 
     click.echo("")
-    click.echo(click.style("Protocol v1 Worker:", bold=True))
+    click.echo(click.style("Worker:", bold=True))
 
     for dep in ("psutil", "aiosqlite", "websockets", "cryptography"):
         try:
@@ -894,10 +877,13 @@ def _print_worker_status(data_dir: Path, running: daemon.ServeProcess) -> None:
 @click.command(name="status")
 @_DATA_DIR_OPTION
 def status(data_dir: Optional[str]):
-    """Show whether a sleap-connect worker is running, and its details.
+    """Show whether the worker is running, and what it's doing.
 
-    Lists every running worker (normally just one). Exits with status 1
-    when none is running.
+    Shows its process, uptime, address, shared folders, paired devices, jobs and
+    log file. Exits with status 1 when no worker is running.
+
+    Example:
+        sleap-connect status
     """
     if data_dir is not None:
         path = _data_dir(data_dir)
@@ -934,7 +920,7 @@ def shell_hook_group(ctx: click.Context):
     The first 'sleap-connect serve' adds a small block to your shell's startup
     file (~/.zshrc, ~/.bashrc, fish config.fish, or the PowerShell profile)
     so new terminals show a one-line notice while a worker runs. Set
-    SLEAP_RTC_NO_SHELL_HOOK=1 to stop 'serve' from adding it.
+    SLEAP_CONNECT_NO_SHELL_HOOK=1 to stop 'serve' from adding it.
     """
     if ctx.invoked_subcommand is None:
         ctx.invoke(shell_hook_status)
@@ -1004,9 +990,13 @@ def _data_dir(data_dir: Optional[str]) -> Path:
 def add_folder(folder: str, label: Optional[str], yes: bool, data_dir: Optional[str]):
     """Share a folder with the devices paired to this worker.
 
-    They can browse it, and their training/inference jobs can read and write
-    inside it. FOLDER may be relative (default: the current folder). A
-    running worker picks it up right away.
+    They can browse it, and their training and inference jobs can read and write
+    inside it. FOLDER may be relative (default: the current folder). A running
+    worker picks it up right away.
+
+    Examples:
+        sleap-connect add-folder /data/videos
+        sleap-connect add-folder . --label lab-data
     """
     path = resolve_folder(folder)
     shared = open_shared_folders(_data_dir(data_dir))
@@ -1032,8 +1022,11 @@ def add_folder(folder: str, label: Optional[str], yes: bool, data_dir: Optional[
 def remove_folder(folder: str, data_dir: Optional[str]):
     """Stop sharing a folder (by path or label, as 'sleap-connect folders' shows).
 
-    Paired devices can no longer browse it; a running worker applies this
-    right away.
+    Paired devices can no longer browse it. A running worker applies this right
+    away.
+
+    Example:
+        sleap-connect remove-folder lab-data
     """
     removed = open_shared_folders(_data_dir(data_dir)).remove(folder)
     if removed is None:
@@ -1046,7 +1039,11 @@ def remove_folder(folder: str, data_dir: Optional[str]):
 @click.command(name="folders")
 @_DATA_DIR_OPTION
 def folders(data_dir: Optional[str]):
-    """List the folders shared with the devices paired to this worker."""
+    """List the folders shared with the devices paired to this worker.
+
+    Example:
+        sleap-connect folders
+    """
     shared = open_shared_folders(_data_dir(data_dir)).list()
     if not shared:
         click.echo(
