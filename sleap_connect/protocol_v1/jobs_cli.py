@@ -299,9 +299,9 @@ def _worker_data_dir(data_dir: Path) -> Path:
     if not identity_path(data_dir).exists():
         raise click.ClickException(
             f"No sleap-connect worker is set up on this machine (nothing in "
-            f"{data_dir}). Run 'sleap-connect jobs' on the worker machine — the "
-            "one where you ran 'sleap-connect serve' — or manage jobs from "
-            "SLEAP's Connect window."
+            f"{data_dir}). Run 'sleap-connect jobs' on the worker machine (machine "
+            "where 'sleap-connect serve' was run) or manage jobs from SLEAP's "
+            "Connect window."
         )
     return data_dir
 
@@ -309,13 +309,42 @@ def _worker_data_dir(data_dir: Path) -> Path:
 # --- `jobs queue` ------------------------------------------------------------
 
 
-def _queue(records: List[JobRecord]) -> List[JobRecord]:
-    """Running jobs, then waiting ones in the order they'll run."""
+def _queue(
+    records: List[JobRecord], positions: Optional[Dict[str, int]] = None
+) -> List[JobRecord]:
+    """Running jobs, then waiting ones in the order they'll run.
+
+    `positions` is the running worker's own line (job_id -> place); without
+    it, waiting jobs run in submission order, as the worker queues them.
+    """
+    positions = positions or {}
     running = [r for r in records if r.state == "running"]
     waiting = [r for r in records if r.state == "queued"]
     return sorted(running, key=lambda r: r.created_at) + sorted(
-        waiting, key=lambda r: r.created_at
+        waiting, key=lambda r: (positions.get(r.job_id, float("inf")), r.created_at)
     )
+
+
+def _worker_queue_positions(
+    data_dir: Path,
+) -> Tuple[Optional[Dict[str, int]], Optional[str]]:
+    """The running worker's queue positions right now, and why not if not.
+
+    (None, None) when no worker is running: the job store is all there is.
+    """
+    if daemon.read_running(data_dir) is None:
+        return None, None
+    try:
+        (reply,) = asyncio.run(_call_worker(data_dir, [("jobs.list", {})]))
+    except click.ClickException as e:
+        return None, e.message
+    if reply.error:
+        return None, reply.error.get("msg")
+    return {
+        j["job_id"]: j["queue_position"]
+        for j in reply.result.get("jobs", [])
+        if j.get("queue_position") is not None
+    }, None
 
 
 @jobs.command(name="queue")
@@ -325,11 +354,13 @@ def _queue(records: List[JobRecord]) -> List[JobRecord]:
 def jobs_queue(ctx: click.Context, as_json: bool, data_dir: Optional[str]):
     """Show the running job and the jobs waiting behind it, in run order.
 
-    The worker runs one job at a time; the rest wait their turn. Cancel waiting
-    jobs with 'sleap-connect jobs cancel ID' or 'sleap-connect jobs cancel --queued'.
+    The worker runs one job at a time; the rest wait their turn. When the worker
+    is running, the order is its queue at the moment you ask. Cancel waiting jobs
+    with 'sleap-connect jobs cancel ID' or 'sleap-connect jobs cancel --queued'.
     """
     data_dir_path = _parent_data_dir(ctx, data_dir)
-    line_up = _queue(_load_jobs(data_dir_path))
+    positions, problem = _worker_queue_positions(data_dir_path)
+    line_up = _queue(_load_jobs(data_dir_path), positions)
     names = _device_names(data_dir_path)
 
     if as_json:
@@ -375,6 +406,11 @@ def jobs_queue(ctx: click.Context, as_json: bool, data_dir: Optional[str]):
         )
     _echo_table(("#", "ID", "Kind", "Model", "Device", "Status", "Labels"), rows)
     note = _not_running_note(data_dir_path)
+    if problem and position:
+        note = (
+            f"Couldn't ask the worker for its queue ({problem}); waiting jobs are "
+            "shown in the order they were submitted."
+        )
     if note and position:
         click.echo("")
         click.echo(click.style(note, fg="yellow"))
@@ -597,12 +633,9 @@ def _worker_address(data_dir: Path) -> str:
     return f"ws://{host}:{details.get('port') or DEFAULT_PORT}"
 
 
-async def _cancel_via_worker(
-    data_dir: Path, job_ids: List[str], mode: str
-) -> Dict[str, Optional[str]]:
-    """Ask the running worker to stop/cancel each job.
-
-    Returns each job's error message, or None where the worker accepted it.
+async def _call_worker(data_dir: Path, calls: List[Tuple[str, dict]]) -> list:
+    """Make each (method, params) call on the running worker, in order, over
+    one connection. Returns each call's `Res`.
     """
     import websockets
 
@@ -623,7 +656,7 @@ async def _cancel_via_worker(
             if isinstance(reply, Res) and reply.id == next_id:
                 return reply
 
-    async def run() -> Dict[str, Optional[str]]:
+    async def run() -> list:
         try:
             ws = await websockets.connect(address, max_size=None)
         except OSError as e:
@@ -660,11 +693,7 @@ async def _cancel_via_worker(
                     "restart it: 'sleap-connect serve --stop', then "
                     "'sleap-connect serve'."
                 )
-            errors: Dict[str, Optional[str]] = {}
-            for job_id in job_ids:
-                reply = await call(ws, "jobs.cancel", {"job_id": job_id, "mode": mode})
-                errors[job_id] = reply.error.get("msg") if reply.error else None
-            return errors
+            return [await call(ws, method, params) for method, params in calls]
         finally:
             await ws.close()
 
@@ -701,7 +730,15 @@ def _end_jobs(data_dir: Path, records: List[JobRecord], mode: str) -> None:
     if not active:
         return
     ids = [r.job_id for r in active]
-    errors = asyncio.run(_cancel_via_worker(data_dir, ids, mode))
+    replies = asyncio.run(
+        _call_worker(
+            data_dir, [("jobs.cancel", {"job_id": i, "mode": mode}) for i in ids]
+        )
+    )
+    errors = {
+        i: reply.error.get("msg") if reply.error else None
+        for i, reply in zip(ids, replies)
+    }
     states = _settle(data_dir, [i for i in ids if errors.get(i) is None])
     failed = False
     for r in active:

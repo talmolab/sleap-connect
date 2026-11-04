@@ -376,3 +376,49 @@ class TestStopCancelThroughWorker:
         assert "Cancel 1 waiting job?" in result.output
         assert "Nothing canceled." in result.output
         assert (await live_worker.store.get_job(second)).state == "queued"
+
+
+class TestQueueFromWorker:
+    async def test_order_is_the_workers_line_not_the_store(self, live_worker, tmp_path):
+        methods = live_worker.job_methods
+        spec = TrainJobSpec(config_path="/c.yaml")
+        first = await methods._submit_spec(spec)
+        await _wait_for_spawned(live_worker.store, first)
+        second = await methods._submit_spec(spec)
+        third = await methods._submit_spec(spec)
+        # Make the store alone suggest the opposite order.
+        with sqlite3.connect(job_store_path(tmp_path)) as db:
+            db.execute("UPDATE jobs SET created_at = 0 WHERE job_id = ?", (third,))
+
+        result = await _invoke_async(tmp_path, "queue")
+        listing = json.loads((await _invoke_async(tmp_path, "queue", "--json")).output)
+
+        assert result.exit_code == 0, result.output
+        rows = [line.split()[:2] for line in result.output.splitlines()[1:4]]
+        assert rows == [["▶", first], ["1", second], ["2", third]]
+        assert "worker isn't running" not in result.output
+        assert [(j["job_id"], j["queue_position"]) for j in listing] == [
+            (first, None),
+            (second, 1),
+            (third, 2),
+        ]
+
+    def test_unreachable_worker_falls_back_to_the_store(self, seeded):
+        import socket
+
+        with socket.socket() as s:
+            s.bind(("127.0.0.1", 0))
+            dead_port = s.getsockname()[1]
+        daemon.acquire_pidfile(seeded, {"host": "127.0.0.1", "port": dead_port})
+        try:
+            result = _invoke(seeded, "queue")
+        finally:
+            daemon.release_pidfile(seeded)
+
+        assert result.exit_code == 0, result.output
+        assert [line.split()[1] for line in result.output.splitlines()[1:4]] == [
+            "job_run3",
+            "job_wait4",
+            "job_wait5",
+        ]
+        assert "Couldn't ask the worker for its queue" in _text(result)
