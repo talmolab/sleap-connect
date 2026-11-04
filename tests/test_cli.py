@@ -189,9 +189,17 @@ class TestCommandGroups:
         # Help groups are keyed by the program name, as when installed.
         result = runner.invoke(cli, ["--help"], prog_name="sleap-connect")
         assert result.exit_code == 0
-        for group in ("Worker", "Devices", "Shared folders", "Legacy"):
+        for group in ("Worker", "Devices", "Jobs", "Shared folders", "Legacy"):
             assert group in result.output
-        for command in ("serve", "status", "pair", "clients", "add-folder", "legacy"):
+        for command in (
+            "serve",
+            "status",
+            "pair",
+            "clients",
+            "jobs",
+            "add-folder",
+            "legacy",
+        ):
             assert command in result.output
         # Legacy commands are listed under `legacy`, not at the top.
         assert "login" not in result.output
