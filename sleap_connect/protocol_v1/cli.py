@@ -50,6 +50,10 @@ from sleap_connect.protocol_v1.shared_folders import (
     resolve_folder,
 )
 
+# How long a pairing code works for (`pair --ttl`'s default, and the code
+# `serve` prints at startup).
+PAIR_CODE_TTL_SECS = 300
+
 # How long `serve` waits at startup for its iroh endpoint to reach a home
 # relay, so the first `pair` ticket is dialable from outside the LAN.
 IROH_ONLINE_TIMEOUT_SECS = 10.0
@@ -217,6 +221,8 @@ def serve(
 
     It runs in the background: you get your prompt back, and it keeps running
     after you close the terminal or log out, until 'sleap-connect serve --stop'.
+    Once it's up, it prints a pairing code to paste into SLEAP ('sleap-connect
+    pair' makes a new one).
     (It doesn't come back after a reboot.) Check on it with 'sleap-connect
     status'. New terminals show a one-line reminder while it runs ('sleap-connect
     shell-hook uninstall' removes it). Use --foreground to keep it in this
@@ -460,7 +466,7 @@ def _daemonize(argv: list, data_dir: Path) -> None:
     click.echo(f"  Stop it:       sleap-connect serve --stop{_data_dir_arg(data_dir)}")
     click.echo(f"  Logs:          {shell_hook.display(daemon.log_path(data_dir))}")
     click.echo("")
-    click.echo(f"  Pair a device: sleap-connect pair{_data_dir_arg(data_dir)}")
+    _print_startup_pair_code(data_dir)
 
 
 def _data_dir_arg(data_dir: Path) -> str:
@@ -556,10 +562,16 @@ async def _serve_async(
         else:
             click.echo(
                 click.style(
-                    "No paired devices yet — run 'sleap-connect pair' to get a pairing code.",
+                    "No paired devices yet.",
                     fg="yellow",
                 )
             )
+
+        if ready_file is None:
+            # The background child's output is the log file: its parent
+            # (in the user's terminal) prints the code instead.
+            click.echo("")
+            _print_startup_pair_code(data_dir)
 
         click.echo("")
         click.echo("Listening. Press Ctrl-C to stop.")
@@ -596,7 +608,7 @@ async def _serve_async(
 )
 @click.option(
     "--ttl",
-    default=300,
+    default=PAIR_CODE_TTL_SECS,
     show_default=True,
     help="How many seconds the pairing secret stays valid.",
 )
@@ -629,18 +641,10 @@ def pair(addrs: tuple, ttl: int, data_dir: str, as_json: bool):
         sleap-connect pair
         sleap-connect pair --addr ws://192.168.1.42:9631
     """
-    from sleap_connect.protocol_v1.identity import WorkerIdentity
     from sleap_connect.protocol_v1.pair_code import encode_pair_code
-    from sleap_connect.protocol_v1.pairing import PendingPairings
 
     data_dir_path = Path(data_dir)
-    identity = WorkerIdentity(identity_path(data_dir_path))
-    pending_pairings = PendingPairings(ttl_secs=ttl, path=pairing_path(data_dir_path))
-
-    from sleap_connect.protocol_v1.iroh_live import iroh_live_path, read_iroh_live
-
-    iroh_section = read_iroh_live(iroh_live_path(data_dir_path), identity.node_id)
-    ticket = pending_pairings.create(identity.node_id, list(addrs), iroh=iroh_section)
+    ticket, iroh_section = _mint_ticket(data_dir_path, addrs, ttl)
 
     if as_json:
         click.echo(click.style("Pairing ticket", bold=True))
@@ -665,6 +669,48 @@ def pair(addrs: tuple, ttl: int, data_dir: str, as_json: bool):
     click.echo("In SLEAP: Connect → Pair a worker → paste the code")
     click.echo(f"Expires in {ttl} seconds.")
     _warn_if_unreachable(data_dir_path, iroh_section, addrs)
+
+
+def _mint_ticket(data_dir: Path, addrs: tuple = (), ttl: int = PAIR_CODE_TTL_SECS):
+    """A new one-time pairing ticket, with the running worker's relay if
+    it has published one. Returns (ticket, iroh_section or None).
+
+    Tickets are kept in a file, so a running worker sees ones minted by
+    another process (`pair`) as well as its own.
+    """
+    from sleap_connect.protocol_v1.identity import WorkerIdentity
+    from sleap_connect.protocol_v1.iroh_live import iroh_live_path, read_iroh_live
+    from sleap_connect.protocol_v1.pairing import PendingPairings
+
+    identity = WorkerIdentity(identity_path(data_dir))
+    pending_pairings = PendingPairings(ttl_secs=ttl, path=pairing_path(data_dir))
+    iroh_section = read_iroh_live(iroh_live_path(data_dir), identity.node_id)
+    ticket = pending_pairings.create(identity.node_id, list(addrs), iroh=iroh_section)
+    return ticket, iroh_section
+
+
+def _print_startup_pair_code(data_dir: Path) -> None:
+    """The pairing code `serve` prints once the worker is up, so setting up is
+    one install and one command. `pair` makes another when it expires.
+    """
+    from sleap_connect.protocol_v1.pair_code import encode_pair_code
+
+    try:
+        ticket, iroh_section = _mint_ticket(data_dir)
+    except Exception as e:  # never fail a started worker over this
+        click.echo(f"  (Couldn't make a pairing code: {e}. Run 'sleap-connect pair'.)")
+        return
+    mins = PAIR_CODE_TTL_SECS // 60
+    click.echo(
+        click.style("  Pair a device", bold=True)
+        + " — in SLEAP: Connect → Pair a worker → paste this code:"
+    )
+    click.echo(f"    {encode_pair_code(ticket)}")
+    click.echo(
+        f"  Works once, expires in {mins} min. New code: "
+        f"sleap-connect pair{_data_dir_arg(data_dir)}"
+    )
+    _warn_if_unreachable(data_dir, iroh_section, ())
 
 
 def _warn_if_unreachable(data_dir: Path, iroh_section, addrs: tuple) -> None:

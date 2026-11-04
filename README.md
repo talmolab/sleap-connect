@@ -36,15 +36,11 @@ close the terminal or log out. Check on it with `sleap-connect status` and stop 
 reminder while it is (`sleap-connect shell-hook uninstall` removes it). Use `--foreground` to keep it
 attached to the terminal instead.
 
-**3. Get a pairing code.**
+Once it's running, `serve` prints a **pairing code**: one line starting with `sleap1`. It works once
+and expires after 5 minutes; `sleap-connect pair` prints a new one (for another device, or if it
+expired).
 
-```bash
-sleap-connect pair
-```
-
-It prints a one-line code starting with `sleap1`. It works once and expires after a few minutes.
-
-**4. Pair from sleap-app.** In [app.sleap.ai](https://app.sleap.ai) or the desktop app, open
+**3. Pair from sleap-app.** In [app.sleap.ai](https://app.sleap.ai) or the desktop app, open
 **Connect → Pair a worker** and paste the code. Then train or run inference from the Training
 panel or the Connect window.
 
@@ -55,9 +51,9 @@ The full guide (connection routes, the Connect window, troubleshooting) is in th
 
 | Command | What it does |
 |---|---|
-| `sleap-connect serve [FOLDER]` | Start the worker in the background, sharing FOLDER (default: the current folder). `--stop` stops it; `--foreground` keeps it attached to the terminal (Ctrl-C to stop). |
+| `sleap-connect serve [FOLDER]` | Start the worker in the background, sharing FOLDER (default: the current folder), and print a pairing code. `--stop` stops it; `--foreground` keeps it attached to the terminal (Ctrl-C to stop). |
 | `sleap-connect status` | Show whether the worker is running: PID, uptime, address, shared folders, paired devices, jobs. |
-| `sleap-connect pair` | Print a one-time pairing code for a new device. |
+| `sleap-connect pair` | Print a new one-time pairing code (`serve` prints one when it starts). Warns if the code can't connect, e.g. no worker is running. |
 | `sleap-connect folders` | List the folders shared with paired devices. |
 | `sleap-connect add-folder [FOLDER]` | Share another folder (relative paths are fine). |
 | `sleap-connect remove-folder FOLDER` | Stop sharing a folder (by path or label). |
