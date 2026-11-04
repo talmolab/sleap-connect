@@ -1,5 +1,7 @@
 """Tests for encrypted relay message envelopes."""
 
+import base64
+
 import pytest
 
 from sleap_connect.encryption.ecdh import derive_shared_key, generate_keypair
@@ -80,9 +82,12 @@ class TestUnwrap:
     def test_tampered_ciphertext_returns_none(self):
         key, session_id = _make_session()
         envelope = wrap(key, session_id, {"type": "test"})
-        # Tamper with the base64 ciphertext
-        ct = envelope["ciphertext"]
-        envelope["ciphertext"] = "A" + ct[1:]
+        # Flip one bit of the ciphertext itself. (Swapping its first base64
+        # character for "A" changed nothing whenever it already was "A",
+        # 1 time in 64, and the message then decrypted fine.)
+        raw = bytearray(base64.b64decode(envelope["ciphertext"]))
+        raw[0] ^= 0x01
+        envelope["ciphertext"] = base64.b64encode(bytes(raw)).decode()
         result = unwrap(envelope, {session_id: key})
         assert result is None
 

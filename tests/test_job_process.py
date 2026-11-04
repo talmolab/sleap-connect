@@ -84,6 +84,34 @@ class TestSpawnDetached:
 
         assert log_path.exists()
 
+    async def test_a_process_that_already_exited_is_still_recorded(
+        self, store, spec, tmp_path, monkeypatch
+    ):
+        """On Windows a command that ends at once can be gone before its
+        start time is read (POSIX keeps a zombie). That must not fail the
+        job: it's recorded, and wait() still reports how it exited."""
+        import psutil
+
+        from sleap_connect.jobs import process as process_module
+
+        def _gone(pid):
+            raise psutil.NoSuchProcess(pid)
+
+        monkeypatch.setattr(process_module.psutil, "Process", _gone)
+        await store.create_job("job-1", spec)
+
+        process = await spawn_detached(
+            [sys.executable, "-c", "raise SystemExit(3)"],
+            job_id="job-1",
+            store=store,
+            log_path=tmp_path / "job-1.log",
+        )
+
+        assert await process.wait() == 3
+        record = await store.get_job("job-1")
+        assert record.pid == process.pid
+        assert record.process_started_at is not None
+
     async def test_kills_the_process_if_recording_it_fails(self, store, spec, tmp_path):
         """If store.set_process_info raises after the subprocess is already
         running, we have no other way to find it later — spawn_detached
@@ -386,6 +414,52 @@ class TestExitCodeRecording:
         )
         assert await process.wait() == 127
         assert "Failed to start" in (tmp_path / "job-1.log").read_text()
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="POSIX signals")
+    def test_a_stop_sent_before_the_job_starts_still_reaches_it(self, tmp_path):
+        """A stop/cancel signal that lands after the wrapper starts ignoring
+        signals but before it has started the job reaches only the wrapper;
+        it must be passed on, or the job runs on as if never stopped.
+
+        Reproduced exactly (not by timing): the wrapper runs in a subprocess
+        whose Popen first delivers SIGINT to the wrapper itself, then starts
+        the job.
+        """
+        import subprocess as sp
+        import time
+
+        from sleap_connect.jobs import process as process_module
+
+        exit_path = tmp_path / "exit_code"
+        driver = (
+            "import os, runpy, signal, subprocess, sys\n"
+            "real = subprocess.Popen\n"
+            "def popen(*a, **k):\n"
+            "    os.kill(os.getpid(), signal.SIGINT)  # lands in the gap\n"
+            "    return real(*a, **k)\n"
+            "subprocess.Popen = popen\n"
+            "sys.argv = sys.argv[1:]\n"
+            "runpy.run_path(sys.argv[0], run_name='__main__')\n"
+        )
+        started = time.monotonic()
+        result = sp.run(
+            [
+                sys.executable,
+                "-c",
+                driver,
+                str(process_module._EXIT_CODE_WRAPPER),
+                str(exit_path),
+                "--",
+                sys.executable,
+                "-c",
+                "import time; time.sleep(30)",
+            ],
+            timeout=25,
+        )
+
+        assert time.monotonic() - started < 20, "the job never got the stop"
+        assert result.returncode != 0
+        assert int(exit_path.read_text()) != 0
 
     @pytest.mark.skipif(sys.platform == "win32", reason="POSIX process groups")
     async def test_graceful_stop_reaches_the_job_and_the_wrapper_records_it(
