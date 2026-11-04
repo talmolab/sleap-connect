@@ -82,8 +82,14 @@ async def _wait_for_terminal(methods, store, job_id, timeout=10):
     return record
 
 
-async def _wait_for_spawned(store, job_id, timeout=5):
-    """Until the job's process exists ("running" is set a moment earlier)."""
+async def _wait_for_spawned(store, job_id, timeout=15):
+    """Until the job's process exists.
+
+    Wait for this, not "running", before anything that depends on the process
+    having started (swapping the command builder for the next job, simulating
+    a worker restart, ZMQ joining): "running" is set before the job's files
+    are prepared and its command built, and on Windows that gap is long.
+    """
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         record = await store.get_job(job_id)
@@ -93,7 +99,7 @@ async def _wait_for_spawned(store, job_id, timeout=5):
     raise AssertionError(f"job {job_id} never spawned within {timeout}s")
 
 
-async def _wait_for_state(store, job_id, state, timeout=5):
+async def _wait_for_state(store, job_id, state, timeout=15):
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         record = await store.get_job(job_id)
@@ -402,7 +408,7 @@ class TestCancel:
 
         await methods.cancel({"job_id": job_id, "mode": "stop"}, conn=None)
 
-        await _wait_for_terminal(methods, store, job_id, timeout=5)
+        await _wait_for_terminal(methods, store, job_id, timeout=15)
 
     async def test_cancel_mode_terminates_a_running_job(self, store, tmp_path, spec):
         methods = _make_methods(
@@ -418,7 +424,7 @@ class TestCancel:
         # within the SIGKILL escalation grace period — this test doesn't
         # exercise the escalation path itself, only that cancel actually
         # terminates the job.
-        await _wait_for_terminal(methods, store, job_id, timeout=5)
+        await _wait_for_terminal(methods, store, job_id, timeout=15)
 
     async def test_cancel_corrects_a_stuck_running_job_with_no_live_process(
         self, store, tmp_path, spec
@@ -683,7 +689,7 @@ class TestDelete:
         assert await store.get_job(job_id) is not None  # nothing was deleted
 
         await methods.cancel({"job_id": job_id, "mode": "cancel"}, conn=None)
-        await _wait_for_terminal(methods, store, job_id, timeout=5)
+        await _wait_for_terminal(methods, store, job_id, timeout=15)
 
     async def test_refuses_to_delete_a_job_queued_behind_a_running_one(
         self, store, tmp_path, spec
@@ -699,7 +705,7 @@ class TestDelete:
         ]
         methods = _make_methods(store, tmp_path, blocker)
         first = (await methods.submit({"spec": spec.to_dict()}, conn=None))["job_id"]
-        await _wait_for_state(store, first, "running")
+        await _wait_for_spawned(store, first)
         methods._builder = _FakeCommandBuilder([sys.executable, "-c", "pass"])
         second = (await methods.submit({"spec": spec.to_dict()}, conn=None))["job_id"]
         await asyncio.sleep(0.1)
@@ -768,7 +774,7 @@ class TestDelete:
         assert await store.get_job(done.job_id) is not None  # nothing was deleted
 
         await methods.cancel({"job_id": running_id, "mode": "cancel"}, conn=None)
-        await _wait_for_terminal(methods, store, running_id, timeout=5)
+        await _wait_for_terminal(methods, store, running_id, timeout=15)
 
 
 class TestFsMethods:
@@ -897,7 +903,7 @@ class TestStopEarly:
         )
         result = await methods.submit({"spec": spec.to_dict()}, conn=None)
         job_id = result["job_id"]
-        await _wait_for_state(store, job_id, "running")
+        await _wait_for_spawned(store, job_id)
         await asyncio.sleep(0.5)  # ZMQ slow-joiner: let the SUB connect
 
         await methods.cancel({"job_id": job_id, "mode": "stop"}, conn=None)
@@ -961,7 +967,7 @@ class TestStopEarly:
             job_id = (await methods.submit({"spec": spec.to_dict()}, conn=None))[
                 "job_id"
             ]
-            await _wait_for_state(store, job_id, "running")
+            await _wait_for_spawned(store, job_id)
             await asyncio.sleep(0.5)  # ZMQ slow-joiner
 
             assert builder.ports is not None
@@ -991,7 +997,7 @@ class TestStopEarly:
 
         await methods.cancel({"job_id": job_id, "mode": "stop"}, conn=None)
 
-        record = await _wait_for_terminal(methods, store, job_id, timeout=5)
+        record = await _wait_for_terminal(methods, store, job_id, timeout=15)
         assert record.state == "canceled"
         assert "stopped" in record.error
 
@@ -1007,7 +1013,7 @@ class TestStopEarly:
 
         await methods.cancel({"job_id": job_id, "mode": "cancel"}, conn=None)
 
-        record = await _wait_for_terminal(methods, store, job_id, timeout=5)
+        record = await _wait_for_terminal(methods, store, job_id, timeout=15)
         assert record.state == "canceled"
         events = await store.get_events_since(job_id)
         statuses = [e.data for e in events if e.topic == "job.status"]
@@ -1894,7 +1900,7 @@ class TestCancelBeforeSpawn:
         ]
         methods = _make_methods(store, tmp_path, blocker)
         first = (await methods.submit({"spec": spec.to_dict()}, conn=None))["job_id"]
-        await _wait_for_state(store, first, "running")
+        await _wait_for_spawned(store, first)
         methods._builder = _FakeCommandBuilder(
             [sys.executable, "-c", f"open({str(marker)!r}, 'w')"]
         )
@@ -1983,7 +1989,7 @@ class TestQueueControl:
                 conn=None,
             )
         )["job_id"]
-        await _wait_for_state(store, a1, "running")
+        await _wait_for_spawned(store, a1)
         methods._builder = _FakeCommandBuilder([sys.executable, "-c", "pass"])
         a2 = (
             await methods.submit(
@@ -2010,7 +2016,7 @@ class TestQueueControl:
         go = tmp_path / "go"
         methods = _make_methods(store, tmp_path, self._blocker(go))
         first = (await methods.submit({"spec": spec.to_dict()}, conn=None))["job_id"]
-        await _wait_for_state(store, first, "running")
+        await _wait_for_spawned(store, first)  # started_at is set at spawn
         second = (await methods.submit({"spec": spec.to_dict()}, conn=None))["job_id"]
         await asyncio.sleep(0.3)
 
@@ -2040,7 +2046,7 @@ class TestResumeQueued:
         ]
         first = _make_methods(store, tmp_path, blocker)
         running = (await first.submit({"spec": spec.to_dict()}, conn=None))["job_id"]
-        await _wait_for_state(store, running, "running")
+        await _wait_for_spawned(store, running)
         q1 = (await first.submit({"spec": spec.to_dict()}, conn=None))["job_id"]
         q2 = (await first.submit({"spec": spec.to_dict()}, conn=None))["job_id"]
         await asyncio.sleep(0.1)

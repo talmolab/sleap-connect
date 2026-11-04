@@ -22,9 +22,18 @@ import signal
 import subprocess
 import sys
 
+# Stop/cancel signals that arrived before the job's process existed. The job
+# is started right after the handlers below are installed; a signal sent to
+# the process group in that gap reaches only this wrapper, so it's passed on
+# once the job exists (or the job would never see it and run on).
+_early_signals = []
+_job_started = False
+
 
 def _ignore(signum, frame):
     """Handler (not SIG_IGN, which `exec` would pass on to the job itself)."""
+    if not _job_started:
+        _early_signals.append(signum)
 
 
 def main() -> None:
@@ -40,8 +49,13 @@ def main() -> None:
         signal.signal(signal.SIGINT, _ignore)
         signal.signal(signal.SIGTERM, _ignore)
 
+    global _job_started
     try:
-        returncode = subprocess.Popen(cmd).wait()
+        job = subprocess.Popen(cmd)
+        _job_started = True
+        for signum in _early_signals:
+            job.send_signal(signum)
+        returncode = job.wait()
     except OSError as e:
         print(f"Failed to start {cmd[0]!r}: {e}", flush=True)
         returncode = 127
