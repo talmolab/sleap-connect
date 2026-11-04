@@ -5,9 +5,10 @@ Idle/Busy). Hardware is detected once, on the first call, in a thread:
 detection shells out and can take seconds (so it must not delay startup or
 block the event loop), and none of it changes while `serve` runs.
 
-Detection prefers the command-line tools over imports: on a GPU box sleap-nn
-is usually its own `uv tool`, separate from this worker's environment, so
-neither `sleap_nn` nor `torch` is necessarily importable here.
+Detection prefers the command-line tools over imports: sleap-nn may be its
+own `uv tool`, separate from this worker's environment (rather than
+installed with it, via the `nn` extra), so neither `sleap_nn` nor `torch` is
+necessarily importable here.
 """
 
 import asyncio
@@ -18,6 +19,7 @@ import subprocess
 from typing import Any, Dict, List, Optional
 
 from sleap_connect.jobs.queue import JobQueue
+from sleap_connect.jobs.sleap_nn import sleap_nn_command
 from sleap_connect.protocol_v1.server import Connection, ProtocolV1Server
 
 _TIMEOUT_SECS = 10
@@ -77,7 +79,7 @@ def _detect_gpus() -> Dict[str, Any]:
 
 
 def _detect_sleap_nn_version() -> str:
-    out = _run(["sleap-nn", "--version"])
+    out = _run([sleap_nn_command(), "--version"])
     if out:
         match = re.search(r"(\d+\.\d+[\w.+-]*)", out)
         if match:

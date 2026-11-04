@@ -8,14 +8,15 @@ from [sleap-app](https://app.sleap.ai), with no account or server in between.
 
 ## Quick start
 
-**1. Install on the GPU machine.** There's no release with this workflow yet, so install from `main`:
+**1. Install on the GPU machine.** The `nn` extra installs [sleap-nn](https://nn.sleap.ai), which runs
+the training and inference jobs, along with the worker; `--torch-backend auto` picks the PyTorch build
+for your GPU:
 
 ```bash
-uv tool install --python 3.11 "sleap-connect @ git+https://github.com/talmolab/sleap-connect" \
-  --with "sleap-nn[torch]" \
-  --with-executables-from sleap-nn \
-  --torch-backend auto
+uv tool install --python 3.11 "sleap-connect[nn]" --torch-backend auto
 ```
+
+Check the machine is ready with `sleap-connect doctor`: it shows the GPU, and whether sleap-nn can start.
 
 **2. Start the worker in your data folder.**
 
@@ -85,21 +86,30 @@ The full guide (connection routes, the Connect window, troubleshooting) is in th
 
 ## Installation options
 
-Pick a PyTorch backend explicitly instead of `--torch-backend auto`:
+Pick a PyTorch build explicitly instead of `--torch-backend auto`:
 
 ```bash
-# CUDA GPU
-uv tool install --python 3.11 "sleap-connect @ git+https://github.com/talmolab/sleap-connect" \
-  --with "sleap-nn[torch-cuda130]" \
-  --with-executables-from sleap-nn
+# CUDA GPU (here CUDA 12.8)
+uv tool install --python 3.11 "sleap-connect[nn]" --torch-backend cu128
 
 # CPU only
-uv tool install --python 3.11 "sleap-connect @ git+https://github.com/talmolab/sleap-connect" \
-  --with "sleap-nn[torch-cpu]" \
-  --with-executables-from sleap-nn
+uv tool install --python 3.11 "sleap-connect[nn]" --torch-backend cpu
 ```
 
-To update, run the same command again with `--reinstall`.
+Already have sleap-nn installed on its own (`uv tool install sleap-nn`)? Install the worker without the
+extra, `uv tool install sleap-connect`, and it runs the `sleap-nn` on your PATH. One installed with the
+worker is used first.
+
+The latest development version, from `main`:
+
+```bash
+uv tool install --python 3.11 "sleap-connect[nn] @ git+https://github.com/talmolab/sleap-connect" \
+  --torch-backend auto
+```
+
+To update, run the same command again with `--reinstall`. On a fresh Linux container, sleap-nn may
+also need system libraries: `apt-get install -y libegl1 libgl1 libfontconfig1` (`sleap-connect
+doctor` names the one that's missing).
 
 ## Legacy: rooms, dashboard and SLEAP GUI
 

@@ -10,3 +10,5 @@ def _isolated_sleap_home(tmp_path_factory, monkeypatch):
     child process it starts, which inherits the environment — touches the
     real ~/.sleap-connect."""
     monkeypatch.setenv("SLEAP_CONNECT_HOME", str(tmp_path_factory.mktemp("sleap-home")))
+    # `serve` checks sleap-nn imports (seconds, if it's installed here).
+    monkeypatch.setenv("SLEAP_CONNECT_SKIP_SLEAP_NN_CHECK", "1")

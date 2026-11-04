@@ -2839,47 +2839,11 @@ def _run_doctor(include_legacy: bool) -> None:
         else:
             click.echo(f"  Config file: {click.style('using defaults', fg='cyan')}")
 
-    # GPU
-    click.echo("")
-    click.echo(click.style("GPU:", bold=True))
-    try:
-        import torch
+    # GPU, and the sleap-nn jobs run with
+    from sleap_connect.protocol_v1.cli import print_sleap_nn_doctor_section
 
-        if torch.cuda.is_available():
-            try:
-                from sleap_connect.worker.capabilities import WorkerCapabilities
-
-                caps = WorkerCapabilities()
-                click.echo(f"  GPU: {caps.gpu_model} {click.style('✓', fg='green')}")
-                click.echo(f"  Memory: {caps.gpu_memory_mb} MB")
-                click.echo(f"  CUDA: {caps.cuda_version}")
-            except Exception:
-                gpu_name = torch.cuda.get_device_name(0)
-                click.echo(f"  GPU: {gpu_name} {click.style('✓', fg='green')}")
-        else:
-            click.echo(
-                f"  GPU: {click.style('⚠ PyTorch installed but CUDA not available', fg='yellow')}"
-            )
-            click.echo(
-                "  Training will use CPU. For GPU support, install PyTorch with CUDA."
-            )
-    except ImportError:
-        click.echo(f"  GPU: {click.style('⚠ PyTorch not installed', fg='yellow')}")
-        click.echo(
-            "  Install with: pip install torch (or use the sleap-connect Docker image)"
-        )
-
-    # Training dependencies
-    click.echo("")
-    click.echo(click.style("Training Dependencies:", bold=True))
-    try:
-        import sleap_nn
-
-        version = getattr(sleap_nn, "__version__", "unknown")
-        click.echo(f"  sleap-nn: {version} {click.style('✓', fg='green')}")
-    except ImportError:
-        click.echo(f"  sleap-nn: {click.style('⚠ not installed', fg='yellow')}")
-        click.echo("  Required for training jobs. Install with: pip install sleap-nn")
+    if not print_sleap_nn_doctor_section():
+        all_ok = False
 
     if include_legacy:
         # Data mounts & working directory

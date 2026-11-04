@@ -1,6 +1,6 @@
 [project]
 name = "sleap-connect"
-version = "0.0.7"
+version = "0.0.8"
 description = "Remote SLEAP training and inference: run sleap-nn on a GPU machine from sleap-app"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -39,6 +39,11 @@ sleap-connect = "sleap_connect.cli:cli"
 sleap-rtc = "sleap_connect.cli:cli"
 
 [project.optional-dependencies]
+# sleap-nn, which runs the jobs, installed with the worker. Pick the PyTorch
+# build at install time: `uv tool install "sleap-connect[nn]" --torch-backend auto`.
+nn = [
+    "sleap-nn[torch]>=0.3.3,<0.4.0",
+]
 dev = [
     "pytest",
     "pytest-asyncio",

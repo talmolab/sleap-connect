@@ -31,15 +31,15 @@ def test_doctor_shows_gpu_section(mock_requests):
 
 
 @patch("sleap_connect.cli.requests")
-def test_doctor_shows_training_deps_section(mock_requests):
-    """Doctor command should include a Training Dependencies section."""
+def test_doctor_shows_sleap_nn_section(mock_requests):
+    """Doctor command should include a section on the sleap-nn jobs run with."""
     mock_response = MagicMock()
     mock_response.status_code = 200
     mock_requests.get.return_value = mock_response
 
     runner = CliRunner()
     result = runner.invoke(cli, ["legacy", "doctor"])
-    assert "Training Dependencies:" in result.output
+    assert "sleap-nn (runs the jobs):" in result.output
 
 
 @patch("sleap_connect.cli.requests")

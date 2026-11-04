@@ -7,6 +7,7 @@ handling config path splitting, Hydra overrides, and optional flags.
 from pathlib import Path
 from typing import Dict, List, Optional
 
+from sleap_connect.jobs.sleap_nn import sleap_nn_command
 from sleap_connect.jobs.spec import TrainJobSpec, TrackJobSpec
 
 # Default ZMQ ports for progress reporting
@@ -59,7 +60,7 @@ class CommandBuilder:
             >>> cmd = builder.build_train_command(spec)
             >>> # ['sleap-nn', 'train', '--config-name', 'centroid.yaml', ...]
         """
-        cmd = ["sleap-nn", "train"]
+        cmd = [sleap_nn_command(), "train"]
 
         # Config path - split into name and directory
         config_path = Path(spec.config_paths[config_index])
@@ -160,7 +161,7 @@ class CommandBuilder:
             >>> cmd = builder.build_track_command(spec)
             >>> # ['sleap-nn', 'track', '--data_path', '/vast/data.slp', ...]
         """
-        cmd = ["sleap-nn", "track"]
+        cmd = [sleap_nn_command(), "track"]
 
         # Required arguments
         cmd.extend(["--data_path", spec.data_path])
