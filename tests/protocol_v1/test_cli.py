@@ -43,6 +43,37 @@ class TestParseMount:
 class TestPairCommand:
     """Tests for the `sleap-connect pair` command."""
 
+    def test_warns_when_no_worker_is_running(self, tmp_path):
+        result = CliRunner().invoke(pair, ["--data-dir", str(tmp_path)])
+
+        assert result.exit_code == 0
+        text = " ".join(result.output.split())
+        assert "No worker is running, so a device can't connect with this code" in text
+        assert "sleap-connect serve" in text
+
+    def test_no_warning_while_a_reachable_worker_runs(self, tmp_path, monkeypatch):
+        from sleap_connect.protocol_v1 import cli as v1_cli
+
+        monkeypatch.setattr(v1_cli.daemon, "read_running", lambda d: object())
+
+        result = CliRunner().invoke(
+            pair, ["--data-dir", str(tmp_path), "--addr", "ws://10.0.0.1:9631"]
+        )
+
+        assert result.exit_code == 0
+        assert "⚠" not in result.output and "No worker is running" not in result.output
+
+    def test_warns_for_a_no_iroh_worker_without_addr(self, tmp_path, monkeypatch):
+        from sleap_connect.protocol_v1 import cli as v1_cli
+
+        monkeypatch.setattr(v1_cli.daemon, "read_running", lambda d: object())
+
+        result = CliRunner().invoke(pair, ["--data-dir", str(tmp_path)])
+
+        text = " ".join(result.output.split())
+        assert "started with --no-iroh" in text
+        assert "--addr ws://" in text
+
     def test_prints_a_one_line_pairing_code_by_default(self, tmp_path):
         runner = CliRunner()
 

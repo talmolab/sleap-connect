@@ -620,9 +620,10 @@ def pair(addrs: tuple, ttl: int, data_dir: str, as_json: bool):
     """Print a one-time code to pair a device (sleap-app) with this worker.
 
     Copy the one-line code (it starts with sleap1) and paste it into sleap-app's
-    Connect window. It works once and expires after --ttl seconds. The worker
-    doesn't have to be running when you make the code. Pass --json for the full
-    pairing details as JSON, for scripts.
+    Connect window. It works once and expires after --ttl seconds. Run it while
+    the worker is running ('sleap-connect serve'): the code then includes how to
+    reach it, and you're warned if it doesn't. Pass --json for the full pairing
+    details as JSON, for scripts.
 
     Examples:
         sleap-connect pair
@@ -663,6 +664,31 @@ def pair(addrs: tuple, ttl: int, data_dir: str, as_json: bool):
     click.echo("")
     click.echo("In SLEAP: Connect → Pair a worker → paste the code")
     click.echo(f"Expires in {ttl} seconds.")
+    _warn_if_unreachable(data_dir_path, iroh_section, addrs)
+
+
+def _warn_if_unreachable(data_dir: Path, iroh_section, addrs: tuple) -> None:
+    """Say so when a device can't connect with the code just printed.
+
+    The code only tells a device how to reach the worker (its relay, from
+    the running worker) when `serve` is running, or when --addr is given.
+    """
+    if daemon.read_running(data_dir) is None:
+        problem = (
+            "No worker is running, so a device can't connect with this code. "
+            f"Start it with 'sleap-connect serve{_data_dir_arg(data_dir)}', then run "
+            f"'sleap-connect pair{_data_dir_arg(data_dir)}' again for a code that works."
+        )
+    elif iroh_section is None and not addrs:
+        problem = (
+            "This code doesn't say how to reach the worker: it was started with "
+            "--no-iroh. Add the address devices should use, e.g. "
+            "'sleap-connect pair --addr ws://<this machine's IP>:9631'."
+        )
+    else:
+        return
+    click.echo("", err=True)
+    click.echo(click.style(_glyph("⚠", "!") + " " + problem, fg="yellow"), err=True)
 
 
 def _print_shared_folders(file_manager: SharedFolderFileManager) -> None:
