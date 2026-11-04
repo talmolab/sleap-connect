@@ -204,6 +204,36 @@ class TestAuthProve:
         assert reply.error["code"] == "auth.untrusted"
         await ws.close()
 
+    async def test_the_workers_own_key_is_trusted_without_pairing(
+        self, running_server, identity, trust_store
+    ):
+        """How `sleap-connect jobs stop/cancel` reaches the running worker."""
+        _server, port = running_server
+        ws, server_hello = await _hello(port, identity.node_id)
+
+        reply = await _call(
+            ws, 1, "auth.prove", {"sig": identity.sign(server_hello.nonce)}
+        )
+        echo = await _call(ws, 2, "test.echo", {"x": 1})
+
+        assert reply.result == {}
+        assert echo.result == {"echoed": {"x": 1}}
+        assert trust_store.list_devices() == []  # not recorded as a device
+        await ws.close()
+
+    async def test_the_workers_node_id_without_its_key_is_rejected(
+        self, running_server, identity
+    ):
+        _server, port = running_server
+        other_priv, _ = _client_identity()
+        ws, server_hello = await _hello(port, identity.node_id)
+
+        sig = sign_nonce(other_priv, server_hello.nonce)
+        reply = await _call(ws, 1, "auth.prove", {"sig": sig})
+
+        assert reply.error["code"] == "auth.bad_signature"
+        await ws.close()
+
 
 class TestClientsList:
     """clients.list and what pairing/reconnecting records about a device."""

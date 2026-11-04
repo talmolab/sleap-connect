@@ -41,6 +41,7 @@ click.rich_click.APPEND_METAVARS_HELP = True
 _TOP_GROUPS = [
     {"name": "Worker", "commands": ["serve", "status", "doctor", "shell-hook"]},
     {"name": "Devices", "commands": ["pair", "clients"]},
+    {"name": "Jobs", "commands": ["jobs"]},
     {"name": "Shared folders", "commands": ["folders", "add-folder", "remove-folder"]},
     {"name": "Legacy", "commands": ["legacy"]},
 ]
@@ -3879,6 +3880,7 @@ from sleap_connect.protocol_v1.cli import pair as protocol_v1_pair
 from sleap_connect.protocol_v1.cli import serve as protocol_v1_serve
 from sleap_connect.protocol_v1.cli import shell_hook_group as protocol_v1_shell_hook
 from sleap_connect.protocol_v1.cli import status as protocol_v1_status
+from sleap_connect.protocol_v1.jobs_cli import jobs as protocol_v1_jobs
 
 cli.add_command(protocol_v1_serve)
 cli.add_command(protocol_v1_pair)
@@ -3888,6 +3890,7 @@ cli.add_command(protocol_v1_remove_folder)
 cli.add_command(protocol_v1_folders)
 cli.add_command(protocol_v1_status)
 cli.add_command(protocol_v1_shell_hook)
+cli.add_command(protocol_v1_jobs)
 
 
 # =============================================================================

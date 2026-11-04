@@ -65,8 +65,18 @@ class AuthMethods:
         server.on_disconnect(self._record_disconnect)
         # Unpairing takes effect on a device's next request or pushed event.
         server.set_access_check(
-            lambda conn: self.trust_store.is_trusted_cached(conn.peer_node_id)
+            lambda conn: self._is_self(conn.peer_node_id)
+            or self.trust_store.is_trusted_cached(conn.peer_node_id)
         )
+
+    def _is_self(self, node_id) -> bool:
+        """Whether `node_id` is this worker's own identity.
+
+        The worker trusts its own key without pairing: it's how the
+        `sleap-connect jobs stop/cancel` CLI, running on this machine with
+        access to the worker's identity file, talks to the running worker.
+        """
+        return node_id is not None and node_id == self.identity.node_id
 
     async def pair_claim(self, params: dict, conn: Connection) -> dict:
         """Handle `pair.claim` — first-contact trust via a one-time secret.
@@ -140,7 +150,8 @@ class AuthMethods:
         Verifies `params["sig"]` is this connection's claimed node_id
         signing *our* nonce from this connection's `hello` (see
         `server.Connection.own_nonce`), then checks that node_id is
-        actually in the trust store.
+        actually in the trust store (or is this worker's own key — see
+        `_is_self`).
         """
         if conn.peer_node_id is None or conn.own_nonce is None:
             raise ProtocolError(
@@ -153,7 +164,9 @@ class AuthMethods:
                 AUTH_BAD_SIGNATURE, "Signature does not match this connection's nonce"
             )
 
-        if not self.trust_store.is_trusted(conn.peer_node_id):
+        if not self._is_self(conn.peer_node_id) and not self.trust_store.is_trusted(
+            conn.peer_node_id
+        ):
             raise ProtocolError(
                 AUTH_UNTRUSTED,
                 f"Node {conn.peer_node_id!r} is not paired with this worker",
