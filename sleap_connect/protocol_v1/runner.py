@@ -54,7 +54,7 @@ DEFAULT_BLOB_PORT_OFFSET = 1
 
 
 # The names this package has been published under (see pyproject.toml).
-DISTRIBUTION_NAMES = ("sleap-rtc", "sleap-connect")
+DISTRIBUTION_NAMES = ("sleap-connect", "sleap-rtc")
 
 
 def worker_version() -> str:

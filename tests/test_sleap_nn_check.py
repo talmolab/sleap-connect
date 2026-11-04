@@ -111,7 +111,7 @@ class TestCheck:
         check = check_sleap_nn()
 
         assert check.path is None and not check.ok
-        assert 'sleap-rtc[nn]' in check.hint()
+        assert 'sleap-connect[nn]' in check.hint()
 
     def test_python_from_a_long_path_sh_shebang(self, tmp_path):
         command = tmp_path / "sleap-nn"
@@ -151,7 +151,7 @@ class TestServeAndDoctorOutput:
         v1_cli._print_sleap_nn_check(SleapNNCheck(path=None))
         out = capsys.readouterr().out
         assert "sleap-nn isn't installed" in out
-        assert 'uv tool install "sleap-rtc[nn]"' in out
+        assert 'uv tool install "sleap-connect[nn]"' in out
 
     def test_skipped_check_prints_nothing(self, capsys, monkeypatch):
         monkeypatch.setenv("SLEAP_CONNECT_SKIP_SLEAP_NN_CHECK", "1")
