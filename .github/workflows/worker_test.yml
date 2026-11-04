@@ -1,14 +1,11 @@
 name: Build and Push sleap-rtc-worker (Test Workflow)
 
+# Legacy worker image (the room-based `sleap-rtc worker`, installed from PyPI,
+# not built from this repo). Manual only: it used to rebuild on every feature
+# branch push and overwrite the published tags. To be removed with the legacy
+# code (talmolab/sleap-connect#113).
 on:
-  push:
-    branches-ignore:
-      - main
-    paths:
-      - sleap_connect/worker/**
-      - sleap_connect/**/*.py
-      - pyproject.toml
-      - .github/workflows/worker_test.yml
+  workflow_dispatch:
 
 jobs:
   build:
