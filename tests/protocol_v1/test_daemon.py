@@ -69,6 +69,16 @@ def _accepts_connections(port, host="127.0.0.1") -> bool:
         return False
 
 
+def _plain(output: str) -> str:
+    """CLI output with colors, rich-click's box borders and line wrapping
+    removed, so a message can be matched however wide the terminal is."""
+    import re
+
+    text = re.sub(r"\x1b\[[0-9;]*m", "", output)
+    text = re.sub(r"[│╭╮╰╯─]", " ", text)
+    return " ".join(text.split())
+
+
 def _non_loopback_ip():
     """This machine's address on its network (no packets are sent), or None."""
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
@@ -442,12 +452,12 @@ class TestDaemonize:
     def test_local_only_refuses_iroh_and_a_network_host(self, tmp_path):
         both = _run_cli("serve", "--local-only", "--iroh", "--data-dir", str(tmp_path))
         assert both.returncode == 2
-        assert "turns iroh off" in both.stderr
+        assert "turns iroh off" in _plain(both.stderr)
         host = _run_cli(
             "serve", "--local-only", "--host", "0.0.0.0", "--data-dir", str(tmp_path)
         )
         assert host.returncode == 2
-        assert "--host 0.0.0.0" in host.stderr
+        assert "--host 0.0.0.0" in _plain(host.stderr)
         assert daemon.read_running(tmp_path) is None
 
     def test_stop_with_nothing_running(self, tmp_path):
