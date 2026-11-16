@@ -15,6 +15,7 @@ worker that also comes back after a reboot, is a separate follow-up.
 """
 
 import asyncio
+import ipaddress
 import json
 import os
 import shlex
@@ -32,6 +33,7 @@ import rich_click as click
 from sleap_connect.jobs.sleap_nn import SleapNNCheck, check_sleap_nn
 from sleap_connect.protocol_v1 import daemon, shell_hook
 from sleap_connect.protocol_v1.runner import (
+    DEFAULT_BLOB_PORT_OFFSET,
     DEFAULT_DATA_DIR,
     DEFAULT_PORT,
     devices_path,
@@ -49,6 +51,11 @@ from sleap_connect.protocol_v1.shared_folders import (
     parse_mount,
     resolve_folder,
 )
+
+# `serve`'s bind address: every interface by default, loopback with
+# --local-only.
+DEFAULT_HOST = "0.0.0.0"
+LOCAL_ONLY_HOST = "127.0.0.1"
 
 # How long a pairing code works for (`pair --ttl`'s default, and the code
 # `serve` prints at startup).
@@ -122,8 +129,20 @@ def _share_folder(
 
 @click.command(name="serve")
 @click.argument("folder", required=False)
-@click.option("--host", default="0.0.0.0", show_default=True, help="Bind address.")
+@click.option(
+    "--host",
+    default=None,
+    help=f"Bind address. [default: {DEFAULT_HOST}, or {LOCAL_ONLY_HOST} with "
+    "--local-only]",
+)
 @click.option("--port", default=DEFAULT_PORT, show_default=True, help="Bind port.")
+@click.option(
+    "--local-only",
+    is_flag=True,
+    help=f"Only accept connections from this machine: listen on {LOCAL_ONLY_HOST} "
+    "and turn iroh off. For a worker you reach through an SSH tunnel or port "
+    "forward (e.g. on Run:ai), so nothing listens on the network.",
+)
 @click.option(
     "--blob-port",
     default=None,
@@ -160,12 +179,12 @@ def _share_folder(
 )
 @click.option(
     "--iroh/--no-iroh",
-    default=True,
-    show_default=True,
+    default=None,
     help="Also accept connections over iroh (item 2.2) — works even "
     "without a shared network/VPN/Tailscale, via iroh's own "
     "direct-then-relay dialing. Additive: the plain WS binding above is "
-    "always available regardless of this flag.",
+    "always available regardless of this flag. [default: on; off with "
+    "--local-only]",
 )
 @click.option(
     "--metrics/--no-metrics",
@@ -203,14 +222,15 @@ def _share_folder(
 )
 def serve(
     folder: Optional[str],
-    host: str,
+    host: Optional[str],
     port: int,
+    local_only: bool,
     blob_port: Optional[int],
     data_dir: str,
     mounts: tuple,
     yes: bool,
     serve_folder: Optional[str],
-    iroh: bool,
+    iroh: Optional[bool],
     metrics: bool,
     foreground: bool,
     daemonize: bool,
@@ -235,10 +255,13 @@ def serve(
 
     Devices connect over your network when they can reach this machine, and
     through a relay when they can't (--no-iroh turns the relay off).
+    --local-only accepts connections from this machine only (no network, no
+    relay); reach it from elsewhere through an SSH tunnel or port forward.
 
     Examples:
         cd /data/project && sleap-connect serve
         sleap-connect serve /data/project --mount /data/videos:lab-data
+        sleap-connect serve --local-only
         sleap-connect serve --stop
     """
     data_dir_path = Path(data_dir).expanduser()
@@ -246,6 +269,8 @@ def serve(
     if stop:
         _stop(data_dir_path)
         return
+
+    host, iroh = _resolve_binding(host, iroh, local_only)
 
     if folder is not None:
         serve_folder_path = resolve_folder(folder)
@@ -288,6 +313,7 @@ def serve(
                 serve_folder=serve_folder_path,
                 iroh=iroh,
                 metrics=metrics,
+                local_only=local_only,
             ),
             data_dir_path,
         )
@@ -306,6 +332,7 @@ def serve(
                 "port": port,
                 "blob_port": blob_port,
                 "iroh": iroh,
+                "local_only": local_only,
                 "background": ready_file is not None,
             },
         )
@@ -322,10 +349,54 @@ def serve(
                 iroh,
                 metrics,
                 ready_file=Path(ready_file) if ready_file else None,
+                local_only=local_only,
             )
         )
     finally:
         daemon.release_pidfile(data_dir_path)
+
+
+def _is_loopback(host: str) -> bool:
+    """Whether `host` is an address only this machine can reach."""
+    if host.lower() == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+def _resolve_binding(
+    host: Optional[str], iroh: Optional[bool], local_only: bool
+) -> tuple:
+    """`serve`'s bind address and whether iroh is on, from its options.
+
+    --local-only means nothing on this machine's network interfaces accepts
+    a connection: the WS and blob ports listen on loopback, and iroh is off.
+    iroh can't be kept: even bound to 127.0.0.1 it still opens a UDP socket
+    on every IPv6 interface, and its relay lets any device that has the
+    worker's ID reach it from anywhere.
+
+    Returns:
+        (host, iroh).
+
+    Raises:
+        click.UsageError: --local-only with a non-loopback --host, or --iroh.
+    """
+    if not local_only:
+        return (host or DEFAULT_HOST, True if iroh is None else iroh)
+    if host is not None and not _is_loopback(host):
+        raise click.UsageError(
+            f"--local-only listens on {LOCAL_ONLY_HOST}; it can't be combined with "
+            f"--host {host}. Drop one of them."
+        )
+    if iroh:
+        raise click.UsageError(
+            "--local-only turns iroh off: iroh listens on the network and lets "
+            "devices reach this worker through a public relay. Drop --iroh or "
+            "--local-only."
+        )
+    return (host or LOCAL_ONLY_HOST, False)
 
 
 def _start_sleap_nn_check():
@@ -505,6 +576,7 @@ async def _serve_async(
     enable_iroh: bool = True,
     enable_metrics: bool = True,
     ready_file: Optional[Path] = None,
+    local_only: bool = False,
 ) -> None:
     # SIGTERM (`serve --stop`, `kill`, a service manager) gets the same clean
     # shutdown as Ctrl-C instead of dying mid-write. Windows has no SIGTERM
@@ -531,14 +603,17 @@ async def _serve_async(
     try:
         click.echo(click.style("sleap-connect worker", bold=True))
         click.echo(f"  node_id:   {worker.identity.node_id}")
-        click.echo(f"  address:   ws://{host}:{port}")
-        click.echo(f"  blob port: {worker.blob_port}")
+        only_here = " (this machine only)" if local_only else ""
+        click.echo(f"  address:   ws://{host}:{port}{only_here}")
+        click.echo(f"  blob port: {worker.blob_port}{only_here}")
         click.echo(f"  data dir:  {worker.data_dir}")
         if worker.iroh_endpoint is not None:
             click.echo(
                 "  iroh:      enabled (same node_id as above; a client "
                 "reachable only via relay/hole-punch can still connect)"
             )
+        elif local_only:
+            click.echo("  iroh:      off (--local-only)")
 
         if worker.reattach_outcomes:
             click.echo("")
@@ -644,6 +719,8 @@ def pair(addrs: tuple, ttl: int, data_dir: str, as_json: bool):
     from sleap_connect.protocol_v1.pair_code import encode_pair_code
 
     data_dir_path = Path(data_dir)
+    if not addrs:
+        addrs = _local_only_addrs(data_dir_path)
     ticket, iroh_section = _mint_ticket(data_dir_path, addrs, ttl)
 
     if as_json:
@@ -696,8 +773,9 @@ def _print_startup_pair_code(data_dir: Path) -> None:
     """
     from sleap_connect.protocol_v1.pair_code import encode_pair_code
 
+    addrs = _local_only_addrs(data_dir)
     try:
-        ticket, iroh_section = _mint_ticket(data_dir)
+        ticket, iroh_section = _mint_ticket(data_dir, addrs)
     except Exception as e:  # never fail a started worker over this
         click.echo(f"  (Couldn't make a pairing code: {e}. Run 'sleap-connect pair'.)")
         return
@@ -712,7 +790,44 @@ def _print_startup_pair_code(data_dir: Path) -> None:
         f"  Works once, expires in {mins} min. New code: "
         f"sleap-connect pair{_data_dir_arg(data_dir)}"
     )
-    _warn_if_unreachable(data_dir, iroh_section, ())
+    _warn_if_unreachable(data_dir, iroh_section, addrs)
+
+
+def _local_ports(details: dict) -> tuple:
+    """(WS port, blob port) a running worker recorded in its pidfile."""
+    port = details.get("port", DEFAULT_PORT)
+    blob_port = details.get("blob_port")
+    if blob_port is None:
+        blob_port = port + DEFAULT_BLOB_PORT_OFFSET
+    return port, blob_port
+
+
+def _running_local_only(data_dir: Path) -> Optional[dict]:
+    """The running worker's pidfile details if it's --local-only, else None."""
+    if daemon.read_running(data_dir) is None:
+        return None
+    details = daemon.read_details(data_dir)
+    return details if details.get("local_only") else None
+
+
+def _local_only_addrs(data_dir: Path) -> tuple:
+    """The address a pairing code carries for a --local-only worker.
+
+    Its own loopback address: a device on another computer dials that on its
+    own machine, which works once an SSH tunnel / port forward maps the same
+    port numbers to this worker. Empty when the worker isn't --local-only.
+    """
+    details = _running_local_only(data_dir)
+    if details is None:
+        return ()
+    port, _ = _local_ports(details)
+    return (f"ws://{_url_host(details)}:{port}",)
+
+
+def _url_host(details: dict) -> str:
+    """A running worker's bind address as it goes in a URL ([::1] for IPv6)."""
+    host = details.get("host") or LOCAL_ONLY_HOST
+    return f"[{host}]" if ":" in host else host
 
 
 def _warn_if_unreachable(data_dir: Path, iroh_section, addrs: tuple) -> None:
@@ -720,7 +835,25 @@ def _warn_if_unreachable(data_dir: Path, iroh_section, addrs: tuple) -> None:
 
     The code only tells a device how to reach the worker (its relay, from
     the running worker) when `serve` is running, or when --addr is given.
+    For a --local-only worker, explain the tunnel it needs instead.
     """
+    local_only = _running_local_only(data_dir)
+    if local_only is not None:
+        port, blob_port = _local_ports(local_only)
+        host = _url_host(local_only)
+        click.echo("")
+        click.echo(
+            "This worker only accepts connections from this machine (--local-only)."
+        )
+        click.echo(
+            "From another computer, forward both of its ports first, keeping "
+            "the port numbers, e.g.:"
+        )
+        click.echo(
+            f"  ssh -L {port}:{host}:{port} -L {blob_port}:{host}:{blob_port} "
+            "<you>@<this machine>"
+        )
+        return
     if daemon.read_running(data_dir) is None:
         problem = (
             "No worker is running, so a device can't connect with this code. "
@@ -980,7 +1113,27 @@ def print_doctor_section(data_dir: Path = DEFAULT_DATA_DIR) -> bool:
     else:
         click.echo("  Paired clients: 0 (no trust store yet)")
 
+    click.echo(f"  Running: {_doctor_running_line(data_dir)}")
+
     return all_ok
+
+
+def _doctor_running_line(data_dir: Path) -> str:
+    """Whether a worker runs against `data_dir`, and who can reach it."""
+    if daemon.read_running(data_dir) is None:
+        return "no (start one with 'sleap-connect serve')"
+    details = daemon.read_details(data_dir)
+    if "port" not in details:
+        return "yes"
+    port, blob_port = _local_ports(details)
+    address = f"ws://{details.get('host', DEFAULT_HOST)}:{port}"
+    if details.get("local_only"):
+        return (
+            f"yes, {address} and blob port {blob_port}, this machine only "
+            "(--local-only; iroh off)"
+        )
+    reach = "your network" + (" and iroh" if details.get("iroh") else "")
+    return f"yes, {address}, reachable over {reach}"
 
 
 def _duration(secs: float) -> str:
@@ -1020,9 +1173,11 @@ def _print_worker_status(data_dir: Path, running: daemon.ServeProcess) -> None:
 
     rows = []
     if "port" in details:
-        address = f"ws://{details.get('host', '0.0.0.0')}:{details['port']}"
+        address = f"ws://{details.get('host', DEFAULT_HOST)}:{details['port']}"
         if details.get("iroh"):
             address += " · iroh"
+        if details.get("local_only"):
+            address += " (this machine only: --local-only)"
         rows.append(("Address", address))
     rows.append(("Data dir", shell_hook.display(data_dir)))
 

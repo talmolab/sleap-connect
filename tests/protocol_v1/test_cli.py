@@ -192,7 +192,10 @@ class TestStatusCommand:
         from sleap_connect.jobs.spec import TrainJobSpec
         from sleap_connect.jobs.store import JobStore
         from sleap_connect.protocol_v1 import daemon
-        from sleap_connect.protocol_v1.runner import open_shared_folders, open_trust_store
+        from sleap_connect.protocol_v1.runner import (
+            open_shared_folders,
+            open_trust_store,
+        )
 
         folder = tmp_path / "data"
         folder.mkdir()
@@ -348,3 +351,137 @@ class TestClientsRemove:
         result = CliRunner().invoke(clients, ["--data-dir", str(tmp_path)])
         assert result.exit_code == 0, result.output
         assert "4 paired devices." in result.output
+
+
+class TestLocalOnly:
+    """`serve --local-only`: nothing listens on the network, and `pair`,
+    `status` and `doctor` say so (talmolab/sleap-connect#122, item 5)."""
+
+    def _running_local_only(self, tmp_path, **details):
+        from sleap_connect.protocol_v1 import daemon
+
+        # This test process stands in for a running `serve --local-only`.
+        daemon.acquire_pidfile(
+            tmp_path,
+            {
+                "host": "127.0.0.1",
+                "port": 9700,
+                "blob_port": None,
+                "iroh": False,
+                "local_only": True,
+                "background": True,
+                **details,
+            },
+        )
+
+    # The bind address and iroh setting each combination of options gives.
+    def test_resolve_binding(self):
+        import click
+        import pytest
+
+        from sleap_connect.protocol_v1.cli import _resolve_binding
+
+        assert _resolve_binding(None, None, False) == ("0.0.0.0", True)
+        assert _resolve_binding("10.0.0.5", False, False) == ("10.0.0.5", False)
+        assert _resolve_binding(None, None, True) == ("127.0.0.1", False)
+        assert _resolve_binding(None, False, True) == ("127.0.0.1", False)
+        assert _resolve_binding("::1", None, True) == ("::1", False)
+        assert _resolve_binding("localhost", None, True) == ("localhost", False)
+        with pytest.raises(click.UsageError, match="--host 0.0.0.0"):
+            _resolve_binding("0.0.0.0", None, True)
+        with pytest.raises(click.UsageError, match="turns iroh off"):
+            _resolve_binding(None, True, True)
+
+    # The pairing code must point at the loopback address a tunnel forwards.
+    def test_pair_code_carries_the_loopback_address(self, tmp_path):
+        from sleap_connect.protocol_v1 import daemon
+
+        self._running_local_only(tmp_path)
+        try:
+            result = CliRunner().invoke(pair, ["--data-dir", str(tmp_path)])
+        finally:
+            daemon.release_pidfile(tmp_path)
+
+        assert result.exit_code == 0, result.output
+        code = next(
+            line for line in result.output.splitlines() if line.startswith("sleap1")
+        )
+        assert decode_pair_code(code).addrs == ["ws://127.0.0.1:9700"]
+        text = " ".join(result.output.split())
+        assert "only accepts connections from this machine (--local-only)" in text
+        assert "ssh -L 9700:127.0.0.1:9700 -L 9701:127.0.0.1:9701" in text
+        # Not the --no-iroh advice to add this machine's network IP.
+        assert "--no-iroh" not in text
+
+    # An explicit --addr still wins over the loopback default.
+    def test_pair_addr_option_overrides_the_loopback_address(self, tmp_path):
+        from sleap_connect.protocol_v1 import daemon
+
+        self._running_local_only(tmp_path)
+        try:
+            result = CliRunner().invoke(
+                pair,
+                ["--data-dir", str(tmp_path), "--addr", "ws://127.0.0.1:19631"],
+            )
+        finally:
+            daemon.release_pidfile(tmp_path)
+
+        code = next(
+            line for line in result.output.splitlines() if line.startswith("sleap1")
+        )
+        assert decode_pair_code(code).addrs == ["ws://127.0.0.1:19631"]
+
+    # `status` must not suggest a local-only worker is on the network.
+    def test_status_says_this_machine_only(self, tmp_path):
+        from sleap_connect.protocol_v1 import daemon
+        from sleap_connect.protocol_v1.cli import status
+
+        self._running_local_only(tmp_path)
+        try:
+            result = CliRunner().invoke(status, ["--data-dir", str(tmp_path)])
+        finally:
+            daemon.release_pidfile(tmp_path)
+
+        assert result.exit_code == 0, result.output
+        assert "ws://127.0.0.1:9700 (this machine only: --local-only)" in result.output
+        assert "iroh" not in result.output
+
+    # `doctor` reports who can reach the running worker.
+    def test_doctor_says_this_machine_only(self, tmp_path, capsys):
+        from sleap_connect.protocol_v1 import daemon
+
+        self._running_local_only(tmp_path, blob_port=9800)
+        try:
+            print_doctor_section(data_dir=tmp_path)
+        finally:
+            daemon.release_pidfile(tmp_path)
+
+        out = " ".join(capsys.readouterr().out.split())
+        assert (
+            "Running: yes, ws://127.0.0.1:9700 and blob port 9800, this machine "
+            "only (--local-only; iroh off)"
+        ) in out
+
+    # Without --local-only, doctor says the worker is on the network.
+    def test_doctor_reports_a_network_worker(self, tmp_path, capsys):
+        from sleap_connect.protocol_v1 import daemon
+
+        daemon.acquire_pidfile(
+            tmp_path, {"host": "0.0.0.0", "port": 9631, "iroh": True}
+        )
+        try:
+            print_doctor_section(data_dir=tmp_path)
+        finally:
+            daemon.release_pidfile(tmp_path)
+
+        out = capsys.readouterr().out
+        assert (
+            "Running: yes, ws://0.0.0.0:9631, reachable over your network and iroh"
+            in out
+        )
+
+    # With no worker, doctor says so instead of guessing an address.
+    def test_doctor_reports_no_worker(self, tmp_path, capsys):
+        print_doctor_section(data_dir=tmp_path)
+
+        assert "Running: no" in capsys.readouterr().out

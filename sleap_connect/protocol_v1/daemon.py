@@ -268,6 +268,7 @@ def serve_argv(
     iroh: bool,
     metrics: bool,
     serve_folder: Optional[Path] = None,
+    local_only: bool = False,
 ) -> List[str]:
     """Build the `serve` arguments that reproduce these options in a child."""
     argv = ["serve", "--host", host, "--port", str(port), "--data-dir", str(data_dir)]
@@ -279,6 +280,8 @@ def serve_argv(
         argv += ["--serve-folder", str(serve_folder)]
     argv.append("--iroh" if iroh else "--no-iroh")
     argv.append("--metrics" if metrics else "--no-metrics")
+    if local_only:
+        argv.append("--local-only")
     argv.append("--foreground")
     return argv
 

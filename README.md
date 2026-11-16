@@ -51,7 +51,7 @@ The full guide (connection routes, the Connect window, troubleshooting) is in th
 
 | Command | What it does |
 |---|---|
-| `sleap-connect serve [FOLDER]` | Start the worker in the background, sharing FOLDER (default: the current folder), and print a pairing code. `--stop` stops it; `--foreground` keeps it attached to the terminal (Ctrl-C to stop). |
+| `sleap-connect serve [FOLDER]` | Start the worker in the background, sharing FOLDER (default: the current folder), and print a pairing code. `--stop` stops it; `--foreground` keeps it attached to the terminal (Ctrl-C to stop); `--local-only` accepts connections from this machine only (see below). |
 | `sleap-connect status` | Show whether the worker is running: PID, uptime, address, shared folders, paired devices, jobs. |
 | `sleap-connect pair` | Print a new one-time pairing code (`serve` prints one when it starts). Warns if the code can't connect, e.g. no worker is running. |
 | `sleap-connect folders` | List the folders shared with paired devices. |
@@ -75,6 +75,11 @@ The full guide (connection routes, the Connect window, troubleshooting) is in th
   to `ws://<worker>:9631`. The desktop app can also connect over iroh, which goes through a relay
   first and then switches to a direct connection when it can, so it works across networks.
   Relays only see encrypted traffic.
+- **Behind a tunnel (`serve --local-only`).** For a worker you reach through an SSH tunnel or a
+  port forward (e.g. on Run:ai), `--local-only` listens on `127.0.0.1` instead of every network
+  interface and turns iroh off, so nothing on the network can connect. Forward both ports with
+  the same numbers (`ssh -L 9631:127.0.0.1:9631 -L 9632:127.0.0.1:9632 <you>@<worker>`); the
+  pairing code then points at `ws://127.0.0.1:9631`, which the tunnel carries to the worker.
 - **Shared folders.** Paired devices can only browse the folders the worker shares: the one
   `serve` started in, plus any added with `add-folder`. The worker's own settings folder
   (`~/.sleap-connect`) is never shared.
