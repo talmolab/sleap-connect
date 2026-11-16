@@ -15,7 +15,9 @@ needed for stage 1.10's "predictions back as a blob" goal, and are left
 for whenever that rung is actually built.
 """
 
+import ipaddress
 import re
+import socket
 import threading
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -125,6 +127,19 @@ def _make_handler(blob_index: BlobIndex) -> type:
     return BlobRequestHandler
 
 
+class _IPv6ThreadingHTTPServer(ThreadingHTTPServer):
+    """`ThreadingHTTPServer` on an IPv6 socket (it's IPv4-only by default)."""
+
+    address_family = socket.AF_INET6
+
+
+def _is_ipv6_literal(host: str) -> bool:
+    try:
+        return ipaddress.ip_address(host).version == 6
+    except ValueError:
+        return False
+
+
 def make_blob_http_server(
     blob_index: BlobIndex, host: str, port: int
 ) -> ThreadingHTTPServer:
@@ -132,7 +147,8 @@ def make_blob_http_server(
 
     Args:
         blob_index: Where to resolve a requested sha256 to a file.
-        host: Bind address.
+        host: Bind address. An IPv6 address (e.g. ``::1``) gets an IPv6
+            socket, like the WS server on the same host.
         port: Bind port.
 
     Returns:
@@ -140,7 +156,10 @@ def make_blob_http_server(
         background thread; see `run_blob_http_server_in_thread`) and
         `.shutdown()` / `.server_close()` to stop it.
     """
-    return ThreadingHTTPServer((host, port), _make_handler(blob_index))
+    server_class = (
+        _IPv6ThreadingHTTPServer if _is_ipv6_literal(host) else ThreadingHTTPServer
+    )
+    return server_class((host, port), _make_handler(blob_index))
 
 
 def run_blob_http_server_in_thread(server: ThreadingHTTPServer) -> threading.Thread:

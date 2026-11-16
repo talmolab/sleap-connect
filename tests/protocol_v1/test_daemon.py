@@ -88,6 +88,15 @@ def _plain(output: str) -> str:
     return " ".join(" ".join(lines).split())
 
 
+def _ipv6_loopback_available() -> bool:
+    try:
+        with socket.socket(socket.AF_INET6, socket.SOCK_STREAM) as s:
+            s.bind(("::1", 0))
+        return True
+    except OSError:
+        return False
+
+
 def _non_loopback_ip():
     """This machine's address on its network (no packets are sent), or None."""
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
@@ -161,6 +170,23 @@ class TestPidfile:
         assert details["port"] == 8765
         assert details["background"] is True
         assert details["pid"] == os.getpid()
+
+    # Bound ports are only known once listening; `pair`/`status` read them here.
+    def test_update_details_adds_to_this_processes_pidfile(self, tmp_path):
+        daemon.acquire_pidfile(tmp_path, {"port": 0, "host": "127.0.0.1"})
+        daemon.update_details(tmp_path, {"port": 54321, "blob_port": 54322})
+        details = daemon.read_details(tmp_path)
+        assert details["port"] == 54321 and details["blob_port"] == 54322
+        assert details["host"] == "127.0.0.1"
+        assert daemon.read_running(tmp_path).pid == os.getpid()
+
+    # Another worker's pidfile is never rewritten.
+    def test_update_details_leaves_another_processes_pidfile_alone(self, tmp_path):
+        tmp_path.mkdir(exist_ok=True)
+        other = {"pid": os.getpid() + 1, "started_at": 1.0, "port": 9631}
+        daemon.pid_path(tmp_path).write_text(json.dumps(other))
+        daemon.update_details(tmp_path, {"port": 1})
+        assert daemon.read_details(tmp_path) == other
 
 
 class TestRegistry:
@@ -454,6 +480,41 @@ class TestDaemonize:
             assert details["local_only"] is True and details["iroh"] is False
             status = _run_cli("status", "--data-dir", str(tmp_path))
             assert "this machine only" in status.stdout
+        finally:
+            _run_cli("serve", "--stop", "--data-dir", str(tmp_path))
+
+    # `--host ::1` crashed at startup, and `--port 0` put port 0 in the code.
+    @pytest.mark.skipif(not _ipv6_loopback_available(), reason="no IPv6 loopback")
+    def test_local_only_on_ipv6_loopback_with_os_chosen_ports(self, tmp_path):
+        import re
+
+        from sleap_connect.protocol_v1.pair_code import decode_pair_code
+
+        started = _run_cli(
+            "serve",
+            "--local-only",
+            "--host",
+            "::1",
+            "--port",
+            "0",
+            "--blob-port",
+            "0",
+            "--data-dir",
+            str(tmp_path),
+            "--no-metrics",
+        )
+        assert started.returncode == 0, started.stdout + started.stderr
+        try:
+            details = daemon.read_details(tmp_path)
+            port, blob_port = details["port"], details["blob_port"]
+            assert port and blob_port
+            assert _accepts_connections(port, "::1")
+            assert _accepts_connections(blob_port, "::1")
+            codes = re.findall(r"sleap1[a-z2-7]+", started.stdout)
+            assert decode_pair_code(codes[0]).addrs == [f"ws://[::1]:{port}"]
+            assert f"ssh -L {port}:[::1]:{port}" in started.stdout
+            status = _run_cli("status", "--data-dir", str(tmp_path))
+            assert f"ws://[::1]:{port} (this machine only" in _plain(status.stdout)
         finally:
             _run_cli("serve", "--stop", "--data-dir", str(tmp_path))
 

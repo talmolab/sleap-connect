@@ -601,10 +601,15 @@ async def _serve_async(
     )
     sleap_nn_task = None
     try:
+        # The ports the OS actually bound (they differ from the options with
+        # --port 0), for the pairing code, `status` and `doctor`.
+        port = worker.ws_server.sockets[0].getsockname()[1]
+        daemon.update_details(data_dir, {"port": port, "blob_port": worker.blob_port})
+        address = f"ws://{_url_host({'host': host})}:{port}"
         click.echo(click.style("sleap-connect worker", bold=True))
         click.echo(f"  node_id:   {worker.identity.node_id}")
         only_here = " (this machine only)" if local_only else ""
-        click.echo(f"  address:   ws://{host}:{port}{only_here}")
+        click.echo(f"  address:   {address}{only_here}")
         click.echo(f"  blob port: {worker.blob_port}{only_here}")
         click.echo(f"  data dir:  {worker.data_dir}")
         if worker.iroh_endpoint is not None:
@@ -659,7 +664,7 @@ async def _serve_async(
                 {
                     "pid": os.getpid(),
                     "node_id": worker.identity.node_id,
-                    "address": f"ws://{host}:{port}",
+                    "address": address,
                     "blob_port": worker.blob_port,
                 },
             )
@@ -825,8 +830,10 @@ def _local_only_addrs(data_dir: Path) -> tuple:
 
 
 def _url_host(details: dict) -> str:
-    """A running worker's bind address as it goes in a URL ([::1] for IPv6)."""
-    host = details.get("host") or LOCAL_ONLY_HOST
+    """A worker's bind address as it goes in a URL ([::1] for IPv6)."""
+    host = details.get("host") or (
+        LOCAL_ONLY_HOST if details.get("local_only") else DEFAULT_HOST
+    )
     return f"[{host}]" if ":" in host else host
 
 
@@ -1126,7 +1133,7 @@ def _doctor_running_line(data_dir: Path) -> str:
     if "port" not in details:
         return "yes"
     port, blob_port = _local_ports(details)
-    address = f"ws://{details.get('host', DEFAULT_HOST)}:{port}"
+    address = f"ws://{_url_host(details)}:{port}"
     if details.get("local_only"):
         return (
             f"yes, {address} and blob port {blob_port}, this machine only "
@@ -1173,7 +1180,7 @@ def _print_worker_status(data_dir: Path, running: daemon.ServeProcess) -> None:
 
     rows = []
     if "port" in details:
-        address = f"ws://{details.get('host', DEFAULT_HOST)}:{details['port']}"
+        address = f"ws://{_url_host(details)}:{details['port']}"
         if details.get("iroh"):
             address += " · iroh"
         if details.get("local_only"):

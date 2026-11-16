@@ -169,3 +169,33 @@ class TestBlobHttpServer:
             assert resp.status == 200
             assert resp.headers["Content-Length"] == "0"
             assert resp.read() == b""
+
+
+def _ipv6_loopback_available() -> bool:
+    import socket
+
+    try:
+        with socket.socket(socket.AF_INET6, socket.SOCK_STREAM) as s:
+            s.bind(("::1", 0))
+        return True
+    except OSError:
+        return False
+
+
+# `serve --local-only --host ::1` crashed: the blob server only made IPv4 sockets.
+@pytest.mark.skipif(not _ipv6_loopback_available(), reason="no IPv6 loopback")
+async def test_serves_on_an_ipv6_address(tmp_path):
+    index = BlobIndex(tmp_path / "blobs.sqlite")
+    f = tmp_path / "predictions.slp"
+    f.write_bytes(b"hello")
+    sha256, size = await hash_file(f)
+    await index.register(sha256, str(f), size)
+    server = make_blob_http_server(index, "::1", 0)
+    run_blob_http_server_in_thread(server)
+    try:
+        port = server.server_address[1]
+        with _get(f"http://[::1]:{port}/blobs/{sha256}") as resp:
+            assert resp.read() == b"hello"
+    finally:
+        server.shutdown()
+        server.server_close()
