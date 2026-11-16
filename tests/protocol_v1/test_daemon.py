@@ -30,9 +30,14 @@ def _free_port() -> int:
         return s.getsockname()[1]
 
 
-def _run_cli(*args, timeout=90, cwd=None):
+def _run_cli(*args, timeout=90, cwd=None, env=None):
     return subprocess.run(
-        [*_CLI, *args], capture_output=True, text=True, timeout=timeout, cwd=cwd
+        [*_CLI, *args],
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+        cwd=cwd,
+        env=None if env is None else {**os.environ, **env},
     )
 
 
@@ -454,11 +459,21 @@ class TestDaemonize:
 
     # Asking for both is a contradiction, so it's refused before anything starts.
     def test_local_only_refuses_iroh_and_a_network_host(self, tmp_path):
-        both = _run_cli("serve", "--local-only", "--iroh", "--data-dir", str(tmp_path))
+        # A wide terminal, so Rich's error box doesn't wrap the message.
+        wide = {"COLUMNS": "200"}
+        both = _run_cli(
+            "serve", "--local-only", "--iroh", "--data-dir", str(tmp_path), env=wide
+        )
         assert both.returncode == 2
         assert "turns iroh off" in _plain(both.stderr)
         host = _run_cli(
-            "serve", "--local-only", "--host", "0.0.0.0", "--data-dir", str(tmp_path)
+            "serve",
+            "--local-only",
+            "--host",
+            "0.0.0.0",
+            "--data-dir",
+            str(tmp_path),
+            env=wide,
         )
         assert host.returncode == 2
         assert "--host 0.0.0.0" in _plain(host.stderr)
