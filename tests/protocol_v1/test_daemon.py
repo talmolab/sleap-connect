@@ -71,12 +71,16 @@ def _accepts_connections(port, host="127.0.0.1") -> bool:
 
 def _plain(output: str) -> str:
     """CLI output with colors, rich-click's box borders and line wrapping
-    removed, so a message can be matched however wide the terminal is."""
+    removed, so a message can be matched however wide the terminal is.
+
+    Box borders are trimmed from each line's ends only: on Windows Rich draws
+    the box in ASCII ("|", "+", "-"), and "-" also appears inside "--host".
+    """
     import re
 
     text = re.sub(r"\x1b\[[0-9;]*m", "", output)
-    text = re.sub(r"[│╭╮╰╯─]", " ", text)
-    return " ".join(text.split())
+    lines = (line.strip().strip("│|").strip() for line in text.splitlines())
+    return " ".join(" ".join(lines).split())
 
 
 def _non_loopback_ip():
