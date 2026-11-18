@@ -192,6 +192,32 @@ def acquire_pidfile(data_dir: Path, details: Optional[dict] = None) -> ServeProc
     raise AlreadyRunningError(running or me)
 
 
+def update_details(data_dir: Path, updates: dict) -> None:
+    """Add `updates` to the details in this process's pidfile.
+
+    For facts only known once the worker is listening (the ports the OS
+    actually bound). Does nothing if the pidfile isn't this process's.
+    Written to a temporary file and swapped in, so a concurrent
+    `read_running` never sees a half-written (and so "stale") file.
+    """
+    path = pid_path(data_dir)
+    data = read_details(data_dir)
+    if data.get("pid") != os.getpid():
+        return
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+    tmp.write_text(json.dumps({**data, **updates}))
+    for attempt in range(5):
+        try:
+            os.replace(tmp, path)
+            return
+        except PermissionError:
+            # Windows: a reader has the pidfile open for a moment.
+            if attempt == 4:
+                tmp.unlink(missing_ok=True)
+                raise
+            time.sleep(0.05)
+
+
 def release_pidfile(data_dir: Path) -> None:
     """Remove `data_dir`'s pidfile (and registry entry), but only if it is
     this process's.
@@ -268,6 +294,7 @@ def serve_argv(
     iroh: bool,
     metrics: bool,
     serve_folder: Optional[Path] = None,
+    local_only: bool = False,
 ) -> List[str]:
     """Build the `serve` arguments that reproduce these options in a child."""
     argv = ["serve", "--host", host, "--port", str(port), "--data-dir", str(data_dir)]
@@ -279,6 +306,8 @@ def serve_argv(
         argv += ["--serve-folder", str(serve_folder)]
     argv.append("--iroh" if iroh else "--no-iroh")
     argv.append("--metrics" if metrics else "--no-metrics")
+    if local_only:
+        argv.append("--local-only")
     argv.append("--foreground")
     return argv
 
